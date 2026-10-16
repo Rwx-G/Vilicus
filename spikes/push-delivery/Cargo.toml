@@ -1,0 +1,41 @@
+[package]
+name = "push-delivery"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E13: content-free push alerts through an ntfy-type UnifiedPush server, acknowledged per phone, with the D105 delivery verdict per phone and per server"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The version the spine Stack table pins. `net` for the collector listener and the client
+# sockets, `time` for the random schedule and the timeouts, `signal` for Ctrl-C on the 7-day
+# run, `sync` for the probe's channel.
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "io-util"] }
+# HTTP server (the acknowledgement collector) and client (the push webhook, the simulated
+# phone's subscription stream). hyper is the spine's HTTP layer (1.12.0); used directly rather
+# than through axum, because the collector has two routes and needs no router.
+hyper = { version = "=1.12.0", features = ["http1", "server", "client"] }
+# The tokio glue for hyper and its pooled client; nothing else of hyper-util is enabled.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "http1", "client-legacy", "server"] }
+# Request and response bodies (full bodies and a size limit on the acknowledgement).
+http-body-util = "0.1"
+bytes = "1"
+# HTTPS for the push webhook: a public server, or the self-hosted one behind TLS on the real run.
+# rustls with the aws-lc-rs provider is the spine's TLS stack (0.23.45); hyper-rustls is the
+# connector that plugs it into the hyper client. Roots: the bundled Mozilla set plus an optional
+# household CA file (pki-types reads the PEM file).
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "aws-lc-rs", "tls12", "webpki-tokio"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-pki-types = { version = "1.12", features = ["std"] }
+webpki-roots = "1"
+# The ntfy JSON stream and poll responses (simulated phone and the content audit), read as
+# untyped values so that the audit can refuse any field it does not know.
+serde_json = "1"
+# 128-bit alert ids and topic names, and the random send schedule, from the OS source.
+getrandom = "0.3"
+
+[dev-dependencies]
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "time", "test-util"] }

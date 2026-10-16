@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vilicus E2 spike</title>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<h1>Vilicus E2 spike: passkey login and action-bound step-up</h1>
+<p>
+  <label>User name <input id="username" value="owner" autocomplete="username webauthn"></label>
+</p>
+<p>
+  <button id="register" type="button">Register a passkey</button>
+  <button id="login" type="button">Log in</button>
+  <button id="step-up" type="button">Approve a sample action</button>
+</p>
+<pre id="status">ready</pre>
+</body>
+</html>

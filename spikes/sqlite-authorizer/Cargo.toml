@@ -1,0 +1,16 @@
+[package]
+name = "sqlite-authorizer"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike: E11 SQLite authorizer against hostile migrations, on the SQLCipher build the product uses"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# bundled-sqlcipher compiles the SQLCipher amalgamation shipped with libsqlite3-sys and links
+# the system libcrypto (Debian 13 libssl3), as the spine Stack table states. hooks provides the
+# authorizer API.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher", "hooks"] }

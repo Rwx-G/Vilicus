@@ -1,0 +1,5 @@
+# Build and test image for the E11 spike: Debian 13 (trixie), the spine's Rust line, and the
+# components the checks need. libssl-dev comes with the base image. Pinned by digest so a moved
+# tag cannot change the toolchain under a recorded result (rust:1.99-trixie, rustc 1.99.1).
+FROM rust:1.99-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+RUN rustup component add clippy rustfmt

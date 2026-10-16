@@ -1,0 +1,27 @@
+[package]
+name = "egress-filter"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E14: CONNECT-only egress proxy with an exact-hostname allowlist per caller, tested against real client traffic"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The version the spine Stack table pins. `net` gives the Unix listener with peer credentials, the
+# TCP dialer and `lookup_host`, `io-util` the relay, `time` the timeouts, `sync` the per-caller
+# connection semaphore, `rt-multi-thread` and `macros` the runtime. The resolver is the system
+# one, so hickory-resolver is not needed (story 1.12 Implementation Notes).
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+
+[features]
+# Test networks only: accepts the `documentation-ranges-public` directive (the spike's simulated
+# internet lives in documentation ranges) and exposes the ClientHello builder to the integration
+# tests. A release build leaves it off, so the directive is refused at load.
+test-network = []
+
+[[test]]
+name = "proxy"
+required-features = ["test-network"]

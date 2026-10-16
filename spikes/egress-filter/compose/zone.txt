@@ -1,0 +1,37 @@
+# Scripted zone of the E14 test network. 203.0.113.0/24 and 2001:db8:113::/64 stand for the
+# public internet, 10.77.0.0/24 and fd00:77::/64 for the household LAN.
+a allowed.test 203.0.113.10
+aaaa allowed6.test 2001:db8:113::10
+a other.test 203.0.113.10
+a budget.test 203.0.113.10
+a forbidden.test 203.0.113.11
+a dns.google 203.0.113.11
+a cloudflare-dns.com 203.0.113.11
+a exfil-secret-payload.test 203.0.113.11
+# Public on the first A query, internal on every later one.
+rebind rebind-a.test 203.0.113.10 10.77.0.10
+rebind rebind-b.test 203.0.113.10 10.77.0.10
+a mixed.test 203.0.113.10
+a mixed.test 10.77.0.10
+a internal.test 10.77.0.10
+a loopback.test 127.0.0.1
+a zero.test 0.0.0.0
+a metadata.test 169.254.169.254
+a cgnat.test 100.64.0.1
+a mcast.test 224.0.0.1
+a bench.test 198.18.0.1
+aaaa mapped.test ::ffff:10.77.0.10
+aaaa mapped-loopback.test ::ffff:127.0.0.1
+aaaa nat64.test 64:ff9b::a4d:a
+aaaa sixtofour.test 2002:a4d:a::1
+aaaa teredo.test 2001::1
+aaaa ula.test fd00:77::10
+aaaa linklocal6.test fe80::1
+aaaa loopback6.test ::1
+aaaa mcast6.test ff02::1
+aaaa nsp64.test 2a00:64::a4d:a
+# The household's public address and the proxy host's own address.
+a household.test 203.0.113.20
+a self.test 203.0.113.2
+# A named private destination (D105).
+a push.lan 10.77.0.10

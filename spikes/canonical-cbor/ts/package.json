@@ -1,0 +1,17 @@
+{
+  "name": "canonical-cbor-spike",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Spike E19: canonical CBOR cross-check between dcbor (Rust) and cbor2 (TypeScript)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "cbor2": "2.4.0"
+  },
+  "scripts": {
+    "test": "node --test test/profile.test.ts test/corpus.test.ts test/rejections.test.ts"
+  }
+}

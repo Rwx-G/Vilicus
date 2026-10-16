@@ -1,0 +1,135 @@
+# The E13 test network: two ntfy-type push servers (the self-hosted default and a stand-in for a
+# public one), the sender and collector (`core`), and two simulated phones. The network is
+# internal: nothing reaches the real internet. run.sh provides every ${...} value.
+name: vilicus-e13
+
+x-runtime: &runtime
+  image: vilicus-spike-push-delivery-runtime
+  init: true
+  environment: &topics
+    TOPIC_P1_SELF: ${TOPIC_P1_SELF}
+    TOPIC_P2_SELF: ${TOPIC_P2_SELF}
+    TOPIC_P1_PUBLIC: ${TOPIC_P1_PUBLIC}
+    TOPIC_P2_PUBLIC: ${TOPIC_P2_PUBLIC}
+
+x-ntfy: &ntfy
+  # binwiederhier/ntfy, ntfy 2.31.0 as pulled on 2026-10-16.
+  image: binwiederhier/ntfy@sha256:803b2aaeb94df76c8b32ecd91039dc80b0fddb7041dcaf082b33bcdfd4ba39ad
+  command: [serve]
+  tmpfs:
+    - /var/lib/ntfy
+    - /var/cache/ntfy
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/v1/health"]
+    interval: 1s
+    timeout: 2s
+    retries: 30
+
+networks:
+  household:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.113.13.0/24
+
+volumes:
+  results:
+
+services:
+  ntfy-self:
+    <<: *ntfy
+    environment:
+      NTFY_LISTEN_HTTP: ":80"
+      NTFY_BASE_URL: "http://ntfy-self"
+      NTFY_CACHE_FILE: /var/cache/ntfy/cache.db
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_AUTH_USERS: ${E13_AUTH_USERS}
+      NTFY_AUTH_ACCESS: ${E13_AUTH_ACCESS}
+      NTFY_AUTH_TOKENS: ${E13_AUTH_TOKENS}
+      NTFY_VISITOR_REQUEST_LIMIT_EXEMPT_HOSTS: "10.113.13.20,10.113.13.31,10.113.13.32"
+    networks:
+      household:
+        ipv4_address: 10.113.13.10
+
+  ntfy-public:
+    <<: *ntfy
+    environment:
+      NTFY_LISTEN_HTTP: ":80"
+      NTFY_BASE_URL: "http://ntfy-public"
+      NTFY_CACHE_FILE: /var/cache/ntfy/cache.db
+      NTFY_VISITOR_REQUEST_LIMIT_EXEMPT_HOSTS: "10.113.13.20,10.113.13.31,10.113.13.32"
+    networks:
+      household:
+        ipv4_address: 10.113.13.11
+
+  core:
+    <<: *runtime
+    build:
+      context: ..
+      dockerfile: compose/Dockerfile
+    command: [push-delivery, run, --config, /etc/push-delivery/sim.conf, --duration-ms, "${E13_DURATION_MS}"]
+    environment:
+      <<: *topics
+      TOKEN_SENDER: ${TOKEN_SENDER}
+    volumes:
+      - results:/var/lib/push-delivery
+    depends_on:
+      ntfy-self:
+        condition: service_healthy
+      ntfy-public:
+        condition: service_healthy
+    networks:
+      household:
+        ipv4_address: 10.113.13.20
+
+  # A healthy phone: short processing delays, one short outage on each connection that it
+  # resumes from its last message id.
+  phone-1:
+    <<: *runtime
+    command:
+      - push-delivery
+      - phone-sim
+      - --phone
+      - phone-1
+      - --collector
+      - http://core:8080
+      - --duration-ms
+      - "${E13_PHONE_DURATION_MS}"
+      - --subscribe
+      - self-hosted,http://ntfy-self,env:TOPIC_P1_SELF,env:TOKEN_P1,10-150,0,0-0,18000+1500:resume
+      - --subscribe
+      - public,http://ntfy-public,env:TOPIC_P1_PUBLIC,-,10-150,0,0-0,18000+1500:resume
+    environment:
+      <<: *topics
+      TOKEN_P1: ${TOKEN_P1}
+    depends_on: [core]
+    networks:
+      household:
+        ipv4_address: 10.113.13.31
+
+  # A phone that is sometimes slow (doze) on the self-hosted server, and that loses its public
+  # connection twice: once longer than the deadline, resumed (late alerts), once dropped without
+  # resuming (lost alerts).
+  phone-2:
+    <<: *runtime
+    command:
+      - push-delivery
+      - phone-sim
+      - --phone
+      - phone-2
+      - --collector
+      - http://core:8080
+      - --duration-ms
+      - "${E13_PHONE_DURATION_MS}"
+      - --subscribe
+      - self-hosted,http://ntfy-self,env:TOPIC_P2_SELF,env:TOKEN_P2,10-150,50,1000-2000
+      - --subscribe
+      - public,http://ntfy-public,env:TOPIC_P2_PUBLIC,-,10-150,0,0-0,10000+6000:resume,25000+4000:lossy
+    environment:
+      <<: *topics
+      TOKEN_P2: ${TOKEN_P2}
+    depends_on: [core]
+    networks:
+      household:
+        ipv4_address: 10.113.13.32

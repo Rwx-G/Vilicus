@@ -1,0 +1,18 @@
+[package]
+name = "secure-delete-wal"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E17: what secure_delete, WAL checkpoints, VACUUM and crypto-shredding leave on disk in a SQLCipher file"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# SQLCipher is settled by D2. The vendored OpenSSL build makes the spike independent of the host libssl.
+# `hooks` adds the authorizer API (no new crate), to show what the story 1.7 authorizer blocks.
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl", "hooks"] }
+# Already in the tree as the crypto provider SQLCipher links; used directly only by the inspection
+# code, to decrypt raw pages and WAL frames with the same AES-256-CBC that wrote them.
+openssl-sys = "0.9"

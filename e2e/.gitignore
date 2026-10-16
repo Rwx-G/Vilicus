@@ -1,0 +1,2 @@
+# Raw run logs stay local; the QA report under doc/qa/ carries the numbers.
+results/

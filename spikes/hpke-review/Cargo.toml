@@ -1,0 +1,46 @@
+[package]
+name = "hpke-review"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike: RFC 9180 vectors, cross-test and internal review of the hpke crate (D61, D107)"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The crate under review, pinned as AD-18 uses it: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
+# AES-256-GCM, base mode.
+hpke = { version = "=0.13.0", default-features = false, features = ["x25519", "alloc"] }
+
+# Finding F1 of REVIEW.md: hpke 0.13.0 builds x25519-dalek and the AES-GCM stack without their
+# `zeroize` features, so private keys, DH outputs and AES and GHASH key schedules are not wiped
+# on drop. These lines add no crate (each is already in hpke's tree); they only switch the
+# feature on through Cargo feature unification. The Core carries the same lines (usage rule U1),
+# and run.sh checks the resolved features.
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "zeroize"] }
+ghash = { version = "0.5.1", default-features = false, features = ["zeroize"] }
+polyval = { version = "0.6.2", default-features = false, features = ["zeroize"] }
+
+[dev-dependencies]
+# The independent implementation of the cross-test (story 1.2 decision task), dev-only.
+hpke-rs = { version = "=0.8.0", default-features = false, features = ["rustcrypto", "libcrux-no-sys-rng", "std"] }
+# Its provider trait, named only to give hpke-rs a deterministic ephemeral seed in tests.
+hpke-rs-crypto = { version = "=0.8.0", default-features = false }
+hpke-rs-rust-crypto = { version = "=0.8.0", default-features = false }
+# Second provider: libcrux primitives (X25519 and AES-GCM outside the dalek and RustCrypto
+# lineage), so the cross-test does not rest on one primitive lineage (REVIEW.md F11).
+hpke-rs-libcrux = { version = "=0.8.0", default-features = false }
+# Parses the official RFC 9180 vector file as published, without a hand-written parser.
+serde_json = "1"
+# HKDF and HMAC for the sender-substitution test (REVIEW.md F12); already in the hpke tree.
+hkdf = "0.12.4"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+
+# Keeps the 10 000-case cross-test fast in the default test profile.
+[profile.dev.package."*"]
+opt-level = 3

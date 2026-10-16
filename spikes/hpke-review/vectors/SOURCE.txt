@@ -1,0 +1,21 @@
+The CFRG HPKE test-vector file referenced by RFC 9180, subset for the AD-18 suite. RFC 9180
+Appendix A prints no vector for DHKEM(X25519) with AES-256-GCM; this file carries one.
+
+Source:  https://github.com/cfrg/draft-irtf-cfrg-hpke/blob/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json
+Raw:      https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-hpke/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json
+Commit:   5f503c564da00b0687b3de75f1dfbdfc4079ad31 ("Add test vectors.", 2021-05-24), the last
+          commit that touches test-vectors.json; the file on master is identical.
+SHA-256 of the upstream file:
+          61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6
+          The hpke 0.13.0 package ships the same bytes as test-vectors-5f503c5.json.
+
+Subset:   rfc9180-base-x25519-sha256-aes256gcm.json, the entries with mode 0 (base),
+          kem_id 0x0020 (DHKEM(X25519, HKDF-SHA256)), kdf_id 0x0001 (HKDF-SHA256) and
+          aead_id 0x0002 (AES-256-GCM): one vector, its encryptions and exports, values
+          unchanged, re-indented. Its SHA-256 is in SHA256SUMS.
+
+Checks:   run.sh `vectors-subset-sha256` checks the subset against SHA256SUMS;
+          run.sh `upstream-vectors-sha256` checks the copy in the hpke package against the
+          upstream SHA-256 above; the test
+          `subset_is_exactly_the_suite_entries_of_the_upstream_file` filters that copy and
+          compares the result with the subset, value for value.

@@ -48,7 +48,7 @@ development_status:
   1-9-e19-canonical-cbor-in-rust-and-typescript: review
   1-10-e16-locked-memory-and-zeroization: review
   1-11-e17-secure_delete-and-wal-behaviour: review
-  1-12-e14-egress-proxy-domain-filtering: ready-for-dev
+  1-12-e14-egress-proxy-domain-filtering: review
   1-13-e13-push-delivery-reliability: ready-for-dev
   1-14-e26-separate-origin-by-port-for-external-content: ready-for-dev
   1-15-e32-core-execution-model: ready-for-dev

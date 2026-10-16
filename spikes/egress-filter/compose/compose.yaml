@@ -1,0 +1,105 @@
+# The E14 test network. Both networks are internal: nothing reaches the real internet.
+name: vilicus-e14
+
+x-runtime: &runtime
+  image: vilicus-spike-egress-filter-runtime
+  init: true
+
+networks:
+  internet:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+        - subnet: 2001:db8:113::/64
+  lan:
+    internal: true
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24
+        - subnet: fd00:77::/64
+
+volumes:
+  egress-sockets:
+
+services:
+  resolver:
+    <<: *runtime
+    build:
+      context: ..
+      dockerfile: compose/Dockerfile
+    command: [resolver]
+    networks:
+      internet:
+        ipv4_address: 203.0.113.53
+        ipv6_address: 2001:db8:113::53
+
+  proxy:
+    <<: *runtime
+    command: [proxy]
+    depends_on: [resolver]
+    volumes:
+      - egress-sockets:/run/egress
+    networks:
+      internet:
+        ipv4_address: 203.0.113.2
+        ipv6_address: 2001:db8:113::2
+      lan:
+        ipv4_address: 10.77.0.2
+        ipv6_address: fd00:77::2
+
+  allowed:
+    <<: *runtime
+    command: [allowed]
+    networks:
+      internet:
+        ipv4_address: 203.0.113.10
+        ipv6_address: 2001:db8:113::10
+
+  forbidden:
+    <<: *runtime
+    command: [forbidden]
+    networks:
+      internet:
+        ipv4_address: 203.0.113.11
+        ipv6_address: 2001:db8:113::11
+
+  internal:
+    <<: *runtime
+    command: [internal]
+    networks:
+      lan:
+        ipv4_address: 10.77.0.10
+        ipv6_address: fd00:77::10
+      internet:
+        ipv4_address: 203.0.113.20
+        ipv6_address: 2001:db8:113::20
+
+  client:
+    <<: *runtime
+    command: [client]
+    network_mode: none
+    depends_on: [proxy]
+    volumes:
+      - egress-sockets:/run/egress
+
+  sandbox:
+    <<: *runtime
+    command: [sandbox]
+    init: false
+    privileged: true
+    cgroup: private
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - egress-sockets:/run/egress
+    networks:
+      internet:
+        ipv4_address: 203.0.113.30
+        ipv6_address: 2001:db8:113::30
+      lan:
+        ipv4_address: 10.77.0.30
+        ipv6_address: fd00:77::30

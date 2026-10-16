@@ -46,7 +46,7 @@ development_status:
   1-7-e11-sqlite-migration-authorizer: review
   1-8-e12-argon2id-parameters-on-the-reference-host: ready-for-dev
   1-9-e19-canonical-cbor-in-rust-and-typescript: review
-  1-10-e16-locked-memory-and-zeroization: ready-for-dev
+  1-10-e16-locked-memory-and-zeroization: review
   1-11-e17-secure_delete-and-wal-behaviour: review
   1-12-e14-egress-proxy-domain-filtering: ready-for-dev
   1-13-e13-push-delivery-reliability: ready-for-dev

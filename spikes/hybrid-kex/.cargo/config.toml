@@ -1,0 +1,3 @@
+# Lets aws-lc-sys use its prebuilt NASM objects, so the spike builds on the Windows dev host without NASM installed.
+[env]
+AWS_LC_SYS_PREBUILT_NASM = "1"

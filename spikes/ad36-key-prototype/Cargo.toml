@@ -1,0 +1,17 @@
+[package]
+name = "ad36-key-prototype"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike: AD-36 authentication of member public keys before the household key is wrapped to them"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# prebuilt-nasm: aws-lc-sys links its prebuilt NASM objects, so the spike builds on the
+# Windows dev host without NASM, from this directory or with `--manifest-path`.
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys", "alloc", "prebuilt-nasm"] }
+# hpke 0.14 needs a prerelease aes-gcm that cargo does not resolve; 0.13.0 is pinned.
+hpke = { version = "=0.13.0", default-features = false, features = ["x25519", "alloc"] }

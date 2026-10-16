@@ -1,0 +1,59 @@
+# Spike E22: the Core's HTTPS server and the browser matrix on one private compose network.
+# The server answers `core.vilicus.test` (honest path), `relay.vilicus.test` (through the
+# on-path attacker) and `rogue.vilicus.test` (a certificate from an
+# untrusted CA). run.sh builds the binary and the web dependencies into named volumes first.
+# Images are pinned by digest (tags as pulled on 2026-10-16 in the comments).
+
+volumes:
+  target:
+    external: true
+    name: vilicus-browser-device-key-target
+  web-deps:
+    external: true
+    name: vilicus-browser-device-key-web-deps
+  # The test CA of this run only; `down --volumes` deletes it.
+  pki: {}
+
+services:
+  server:
+    # rust:1.99-trixie (Debian 13), the image the binary was built in.
+    image: rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+    command:
+      - /target/release/browser-device-key
+      - serve
+      - 0.0.0.0:8443
+      - /pki
+      - /web
+      - /deps
+    volumes:
+      - target:/target:ro
+      - web-deps:/deps:ro
+      - ./web:/web:ro
+      - pki:/pki
+    networks:
+      e22:
+        aliases: [core.vilicus.test, relay.vilicus.test, rogue.vilicus.test]
+    healthcheck:
+      test: ["CMD", "test", "-s", "/pki/ca.pem"]
+      interval: 1s
+      retries: 60
+
+  browsers:
+    profiles: [browsers]
+    build:
+      context: ./browser
+      args:
+        # mcr.microsoft.com/playwright:v1.64.1-noble; browser/package.json pins playwright-core 1.64.1.
+        BASE: mcr.microsoft.com/playwright@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf
+    image: vilicus-e22-browsers
+    shm_size: 1gb
+    environment:
+      NODE_EXTRA_CA_CERTS: /pki/ca.pem
+    working_dir: /driver
+    entrypoint: ["node", "/driver/driver.mjs"]
+    volumes:
+      - pki:/pki:ro
+    networks: [e22]
+
+networks:
+  e22: {}

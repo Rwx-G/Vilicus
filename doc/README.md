@@ -1,6 +1,6 @@
 # Vilicus design documents
 
-Status: Revision 2, design phase, no code yet. These documents are written before the code and are meant to be attacked. Each file has a review log or a status line; open questions are stated, not hidden. Update of 2026-10-16: glossary terms for assistant parity and activatable modules (PRD section 4.18) and ID ranges updated; then glossary terms changed or added by the revalidation decisions D69 to D86, by D87 to D96, by D97 to D100, and by the second revalidation, D101 to D115.
+Status: Revision 2, design phase, no code yet. These documents are written before the code and are meant to be attacked. Each file has a review log or a status line; open questions are stated, not hidden. Update of 2026-10-16: glossary terms for assistant parity and activatable modules (PRD section 4.18) and ID ranges updated; then glossary terms changed or added by the revalidation decisions D69 to D86, by D87 to D96, by D97 to D100, and by the second revalidation, D101 to D115; then ID ranges updated for the owner decisions D116 to D118.
 
 ## Reading order
 
@@ -21,9 +21,9 @@ Status: Revision 2, design phase, no code yet. These documents are written befor
 | [`key-management.md`](key-management.md) | Keys, unlock, recovery, rotation | Revision 2 |
 | [`ai-safety.md`](ai-safety.md) | Principles P1 to P14, invariants I1 to I43 | Revision 2 |
 | [`capability-matrix.md`](capability-matrix.md) | Action by tier by confirmation | Revision 2 |
-| [`decisions.md`](decisions.md) | Decisions D1 to D115 | Revision 2 |
+| [`decisions.md`](decisions.md) | Decisions D1 to D118 | Revision 2 |
 | [`research-notes.md`](research-notes.md) | Claims and experiments E1 to E32 (E21 unused) | Revision 2 |
-| [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-70 | Final |
+| [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-73 | Final |
 | [`architecture-spine.md`](architecture-spine.md) | Architecture decisions AD-1 to AD-56 | Final |
 
 Place architecture diagrams and images in [`assets/`](assets/).

@@ -365,7 +365,7 @@ With a passkey step-up, a member can add or remove a passkey and change their pa
 **Consequences (testable):**
 - A member always keeps at least one passkey; removing the last one is refused.
 - Adding or removing a passkey and changing the passphrase raise an out-of-browser alert (FR-56).
-- TOTP is accepted as a login fallback only and is refused for step-up, pairing and recovery (D33).
+- TOTP is accepted as a login fallback only and is refused for step-up, pairing and recovery (D33). If every supported browser fails the login half of E2, TOTP temporarily becomes the primary second factor (DC-72).
 - Every passkey step-up, for any action that requires one, signs a challenge derived from the canonical hash of exactly one pending action that the Core created before the prompt; one assertion authorizes that action only, never a time window or a second action (DC-37). This stops an assertion from being spent on another action; it does not stop a compromised Gateway from showing one action while the Core receives another (section 8.2).
 
 #### FR-108: Passkey re-enrollment [V0.1]
@@ -761,7 +761,7 @@ The channel model ships in V0.1, tested against a channel test double; the bindi
 Each member configures at least one notification channel that does not depend on an open browser, for security alerts (DC-14, DC-60).
 
 **Consequences (testable):**
-- In V0.1 the transport is a push webhook compatible with ntfy-style servers, self-hosted or public; the payload is content-free either way (static templates, no title, sender, amount or model text). On a public server, the topic uses an access token or a random name of at least 128 bits.
+- In V0.1 the transport is a push webhook to a UnifiedPush server of the ntfy type. The default is a self-hosted server, reached through a private destination (next consequence); a public server is allowed when the household chooses it, and it sees only delivery timing metadata (DC-73). The payload is content-free either way (static templates, no title, sender, amount or model text). On a public server, the topic uses an access token or a random name of at least 128 bits.
 - A self-hosted server on a private address is reached through a private destination: Core-originated traffic (push webhook, backup upload, remote audit sink, heartbeat) may reach a private host and port that the instance admin names through an H action with step-up, alerted to every adult; the egress proxy allows it to the Core and the backup caller only, never to an AI process or a plugin (DC-60).
 - An enrollment or re-enrollment completes only after the member redeems the token of a test notification sent to their destination (FR-7, FR-108); the instance admin's destination is confirmed the same way at bootstrap (FR-4).
 - While an adult has had no working destination for 24 hours, every page shows a blocking banner, and the waits of FR-8 and FR-14 run to their maximum.
@@ -799,12 +799,16 @@ The web client provides the member and instance admin screens of V0.1. Every V0.
 | Lift a suspension (FR-107) | an adult other than the suspended member | member web | H: step-up bound to the action, then the delay and veto of FR-8 (D87) |
 | Re-enroll a passkey (FR-108) | member | root CLI `vilicus member reenroll`, then member web | own passphrase |
 | Recover (FR-14) | member | root CLI `vilicus member recover`, then member web | recovery secret, acknowledgement token or the cap |
+| Cancel a pending recovery (FR-14) | the member concerned | member web | authenticated session |
+| Cancel a pending addition as the only adult (FR-8, D88) | the authorizing adult, when no other adult exists | member web | step-up bound to the cancellation |
 | Pair a browser (FR-16) | member | member web with a code from a paired device, or root CLI `vilicus device pair` | code; own passphrase at the CLI |
 | List and remove devices (FR-16) | member | member web | authenticated session |
 | Add or remove a passkey, change the passphrase (FR-10) | member | member web | step-up |
+| Enrol a TOTP factor (FR-10) | none in V0.1 | not reachable, except under the E2 login fallback (DC-72), which adds its surface | n/a |
 | Configure the own out-of-browser destination (FR-56) | member | member web | step-up, then test notification token |
 | Configure the instance admin's destination (FR-56) | instance admin | instance admin web | step-up, then test notification token |
 | Approve or refuse an elevated request (FR-28) | member | member web | light confirmation |
+| Undo a tier 1 write, an undo included (FR-29) | member | member web, offered from the digest | authenticated session |
 | Read the digest and the audit view (FR-30, FR-31) | member | member web | none |
 | Trigger the kill switch (FR-30) | any human web session; root | member web, instance admin web, root CLI `vilicus killswitch` | none |
 | Resume after the kill switch (FR-30) | adult | member web | step-up |
@@ -815,12 +819,15 @@ The web client provides the member and instance admin screens of V0.1. Every V0.
 | Check or verify an upgrade (FR-54) | operator | root CLI `vilicus upgrade check`, `vilicus upgrade verify` | none |
 | Set the backup schedule, certificate alert lead time or audit spool size (section 12) | operator | `vilicus.toml` (root) | none |
 | Set the backup target (FR-53) | operator | root CLI `vilicus backup target set` | delay and veto of FR-8, every adult alerted |
+| Veto a pending backup target change (FR-53) | another adult | member web; no CLI veto for target changes in V0.1 | step-up bound to that veto |
+| Change the backup secret (FR-53) | none in V0.1 | not reachable; a root CLI command comes with its own row when rotation is wanted | n/a |
 | Back up, verify, restore (FR-53) | operator | root CLI | backup secret to restore |
 | Configure the remote audit sink (FR-32) | instance admin | instance admin web | step-up, every adult notified |
 | Name a private destination for Core traffic (FR-56) | instance admin | instance admin web | H: step-up, every adult alerted |
 | Configure a model provider (FR-68) | adult | Core API only, exercised by the test double; screen with the meals milestone | H: step-up, delay, adult veto |
 | Acknowledge unencrypted swap (section 7) | operator | root CLI `vilicus host acknowledge-swap` | none |
 | Replay a dead letter (FR-24) | operator | root CLI `vilicus events replay` | none |
+| Acknowledge a wall-clock jump that suspended pending delays (D59) | adult | member web | step-up bound to the acknowledgement, every adult notified |
 | Read the member list with locked or suspended state | instance admin | instance admin web | none |
 | Check status and the audit chain (FR-3, FR-31) | operator | root CLI `vilicus status`, `vilicus audit verify` | none |
 | Acknowledge the security state after a restore (FR-53) | each adult | member web | authenticated session |
@@ -955,7 +962,7 @@ Out of scope: any user-facing module (the shopping list included), concrete mode
 
 Exit criteria:
 - UJ-1 and UJ-3 work on a clean Debian 13 system; UJ-2 works, including the delay, the public key check and the household key wrap at the next unlock; automated in the VM and checked manually once on real devices (FR-109).
-- The AD-36 construction is settled with the key prototype, and the HPKE gate of section 9 is done, before FR-8 code is written (DC-40, DC-62). If the HPKE gate cannot be closed, V0.1 exits under its fallback: UJ-2 limited to the first member, and FR-8 ships in V0.1.x.
+- The AD-36 construction is settled with the key prototype, and the HPKE gate of section 9 is done, before FR-8 code is written (DC-40, DC-62). If the HPKE gate cannot be closed, or the AD-36 construction does not hold (DC-72), V0.1 exits under its fallback: UJ-2 limited to the first member, and FR-8 ships in V0.1.x.
 - Every release-gate invariant of FR-61 passes.
 - The restore drill of FR-53 passes in CI.
 
@@ -1082,6 +1089,9 @@ The product as specified needs these changes to the design documents. Each becom
 | DC-68 | V0.1 values: the unlock window measured from unlock, a 30-day undo journal, the reference host, languages, token lifetime and budget, the I11 caps, three operator-tunable values, documentation and release requirements, and the approved dependencies | FR-11, FR-12, FR-27, FR-29, FR-61, FR-110, FR-111, FR-112 | D36; DC-3 (recorded as D113) | V0.1 |
 | DC-69 | `audit.db` and every inbox file are SQLCipher files under derived keys; an inbox row's type travels inside the sealed payload | FR-31, FR-71 | D22, D53; DC-20 (recorded as D114) | V0.1 |
 | DC-70 | No loopback address grants: device grants are USB devices, Unix sockets, a namespace shared with a managed daemon, or a private range with ports enforced per unit; the Claude subscription connector runs in a private network namespace with a forwarder | FR-33, FR-73 | D54, D97; DC-21, DC-52 (recorded as D115) | after V0.1 |
+| DC-71 | E32 passes at p99 under 100 ms for one action through the full pipeline (policy, write, audit) on the reference host, under a simulated load of two active adults plus the testbed; on failure the execution model is revised before the Core process is built | section 7, FR-109 | E32; architecture spine AD-9 (recorded as D116) | V0.1 |
+| DC-72 | If the AD-36 construction does not hold, V0.1 exits with a single member and FR-8 ships in V0.1.x; a browser that fails the login half of E2 leaves the supported list, and if every supported browser fails, TOTP temporarily becomes the primary second factor | FR-8, FR-10, FR-50 | D33, D74, D107; DC-40, DC-62 (recorded as D117) | V0.1 |
+| DC-73 | The out-of-browser channel defaults to a self-hosted UnifiedPush server reached through a named private destination; a public server is allowed when the household chooses it and sees only delivery timing metadata; E13 is measured on both | FR-56 | D47, D105; DC-14, DC-60; open question 8 (recorded as D118) | V0.1 |
 
 ### 8.2 Residual risks to record
 
@@ -1124,10 +1134,10 @@ V0.1 experiments run in this order, because the first groups can invalidate the 
 
 | Experiment | Gates | What it settles |
 |------------|-------|-----------------|
-| AD-36 construction (key prototype) | V0.1, before FR-8 code | How a member's public key is authenticated from `member add` to the household key wrap, for the first member and every added adult (DC-40) |
+| AD-36 construction (key prototype) | V0.1, before FR-8 code | How a member's public key is authenticated from `member add` to the household key wrap, for the first member and every added adult (DC-40). Fallback (DC-72): V0.1 exits with a single member and FR-8 ships in V0.1.x |
 | HPKE review and cross-test (D61) | V0.1, before FR-8 code | Internal review of the `hpke` crate and of Vilicus's use of it (DC-40). Done when: the RFC 9180 test vectors pass, a cross-test in CI against an independent implementation, used as a dev-dependency only, agrees on 10 000 random cases, and a written review with every finding closed or accepted is committed. Fallback: a defect is fixed upstream and the fix pinned; failing that, V0.1 exits with UJ-2 limited to the first member and FR-8 ships in V0.1.x (DC-62) |
 | E1, E2 (PRF half) | PRF unlock after V0.1; run early | Run early on the household's real phones: without PRF, members type a passphrase every day, which pushes toward weak passphrases and maximum unlock windows |
-| E2 (login half) | V0.1 | Passkey login through the chosen WebAuthn library. Pass: passkey login and a step-up whose challenge derives from an action hash succeed on every supported browser (FR-50) |
+| E2 (login half) | V0.1 | Passkey login through the chosen WebAuthn library. Pass: passkey login and a step-up whose challenge derives from an action hash succeed on every supported browser (FR-50). Fallback (DC-72): a browser that fails leaves the supported list; if every supported browser fails, TOTP temporarily becomes the primary second factor |
 | E3 | V0.1, README wording only | Honest wording of the hybrid transport claim; its result informs the README wording and blocks nothing else |
 | E10 | V0.1 | Sandbox profile, Core-created sockets and peer identity for Gateway, audit writer, plugins and AI processes. Fallback: if `SO_PEERPIDFD` and the cgroup unit cannot be read, each first-party unit runs under its own static user and the Core checks the uid with `SO_PEERCRED`, recorded as weaker |
 | E11 | V0.1 | Migration authorizer |
@@ -1144,8 +1154,8 @@ V0.1 experiments run in this order, because the first groups can invalidate the 
 | E15 | Mail module and forgetting (FR-95) | Whether per-record keys coexist with full-text search |
 | E25 (new) | FR-33 | Local model quality and latency on the reference host for the data types routed to it, and on a larger host where models run on the CPU, with the runtime in the shape of DC-49 and the latency the household accepts stated beforehand |
 | E26 (new) | V0.1 | Separate origin by port for sandboxed external content, on the supported browsers of FR-50, with each FR-65 naming option and with reverse proxies. Fallback: if a port-based origin is not workable, external content is shown as sanitized plain text, never as HTML |
-| E13 | V0.1 | Push delivery reliability for content-free notifications (FR-56). Pass: 99 % of alerts delivered within 10 minutes over 7 days per phone, idle nights included. Fallback: a second push distributor within the same webhook transport, plus the maximum waits of FR-56 (DC-60) |
-| E32 (new) | V0.1 | Core execution model (architecture spine AD-9): home rule latency during two concurrent unlocks and a backup |
+| E13 | V0.1 | Push delivery reliability for content-free notifications (FR-56), measured on the default self-hosted server and on a public server (DC-73). Pass: 99 % of alerts delivered within 10 minutes over 7 days per phone, idle nights included. Fallback: a second push distributor within the same webhook transport, plus the maximum waits of FR-56 (DC-60) |
+| E32 (new) | V0.1 | Core execution model (architecture spine AD-9): home rule latency during two concurrent unlocks and a backup. Pass (DC-71): p99 under 100 ms for one action through the full pipeline (policy, write, audit) on the reference host, under a simulated load of two active adults plus the testbed. Fallback: the execution model is revised before the Core process is built |
 | E27 (new) | Home milestone, before it starts | Device adapters under the sandbox, on the target host: the USB serial unit profile with a dynamic user (fallback: a static user per adapter), enforcement of the IP filter by a negative connection test, multicast discovery, presence from the router's leases or API and unprivileged ping, latency from a Zigbee event to an action, and moving the Zigbee coordinator from the current software to Vilicus with its network and pairings, and negative tests from an adapter to every other loopback port (FR-73, FR-74, FR-76, FR-83, DC-70) |
 | E31 (new) | Home milestone, before an adapter that drives a physical security device | A signed PCR 11 policy with unified kernel images and a pcrlock re-seal of the instance key before Secure Boot database or SBAT updates, on Debian 13 (DC-63) |
 | E28 (new) | Home milestone, before it starts | WireGuard endpoint managed by Vilicus: peer changes applied live without root in the Core, the instance name resolving to the private address inside and through the tunnel (including resolvers that block private answers), the official client on Android and desktop, and the single VPN slot on Android (FR-86). Fallback: the documented reverse proxy or access proxy path becomes the default |
@@ -1178,7 +1188,7 @@ V0.1 experiments run in this order, because the first groups can invalidate the 
 5. Whether children get managed accounts before V1.
 6. Whether the household's existing shared calendar is imported or connected, and when.
 7. When web recovery becomes available for members without host access (FR-14).
-8. Which push server the household uses for FR-56, self-hosted or public.
+8. Resolved (owner, 2026-10-16): the out-of-browser channel defaults to a self-hosted UnifiedPush server reached through a named private destination; a public server is allowed when the household chooses it (FR-56, DC-73).
 9. Whether the household's current recipe app offers an export or JSON-LD (FR-40).
 10. Which speech-to-text and text-to-speech engines run locally (FR-62).
 11. Whether a built-in ACME client is worth adding after V0.1 for the free dynamic DNS option (FR-65).

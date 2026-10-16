@@ -1,0 +1,22 @@
+[package]
+name = "hybrid-kex"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E3: which TLS group each client negotiates against a rustls server preferring X25519MLKEM768"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The version the spine pins (stack table). The default features already carry `aws_lc_rs` and
+# `prefer-post-quantum`; they are named here so the spike does not depend on a default changing.
+# `tls12` is there only so a test can show that a TLS 1.2 client is refused by the TLS 1.3 server.
+rustls = { version = "=0.23.45", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "tls12"] }
+# The spine's companion pin; drives the rustls state machine on tokio sockets.
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs"] }
+# Async runtime for the server and the rustls client probe.
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+# Test CA and server certificate only. The aws-lc-rs backend avoids pulling ring next to aws-lc-rs.
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }

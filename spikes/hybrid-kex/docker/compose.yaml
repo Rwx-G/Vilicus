@@ -1,0 +1,97 @@
+# Spike E3: the rustls test server and every client, on one private compose network.
+# run.sh starts `server`, then runs each client once with `docker compose run`.
+# Every image is pinned by digest (tags as pulled on 2026-10-16 in the comments).
+
+x-images:
+  # rust:1-trixie (Debian 13).
+  rust: &rust_image rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+
+volumes:
+  # Built by run.sh's check step; shared read-only with the server and the rustls client.
+  target:
+    external: true
+    name: vilicus-hybrid-kex-target
+  # The test CA and server key of this run only; `down --volumes` deletes it.
+  pki: {}
+
+services:
+  server:
+    image: *rust_image
+    command: ["/target/release/hybrid-kex", "serve", "0.0.0.0:8443", "/pki", "server", "localhost"]
+    volumes:
+      - target:/target:ro
+      - pki:/pki
+    healthcheck:
+      test: ["CMD", "test", "-s", "/pki/ca.pem"]
+      interval: 1s
+      retries: 60
+
+  rustls:
+    profiles: [clients]
+    image: *rust_image
+    entrypoint: ["/target/release/hybrid-kex", "probe", "server:8443", "server", "/pki/ca.pem"]
+    volumes:
+      - target:/target:ro
+      - pki:/pki:ro
+
+  debian13:
+    profiles: [clients]
+    build:
+      context: .
+      dockerfile: debian-clients.Dockerfile
+      args:
+        # debian:trixie-slim (Debian 13).
+        BASE: debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+    image: vilicus-e3-debian13
+    volumes:
+      - pki:/pki:ro
+
+  debian12:
+    profiles: [clients]
+    build:
+      context: .
+      dockerfile: debian-clients.Dockerfile
+      args:
+        # debian:bookworm-slim (Debian 12, OpenSSL 3.0: a client without the hybrid group).
+        BASE: debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+    image: vilicus-e3-debian12
+    volumes:
+      - pki:/pki:ro
+
+  node:
+    profiles: [clients]
+    # node:24-trixie-slim.
+    image: node@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315
+    entrypoint: ["node", "/client/node-client.mjs"]
+    volumes:
+      - pki:/pki:ro
+      - ./node-client.mjs:/client/node-client.mjs:ro
+
+  go:
+    profiles: [clients]
+    # golang:1-trixie.
+    image: golang@sha256:47667934874913a449b96faa7ef4777fa285d9ec29126ee80ed61c45b7cccf0e
+    working_dir: /go-client
+    entrypoint: ["go", "run", "main.go"]
+    environment:
+      GOCACHE: /tmp/go-cache
+      GOFLAGS: -buildvcs=false
+      GOTOOLCHAIN: local
+    volumes:
+      - pki:/pki:ro
+      - ./go-client:/go-client:ro
+
+  playwright:
+    profiles: [clients]
+    build:
+      context: .
+      dockerfile: playwright.Dockerfile
+      args:
+        # mcr.microsoft.com/playwright:v1.64.1-noble; the npm package must match the tag.
+        BASE: mcr.microsoft.com/playwright@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf
+        PLAYWRIGHT_VERSION: 1.64.1
+    image: vilicus-e3-playwright
+    ipc: host
+    entrypoint: ["node", "/app/browser-client.mjs"]
+    volumes:
+      - ./browser-client.mjs:/app/browser-client.mjs:ro

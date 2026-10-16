@@ -1,0 +1,60 @@
+# E10 spike: the reference plugin template. Dynamic user (spine AD-24), one credential, its one
+# Core socket and nothing else of /run, no network family, no namespace, no capability.
+[Unit]
+Description=Vilicus plugin %i (E10 spike reference plugin)
+Requires=vilicus-core.service
+After=vilicus-core.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=vilicus-plugin-%i
+ExecStart=/usr/local/bin/e10-spike plugin --socket /run/vilicus/peer/core.sock
+# A test value written by checks.sh, not a secret.
+LoadCredential=token:/etc/vilicus-spike/load/%i.value
+
+# Fixed profile: the canonical list of the story's settled task 3. checks.sh asserts every line
+# below against `systemctl show`, so this block is the list, not a copy of it.
+# An empty /run with only this unit's Core socket directory in it: the system bus, systemd's
+# private socket, the journal sockets and every other unit's socket are not there to connect to.
+TemporaryFileSystem=/run
+BindPaths=/run/vilicus/core/peer/%n:/run/vilicus/peer
+UMask=0077
+# Every process of the unit is stopped with it, so none outlives the main process in the unit.
+KillMode=control-group
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+# Also separates the abstract Unix socket namespace, which no file permission protects.
+PrivateNetwork=yes
+PrivateUsers=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# @system-service includes io_uring on systemd 257 (checked by checks.sh).
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+MemoryMax=64M
+TasksMax=16
+LimitCORE=0

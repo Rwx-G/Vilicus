@@ -42,7 +42,7 @@ development_status:
     ready-for-dev
   1-4-e24-passkeys-and-pwa-with-each-naming-option: ready-for-dev
   1-5-e2-login-half-passkey-login-and-action-bound-step-up: ready-for-dev
-  1-6-e10-sandbox-profile-and-peer-identity: ready-for-dev
+  1-6-e10-sandbox-profile-and-peer-identity: review
   1-7-e11-sqlite-migration-authorizer: review
   1-8-e12-argon2id-parameters-on-the-reference-host: ready-for-dev
   1-9-e19-canonical-cbor-in-rust-and-typescript: review

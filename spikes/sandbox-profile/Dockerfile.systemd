@@ -1,0 +1,14 @@
+# Runtime image for the E10 spike: Debian 13 (trixie) with systemd as PID 1 and the system bus.
+# The base is pinned by digest (debian:trixie-slim as pulled on 2026-10-16); the packages come from
+# the trixie archive on the day of the build, and run.sh prints their versions. Built from stdin
+# with no context.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+RUN apt-get update \
+ && apt-get install --yes --no-install-recommends dbus systemd systemd-sysv \
+ && apt-get clean
+ENV container=docker
+STOPSIGNAL SIGRTMIN+3
+# systemd makes the root mount shared at boot on a host but not in a container; without it the
+# credential mounts systemd makes for a unit (LoadCredential=) never reach that unit. See the
+# story's limits.
+CMD ["/bin/sh", "-c", "mount --make-rshared / && exec /sbin/init"]

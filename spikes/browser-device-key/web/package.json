@@ -1,0 +1,11 @@
+{
+  "name": "browser-device-key-web",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Spike E22: the browser OPAQUE client and the canonical CBOR decoder served to the pages",
+  "dependencies": {
+    "@serenity-kit/opaque": "1.1.0",
+    "cbor2": "2.4.0"
+  }
+}

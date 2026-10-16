@@ -1,0 +1,11 @@
+{
+  "name": "browser-device-key-driver",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Spike E22: Playwright driver for the browser matrix",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "1.64.1"
+  }
+}

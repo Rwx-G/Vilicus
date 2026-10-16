@@ -1,0 +1,28 @@
+[package]
+name = "core-execution"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E32: the AD-9 Core execution model, one action through the full pipeline under household load"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The story 1.7 spike, reused as is: connection setup and the per-role authorizer policies.
+sqlite-authorizer = { path = "../sqlite-authorizer" }
+# Same pin and SQLCipher build as story 1.7; `backup` adds the online backup API the home
+# partition copy uses (spine AD-31). No new crate.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher", "hooks", "backup"] }
+# The async runtime of spine AD-9. `macros` only for `#[tokio::test]`.
+tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }
+# HMAC chain, SHA-256, AES-256-GCM, HKDF and X25519 (spine AD-18 suite).
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys", "alloc"] }
+# Needed: the unlock load is the real Argon2id derivation, the version the spine pins. Without
+# the `parallel` feature the lanes run on the calling thread, so the bounded blocking pool
+# really bounds the cores Argon2id takes.
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc"] }
+
+[profile.release]
+debug = false

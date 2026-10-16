@@ -1,0 +1,34 @@
+[package]
+name = "prf-probe"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E1 and E2 PRF half: a WebAuthn PRF probe that records only hashes of PRF outputs"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The relying party verifies registrations and assertions; the version story 1.5 pins.
+# webauthn-rs 0.5.5 has no `prf` extension: the page adds it to the options it receives.
+webauthn-rs = { version = "=0.5.5" }
+# Already in the tree through webauthn-rs: parses the signed authenticator data (AAGUID, flags,
+# authenticator extension keys), which webauthn-rs does not expose for a passkey.
+webauthn-rs-core = "=0.5.5"
+serde_cbor_2 = "=0.13.0"
+# HTTPS server: tokio, hyper 1 over rustls, the pins of the E3 spike (story 1.16).
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+hyper = { version = "=1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+http-body-util = "=0.1.5"
+rustls = { version = "=0.23.45", default-features = false, features = ["aws_lc_rs", "std"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs"] }
+# The local CA and server certificate; the CA key is never written to disk.
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
+# Certificate validity dates (already in the tree through rcgen).
+time = "=0.3.55"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+# Short, non-reversible credential labels in the result file.
+sha2 = "=0.10.9"

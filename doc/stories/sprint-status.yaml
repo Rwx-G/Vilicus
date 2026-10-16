@@ -53,7 +53,7 @@ development_status:
   1-14-e26-separate-origin-by-port-for-external-content: ready-for-dev
   1-15-e32-core-execution-model: ready-for-dev
   1-16-e3-hybrid-key-exchange-negotiation: review
-  1-17-e1-and-e2-prf-half-early-run: ready-for-dev
+  1-17-e1-and-e2-prf-half-early-run: in-progress
   epic-1-retrospective: optional
 
   epic-2: backlog

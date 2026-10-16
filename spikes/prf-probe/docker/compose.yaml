@@ -1,0 +1,52 @@
+# PRF probe end-to-end check: the probe server and a Playwright client on one private network.
+# run.sh starts `server`, then runs the client once with `docker compose run`.
+# Every image is pinned by digest (tags as pulled on 2026-10-16 in the comments).
+
+x-images:
+  # rust:1-trixie (Debian 13), the image run.sh builds the binary in (same OpenSSL).
+  rust: &rust_image rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+
+volumes:
+  # Built by run.sh's check step; read-only for the server.
+  target:
+    external: true
+    name: vilicus-prf-probe-target
+  # Certificates, registrations and records of this run only; `down --volumes` deletes it.
+  data: {}
+
+services:
+  server:
+    image: *rust_image
+    command:
+      - /target/release/prf-probe
+      - serve
+      - 0.0.0.0:8443
+      - /data
+      - prf-probe.test
+      - https://prf-probe.test:8443
+    volumes:
+      - target:/target:ro
+      - data:/data
+    networks:
+      default:
+        aliases: [prf-probe.test]
+    healthcheck:
+      test: ["CMD", "test", "-s", "/data/server.crt"]
+      interval: 1s
+      retries: 60
+
+  playwright:
+    profiles: [clients]
+    build:
+      context: .
+      dockerfile: playwright.Dockerfile
+      args:
+        # mcr.microsoft.com/playwright:v1.64.1-noble; the npm package must match the tag.
+        BASE: mcr.microsoft.com/playwright@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf
+        PLAYWRIGHT_VERSION: 1.64.1
+    image: vilicus-prf-probe-playwright
+    ipc: host
+    entrypoint: ["node", "/app/e2e.mjs"]
+    volumes:
+      - ./e2e.mjs:/app/e2e.mjs:ro
+      - data:/data:ro

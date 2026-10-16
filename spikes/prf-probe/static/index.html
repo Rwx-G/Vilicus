@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vilicus PRF probe</title>
+<script src="/probe.js" defer></script>
+</head>
+<body>
+<h1>Vilicus PRF probe</h1>
+<p>Registers a test passkey and asks for the WebAuthn <code>prf</code> extension with two fixed
+salts. The PRF outputs never leave this page: only their SHA-256 digests and lengths are sent,
+with the authenticator model identifier (AAGUID), the transports and the browser user agent.</p>
+<p>Use a label that names no person and no phone model, for example <code>device-1 chrome</code>.</p>
+
+<h2>1. Register</h2>
+<p><label>Label <input id="label" maxlength="40" autocomplete="off"></label>
+<button id="register" type="button">Register a passkey</button></p>
+
+<h2>2. Log in (once now, then again in a later session)</h2>
+<p><button id="refresh" type="button">Refresh the list</button></p>
+<ul id="credentials"></ul>
+
+<h2>Last result</h2>
+<pre id="output">Nothing yet.</pre>
+
+<h2>Table</h2>
+<p><a href="/api/report">Per-credential table</a></p>
+</body>
+</html>

@@ -1,0 +1,45 @@
+[package]
+name = "locked-memory"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E16: locked memory, zeroization and crash paths of key material in the Rust runtime"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# Memory locking, MADV_DONTDUMP, PR_SET_DUMPABLE, rlimits and signals. Already in the tree
+# (getrandom and aws-lc-rs use it); the spike writes its own small locked pool on top of it
+# instead of adding `memsec`, `region` or `secrecy`.
+libc = "0.2"
+# Wipes buffers with volatile writes. In the spine stack and already in hpke's tree.
+zeroize = "1.8"
+
+# The Core's symmetric primitives (AD-18): AES-256-GCM and HKDF-SHA-256 from aws-lc-rs.
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys", "alloc"] }
+# The passphrase KDF at the version the spine pins, with the features of the E12 spike minus
+# `parallel` (one lane, and no rayon thread stacks to account for).
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+
+# The household key wrap, pinned as reviewed in spikes/hpke-review (D61, D107).
+hpke = { version = "=0.13.0", default-features = false, features = ["x25519", "alloc"] }
+# Usage rule U1 of spikes/hpke-review/REVIEW.md (finding F1): these lines add no crate, they
+# switch the `zeroize` features on through Cargo feature unification, as the Core will. The
+# spike measures what is left with U1 applied.
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "zeroize"] }
+ghash = { version = "0.5.1", default-features = false, features = ["zeroize"] }
+polyval = { version = "0.6.2", default-features = false, features = ["zeroize"] }
+
+# Scanner side only: recomputes the intermediate values the scan looks for (HPKE key schedule,
+# HMAC states). Both are already in hpke's tree; `compress` exposes the SHA-256 block function
+# without adding a crate.
+hkdf = "0.12"
+sha2 = { version = "0.10", default-features = false, features = ["compress"] }
+
+[profile.release]
+# Same as the default; stated because the panic checks depend on it.
+panic = "unwind"

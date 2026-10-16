@@ -1,0 +1,18 @@
+# E10 spike: the host check the Core requires before it starts (spine AD-16). It runs as root
+# outside any IP filter, owns a loopback UDP listener, sends a control datagram that must arrive,
+# then has a transient unit with IPAddressDeny=any send one that must fail with EPERM and not
+# arrive. Anything else fails this unit, and the Core does not start.
+[Unit]
+Description=Vilicus IP filter check (E10 spike)
+Wants=dbus.socket
+After=dbus.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/e10-spike ipfilter-check
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

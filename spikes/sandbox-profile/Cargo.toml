@@ -1,0 +1,20 @@
+[package]
+name = "sandbox-profile"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E10: fixed systemd sandbox profile for a plugin, and peer identification by systemd unit on the Core's Unix sockets"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[[bin]]
+name = "e10-spike"
+path = "src/main.rs"
+
+[dependencies]
+# The only dependency. It exposes the raw calls the spike is about (SO_PEERCRED, SO_PEERPIDFD,
+# poll on a pidfd, socket, unshare) without a wrapper deciding what to hide. The standard library
+# covers the Unix sockets themselves; tokio, nix and rustix are not needed for a blocking spike.
+libc = "0.2.190"

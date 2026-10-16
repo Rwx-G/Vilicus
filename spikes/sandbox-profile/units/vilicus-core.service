@@ -1,0 +1,62 @@
+# E10 spike: the Core-like listener. Static user (spine AD-24), one socket per peer unit under
+# its runtime directory (AD-55), and the fixed profile of doc/architecture.md section 4.
+[Unit]
+Description=Vilicus Core (E10 spike listener)
+# The Core does not start on a host that does not enforce IPAddressDeny= (spine AD-16).
+Requires=vilicus-ipfilter-check.service
+After=vilicus-ipfilter-check.service
+# The Core asks systemd for each peer unit's cgroup over the system bus.
+Wants=dbus.socket
+After=dbus.socket
+
+[Service]
+Type=notify
+User=vilicus-core
+Group=vilicus-core
+ExecStart=/usr/local/bin/e10-spike core --runtime /run/vilicus/core --gate /run/e10-gate/open \
+    --peer vilicus-plugin@ref.service \
+    --peer vilicus-plugin@other.service \
+    --peer vilicus-plugin@reuse.service:gated     --peer e10-forker.service
+# Kept across restarts so the per-peer directories bind-mounted into running plugins stay valid.
+RuntimeDirectory=vilicus/core
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+
+# Fixed profile.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+MemoryMax=256M
+TasksMax=64
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

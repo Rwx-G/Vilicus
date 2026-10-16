@@ -1,0 +1,328 @@
+# Capability matrix
+
+Status: design phase, no code yet. Revision 2. One row per action that the assistant, a plugin or a human could take. The matrix exists to expose gaps: any action not listed here does not exist; any irreversible or third-party-affecting action without a signed confirmation is a bug. Concepts are defined in [ai-safety.md](ai-safety.md) (P4, P5) and [architecture.md](architecture.md) (section 9). Revision 2 aligns the matrix with the [PRD](prd.md), the [architecture spine](architecture-spine.md) and decisions D34 to D61 in [decisions.md](decisions.md). The 2026-10-16 update adds the assistant parity rows of PRD section 4.18 and decisions D62 to D68: scheduled tasks, playbooks, the researcher, disclosure grants, activatable modules and tool policy, own-account delivery, and spoken confirmation. The revalidation of the same day applies D69 to D86, later updates D87 to D96 and D97 to D100, and the second revalidation D101 to D115 (section 13).
+
+## Legend
+
+**Tier.** 0 read. 1 reversible write, where reversible means reversible **without effect on a third party**, plus the named exception classes of invariant I13: reversible external state with no effect visible to a third party (cart preparation, see D44), physical actions undone by restoring the previous state (see D56; class `restorable_physical` in spine AD-39), and own-account delivery: a write to an account the member owns that nobody else sees, such as mail to themself, a file in a dedicated folder or an unpublished blog draft (see D67; class `own_account_delivery`). These exception classes form a closed set (spine AD-48); a tool declares at most one, and is tier 1; `reversible_external_state` and `own_account_delivery` require light confirmation, `restorable_physical` does not (spine AD-48). An own-account delivery also follows the provider policy by the data types of its payload and the outbound content check, and a local-only data type is never delivered to a hosted account; its tool takes no destination argument, and its content references no remote resource (see D81). 2 irreversible, third-party effect, outbound network effect outside those exception classes, or crossing a partition boundary. H human-only administrative action, never a tool: a Core operation outside the tool registry, reachable only from a human web session with step-up or from the host CLI, always audited (invariant I18, spine AD-8).
+
+**Tier 2 before the native app.** Tier 2 actions are not registered at all until the native app exists (see D46, PRD FR-60): no tool exists for them, and the registry build check fails if a tool of that milestone is tier 2. Their rows stay in this matrix as the target design and are marked **2 (D46)** in the Tier column.
+
+**Letting someone in before the native app.** Unlocking, disarming or opening a safety-relevant device and cutting power to the infrastructure are not offered by Vilicus at all until the native app exists, not even as an H action in the web client; the household uses the device vendor's app or a physical gesture meanwhile. Once the native app exists, they are tier 2 with signed confirmation on it. These rows are marked **2 (D69)** (see D69).
+
+**Step-up in a browser.** Before the native app, every H action with step-up is confirmed in a browser whose code the Gateway serves. Each assertion signs a challenge derived from the canonical hash of exactly one pending action, so it cannot be replayed for another action or used as a time window (see D71). It cannot prove what the browser displayed: a compromised Gateway can still show one H action and have the member approve another, which is why D69 keeps the actions above off the web. Pairing, WireGuard peers, plugin grants and lifting a suspension (see D87) remain browser step-ups before the native app, so a compromised Gateway can still redirect one such assertion to gain lasting access; the actions a compromised Gateway must not decide at all run only as root at the host CLI (see D101).
+
+**Out-of-browser alerts.** Every action that adds a way in or widens access raises a security alert on the out-of-browser notification channel, whichever client requested it: a passkey added or removed, a passphrase changed, a device or household display paired, a WireGuard peer added, a sender identity bound, a data type added to a channel ceiling, a tool policy widened, a delegation sub-key or disclosure grant created, a provider configured, a suspension lifted, an enrollment, re-enrollment or recovery completed (PRD FR-56).
+
+**Confirmation.** *none*. *light*: one explicit tap in an authenticated session of a paired device, web allowed; in a browser, the approval is signed by the browser's non-extractable device key over the canonical hash of the request (see D35, D38). It approves one request, or a batch whose every line is shown and whose canonical hash covers all lines; no model-written justification is shown on an approval screen. *signed*: signed confirmation from a paired native app that is at least 24 hours old (architecture, section 10). *step-up*: fresh passkey assertion over a challenge bound to the hash of exactly one pending action (see D71). *recovery*: recovery secret plus waiting period. *spoken*: a spoken "yes" in a voice conversation, with audio transcribed locally only; it approves an elevated tier 1 request that carries no I13 exception class, and nothing else: never a cart, an own-account delivery or a restorable physical action, never a rule, a scheduled task, a playbook, an H action or tier 2 (see D68, PRD FR-94). It follows a read-back from a fixed template filled only with the request's structured fields, approves only the request read back, bound to its hash, and is recognized by the Core on the local transcript, never by an AI process (see D100).
+
+**Actor.** *any*: a human, or Vilicus's own assistant (an AI process speaking MCP to the Core over its socket). Vilicus exposes no MCP endpoint and no other API to outside AI assistants (see D49). *human*: a human only. *Core*: the Core itself (detectors, system templates). *researcher*: the researcher AI role only, never another role (see D63). *playbook*: a playbook run by the Core under the `Playbook` principal, with no model step (see D65). Home automation rows (section 10a) name principals instead (spine AD-8). A scheduled task acts as Vilicus's own assistant, with one capability token per run. Every token principal acting for a member is further limited by that member's tool policy (see D66).
+
+**Tainted session** (the AI session has consumed `external` data or `member` free text, see P5; structured fields of `member` taint do not taint the session, see D70):
+- *allow-b*: allowed when the taint came only from bounded reader outputs; otherwise treated as *elevate*.
+- *elevate*: allowed after the alignment controller approves or a human gives a light confirmation. Until the alignment controller exists, an elevated call becomes a pending request in the elevated request queue of the primary channel, approved or refused with a light confirmation (see D38, PRD FR-28) or, in a voice conversation, a spoken confirmation (see D68). An approved write stores its structured fields `trusted` with the approving member as author (see D70), while model-drafted free text from a tainted session stays `external` (see D99). A household write from a session that has read personal free text is elevated (see D104).
+- *exempt*: a record kind the module declares low-risk, reviewed with the module; allowed in a tainted session without elevation (PRD FR-28). From an AI principal it accepts only structured fields, values from a set fixed at build time (see D104).
+- *queue*: tier 2 request goes to the separate tainted queue, with origin shown, signed confirmation required.
+- *deny*: not available to a tainted session.
+
+Taint gating applies to AI task and plugin principals only. A human web session, the CLI, a home rule, a playbook, a household display, a device adapter and Core event delivery are never gated by taint, but their writes still store the taint the Core computes (spine AD-7). A write a member makes, or explicitly approves, is stored `trusted` with that member as author, except free text drafted in a tainted session, which keeps `external` whatever the approval and however edited; only text the member writes in full in an empty field of the approval screen is stored `trusted` (see D70, D99). `member` taint is a read-time view, never a stored downgrade. For tier 0 rows the value only says whether the read is permitted; reading `external` data or `member` free text taints the session. Rows with "external" in Notes produce data labelled `external`.
+
+**Secondary channels.** A sender bound to a member on a secondary channel acts as that member, and the message content is untrusted text that taints the AI session. Through a secondary channel, only tier 0 and tier 1 rows are reachable; never tier 2 or H rows, and never pairing, recovery or channel binding changes (see D42). What Vilicus sends on a channel is limited by its ceiling, an allowlist of data types, applied as input gating when a token is issued for a session whose output may reach that channel (see D82, D103). Section 8 lists the channel's own rows.
+
+## 1. Core and administration
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Read own profile and permissions | any | 0 | none | allow-b | |
+| Read audit log, own scope | any | 0 | none | allow-b | |
+| Unlock or lock own partition | human | H | passphrase; passkey with PRF later (E1, E2); unlock from the host also available with the member's own passphrase, never another adult's (PRD FR-57, see D77) | deny | Keys never given to the AI. The member chooses the unlock window at unlock (see D36); it ends at the unlock time plus the chosen duration, whatever the web sessions do, and extending it needs the passphrase (see D113) |
+| Create or revoke a capability token | Core | n/a | n/a | deny | Not a tool; invariant I18 |
+| Create a member account | human | H | n/a | deny | Withdrawn as a separate action: an account exists only through the first-start wizard or the enrollment that follows `vilicus member add` (see D34). The member enrolls their own keys |
+| Pair a device | human | H | during an enrollment, or with a short-lived code bound by a PAKE, issued by an already-paired device or by `vilicus device pair` with the passphrase of the member the device is paired to (see D77) | deny | Browsers: no QR scan (see D35). The native app pairs with a QR code and a validation code (architecture section 7.2). A newly paired browser cannot issue pairing codes for 24 hours; a code issued from the CLI notifies the member on every paired device and on the out-of-browser notification channel |
+| Remove a device | human | H | step-up | deny | Revokes key and sessions |
+| Add an authenticator or change passphrase | human | H | step-up | deny | A member keeps at least one passkey; TOTP is refused for step-up (D33). An enrollment completes with exactly one passkey; further passkeys are added this way, and each change raises an out-of-browser alert (PRD FR-56) |
+| Re-enroll a passkey | human (the member concerned) | H | that member's own passphrase at the host CLI (`vilicus member reenroll`), then the enrollment token in the browser | deny | For a member who lost every passkey, or after an instance rename or a restore; never another adult's passphrase; the member is notified on every channel (see D77). Completes only after the member redeems a test notification on their out-of-browser destination (see D105). Completing it ends the member's unlock window and revokes every other passkey, paired device, web session and channel binding of that member, except those the member keeps on the completion screen |
+| Suspend a member | human | H | host CLI (`vilicus member suspend`) with the passphrase of an adult other than the suspended member, or with the member's own passphrase for their own account (PRD FR-107, see D101) | deny | V0.1. Revokes at once the member's sessions, devices, channel bindings and unlock window; keys and data are kept and the household key is not rotated (see D77; key management, section 5) |
+| Lift a member's suspension | human (an adult other than the suspended member) | H | step-up in the app bound to this action, then the delay and veto of adding an adult, every adult notified | deny | Needs no passphrase (see D71, D87; PRD FR-107). Every adult gets an out-of-browser alert. Before the native app, a compromised Gateway can redirect this browser step-up; the delay, the veto and the alerts bound it (see D101; architecture R40) |
+| Start or cancel recovery | human | H | recovery secret at the host CLI, alert to every adult out of the browser, waiting period until the member redeems the alert's one-time acknowledgement token (capped; without it the period runs to its cap), finished in the browser with an enrollment token | deny | See D39, D75; key management, section 6. Completing a recovery rotates the member's DEK (see D106), ends the unlock window and revokes every other passkey, paired device, web session and channel binding of that member, except those the member keeps on the completion screen |
+| Create or revoke a delegation sub-key | human (the member the scheduled task runs for) | H | step-up; creating one for a household-partition module also takes the delay and adult veto of rights changes | deny | Available after V0.1, opt-in per scheduled task (see D62, amending D36; PRD FR-88). One module, one partition; sealed by the instance key; listed in the member's settings. A run that holds it reads the delegated module file and writes only through the owner's sealed inbox. Revoking it, removing the member or deactivating the module destroys it and marks the module file for re-keying at the owner's next unlock; until then the sub-key copy in older backups still opens the file (see D94). Every data type may be delegated |
+| Create a disclosure grant | human (the granting member) | H | step-up | deny | Names the fields, a derivation function registered in code, the frequency, the recipient adult and the expiry. The Core computes the value without a model, as closed types only, keeps its source data type, stores it with the taint of its inputs (I9) and the granting member as author (so the recipient's assistant reads it as `member` taint, see D104), then seals it into the recipient's inbox; never on a secondary channel; every computation audited without the value. Amends D46 for this case only (see D64, PRD FR-92) |
+| Revoke a disclosure grant | human (the granting member) | H | none (safe direction, one action) | deny | Stops future computations (see D64) |
+| Compute and deliver a disclosed value | Core | n/a | none | n/a | Runs only under a live disclosure grant; no other cross-partition share exists without a tier 2 action |
+| Activate an activatable module for the household | human | H | step-up, delay and adult veto | deny | While a module is off, it exposes no tool, starts no plugin and opens no file (see D66, PRD FR-100) |
+| Activate an activatable module for oneself | human (that member) | H | step-up | deny | See D66 |
+| Deactivate an activatable module | human (any adult for the household; that member for themself) | H | step-up | deny | Revokes its tokens and delegation sub-keys, suspends the scheduled tasks and playbooks that use it; its data is kept (see D66) |
+| Widen one's own tool policy | human (that member) | H | step-up | deny | A tool policy is a subset of this matrix: it never adds an actor or raises a tier. Only the member widens their own (see D66, PRD FR-99) |
+| Narrow another adult's tool policy | human (another adult) | H | step-up; the member concerned is notified | deny | A new adult starts with the household's standard tools and every activatable module off (PRD FR-99, assumption) |
+| Approve an elevated tier 1 request by voice | human | 1 | spoken | n/a | Elevated tier 1 requests that carry no I13 exception class only; never a cart, an own-account delivery or a restorable physical action, never a rule, a scheduled task, a playbook, an H action or tier 2. The request is read back from a fixed template filled only with its structured fields before the yes, which is bound to its hash; a request needing a free-text field, or a label that is not `trusted` for the member, is not voice-approvable; a voice conversation approves only requests it created (see D100). Audio is transcribed locally only (see D68, PRD FR-94) |
+| Add an adult to the household partition | human | H | an existing adult's passphrase at the host CLI (`vilicus member add`), enrollment token, delay with notification to every other adult, veto by any other adult with a passkey step-up or at the host CLI with `vilicus member veto` and their own passphrase | deny | The instance admin alone cannot do it. The household key is wrapped to the new member at the next adult unlock after the delay (see D34). When no other adult exists, nobody can veto; the authorizing adult is notified at each step and can cancel during the delay (see D88) |
+| Remove a member | human | H | passphrase of an adult other than the one removed, delay with notification to every adult, veto by any adult other than the initiator and the removed member | deny | Same pattern as adding (see D34). One removal pending at a time; rotates the household key; revokes sessions, devices, channel bindings and unlock window (PRD FR-9) |
+| Rename the instance | human | H | instance admin at the host CLI (`vilicus instance rename`) | deny | Every passkey becomes unusable; each member re-enrolls with a token from `vilicus member reenroll` and their own passphrase (see D77); audited, every member notified on the out-of-browser notification channel (see D51) |
+| Change listening address or exposure | human | H | root at the host CLI (`vilicus instance listen`, which rewrites the socket unit), blocking warning | deny | Internet exposure is explicit. Never from the web, so a compromised Gateway cannot decide it (see D101) |
+| Redeem the admin recovery code | human | H | root at the host CLI (`vilicus admin recover`) | deny | Prints a one-time admin enrollment token. The code is printed only on the host console at bootstrap and stored only as an Argon2id hash; no web route accepts it (see D101) |
+| Enroll the first member after an interrupted wizard | human | H | root plus the admin recovery code at the host CLI (`vilicus member enroll-first`) | deny | Refused once a member exists (see D101) |
+| Name a private host and port for Core-originated traffic | human (instance admin) | H | step-up; out-of-browser alert to every adult | deny | For a push webhook, backup upload, remote audit sink or heartbeat on the household's network; the egress proxy allows that destination to the Core and the backup caller only, never to an AI process or a plugin (see D105) |
+| Add a phone or computer as a WireGuard peer | human | H | step-up, tied to that device's pairing | deny | Remote access endpoint managed by Vilicus; the peer configuration is shown once (see D60) |
+| Install or update a release | human | H | admin step-up, version diff shown | deny | Anti-rollback. Each migration runs on a copy swapped in on success; a failure keeps the previous file and stops only that file's module for that partition, with an alert to the instance admin (see D84) |
+| Check pending and failed migrations | human | H | instance admin at the host CLI (`vilicus upgrade check`) | deny | Read-only report; needs no member key (see D84) |
+| Set the backup schedule | human (instance admin) | H | admin step-up | deny | One of the operator-tunable values (see D113) |
+| Set or change the off-host backup target, or the backup secret | human | H | root at the host CLI (`vilicus backup target set`), then the delay and adult veto of rights changes; out-of-browser alert to every adult | deny | S3-compatible object storage with credentials that can write but not delete or overwrite, or object lock. Retention is 7 daily and 4 weekly backups, shown to every adult as a privacy setting. The backup secret is generated by the Core and shown once, never chosen (see D106) |
+| Restore a backup | human | H | root at the host CLI (`vilicus restore`) with the backup secret, services stopped | deny | Root-equivalent; every adult acknowledges the restored security state (PRD FR-53). Requires acknowledgement of an anchor mismatch, and invalidates every device, web session, enrollment token and channel binding (see D52). Security adapter secrets are never restored and are entered again on another host (see D78, D108) |
+| Run a scheduled backup | Core | n/a | none | n/a | `vilicus backup`, run as root by a timer, assembles it without the backup secret: the instance key and audit key are sealed to the backup public key, and passphrase wrappers and file names are additionally sealed to it; uploaded through the egress proxy to the off-host target (see D85, D106) |
+| Verify a backup | human | H | instance admin at the host CLI (`vilicus backup verify`) | deny | See D85; CI also runs a restore drill |
+| Configure a model provider or its data policy | human (an adult, never the instance admin role alone) | H | step-up, delay and veto by each adult | deny | Per provider; the policy is evaluated per data type (see D48, D103, PRD FR-68). In V0.1 reachable through the Core API only, exercised against the test double; its screen ships with the meals milestone (see D101) |
+| Connect the member's own Claude plan (Claude subscription connector) | human (the member who owns the plan) | H | the provider configuration row above (step-up, delay and veto by each adult), then, once its delay has passed, `vilicus ai connect claude <member>` as root at the host CLI with that member's passphrase | deny | Sign-in completes in Anthropic's own flow at the host CLI; Vilicus never handles the credential; the connector serves only that member (D97, D101). It is its own provider-policy entry and allows no data type by default. The plan's account identifier is shown at sign-in, recorded and checked at every start; the binary's hash and tested version ship in the signed Vilicus release (see D110) |
+| Allow a data type on the Claude subscription connector | human (the member, for a type of their personal partition; every adult, for a household-partition type) | H | step-up by the member; for a household-partition type, a step-up by every adult | deny | `health`, `journal` and `budget` can never be allowed on a remote provider (see D103, D110) |
+| Disconnect the member's own Claude plan | human (that member) | H | none (safe direction, one action) | deny | Stops the connector unit; the credential is deleted with its state directory |
+| Change caps or controller thresholds | human | H | step-up | deny | Invariant I18 |
+| Promote records from `external` to `trusted` | human | H | host CLI only, by batch and category after reviewing a sample for records whose fields are all structured; one by one for a free-text record | deny | Only records the member authored or imported; never through the Gateway or the web client; audited (see D45, D112, PRD FR-59) |
+| Call a remote AI provider with household data | Core | 0 | provider policy | allow-b | Policy per data type (see D48, D103): `health`, `journal` and `budget` use the local model only. Each record kind declares the data types its fields may hold, every record stores the set of types it contains (the union of its inputs' sets for a derived record), and the provider is bound to the capability token at issuance from the data types the session may read (see D80). Children's dietary constraints are applied by a deterministic Core filter before and after a remote meal-planning call and never reach the remote model (see D80). A call routed to an unconfigured provider fails closed |
+| Trigger the kill switch | human (any authenticated web session, or root at the host CLI with `vilicus killswitch`, no passphrase, see D101); a Core detector suspends only the offending task or session (D86) | n/a | none | deny | Never from a tainted session. Stops the Claude subscription connector units. Suspends rules of assistant origin, never device adapters or rules of human origin (see D58). Never suspends home alerts: the plugin that relays them by mail is exempt from the suspension of plugins with a network effect (PRD FR-82) |
+| Resume after the kill switch | human | H | step-up | deny | |
+
+## 2. Tasks
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| List and read tasks | any | 0 | none | allow-b | |
+| Create or edit a task | any | 1 | none | allow-b | Journaled, undoable |
+| Change status or check items | any | 1 | none | allow-b | |
+| Delete a task | any | 1 | none | elevate | Soft delete first |
+| Purge deleted tasks | any | 2 (D46) | signed | deny | |
+| Move or share a task into the household partition or to another member | any | 2 (D46) | signed | deny | Crosses a partition boundary |
+| Create or edit a task in the household partition by a member of it | any | 1 | none | elevate | Same partition; `member` taint for the others |
+
+## 3. Calendar
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Read events | any | 0 | none | allow-b | |
+| Create, move or edit an event in a local calendar, no guests | any | 1 | none | elevate | Journaled, undoable |
+| Create an event with guests | any | 2 (D46) | signed | queue | Sends invitations |
+| Move or edit an event that has guests | any | 2 (D46) | signed | queue | Sends updates |
+| Delete an event that has guests | any | 2 (D46) | signed | queue | Sends cancellations |
+| Accept or decline an invitation (RSVP) | any | 2 (D46) | signed | deny | Outbound effect |
+| Change an event in a calendar synchronized with an external account | any | 2 (D46) | signed | deny | Batched per sync run, items listed |
+| Create a recipe reminder event from the meal plan | Core | 1 | none | n/a | Stored in the household calendar (same partition as the plan); members see it through a merged view, no cross-partition write |
+| Create a birthday or reminder entry | any | 1 | none | allow-b | Local |
+| Enable synchronization to an external calendar account | human | H | step-up | deny | |
+
+## 4. Places and travel
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Read places and travel times | any | 0 | none | allow-b | |
+| Add or edit a place | any | 1 | none | elevate | Locations are sensitive |
+| Compute travel time with an external routing provider | Core | 0 | provider policy | deny | Off by default; coordinates leave the instance; provider chosen by the household (H) |
+| Local context lookup (web) | Core | 0 | none | allow-b | Separate Core stage, query from a Core template or enum (place, date), never from reader text; egress via the proxy; result `external` |
+| Share a location with an external party | any | 2 (D46) | signed | deny | |
+
+## 5. Budget
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Read balances and transactions | any | 0 | none | deny | Sensitive; local model only (see D48) |
+| Categorize a transaction | any | 1 | none | deny | Journaled, undoable. Imported rows are `external`, so assisted categorization of a fresh import runs as a separate untainted task that sees reader output (bounded categories), or uses deterministic rules and the UI |
+| Import a statement | any | 1 | none | deny | File is untrusted, parser fuzzed; imported rows are `external` |
+| Edit budget lines | any | 1 | none | deny | |
+| Export data outside the instance | any | 2 (D46) | signed | deny | |
+| Connect or change a bank connector | human | H | step-up | deny | |
+| Initiate any payment or transfer | n/a | 2 | signed | deny | Not in scope for v1 |
+
+## 6. Meals and groceries
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Read recipes, plan, stock | any | 0 | none | allow-b | |
+| Add a recipe or edit the plan | any | 1 | none | allow-b | |
+| Add a note to the meal plan | any | 1 | none | exempt | Low-risk record kind (PRD FR-28); from an AI principal only its structured fields are accepted (see D104) |
+| Import a recipe from external content | any | 1 | none | elevate | Parsed into bounded fields by a deterministic parser; steps and descriptions stay `external` and never reach the planner; never promoted as a whole (see D43). The recipe URL is never supplied by an AI principal: the tool accepts it from a `Member` principal, or from text the member typed in the current turn, verbatim (PRD FR-40) |
+| Update stock | any | 1 | none | exempt | Low-risk record kind (PRD FR-28); from an AI principal only its structured fields are accepted (see D104) |
+| Generate a shopping list | any | 1 | none | allow-b | Pure computation in the partition |
+| Add an item to the shopping list | any | 1 | none | exempt | Low-risk record kind (PRD FR-28); from an AI principal only its structured fields are accepted (see D104) |
+| Prepare a cart through a store connector | any | 1 | light | elevate | Acts in the member's own store account; one light confirmation for the item list, whatever the session's taint. I13 exception class: reversible external state, no effect visible to a third party (see D44). The connector searches by canonical ingredient name only; free-text items are listed to the member as not added. It reports added, substituted and missing items and can empty the cart it filled (PRD FR-47) |
+| Place an order or pay | n/a | n/a | n/a | n/a | Not an action of Vilicus: ordering and payment always stay with a human on the store's website. The store connector's manifest contains no ordering or payment operation, checked at build (see D44, PRD FR-48) |
+| Change store account or delivery details | human | H | step-up | deny | The household keeps no stored payment method on the store account (PRD FR-48) |
+
+## 7. Documentation
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Read pages and procedures | any | 0 | none | allow-b | |
+| Create or edit a page | any | 1 | none | elevate | Versioned |
+| Promote a task note to a page | any | 1 | none | elevate | Same partition, taint carried over |
+| Write a page into the household partition from a personal partition | any | 2 (D46) | signed | deny | Crosses a boundary |
+| Publish outside the household | any | 2 (D46) | signed | deny | |
+
+## 8. Mail and messaging
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Read mail through the quarantined reader | any | 0 | none | allow-b | Output is typed fields only |
+| Read a raw mail body in the web or app UI | human | 0 | none | n/a | Rendered in a sandboxed iframe |
+| Raw read by an external assistant | n/a | n/a | n/a | n/a | Withdrawn: Vilicus has no API for outside AI assistants (see D49) |
+| Raise an alert about an important mail | any | 1 | none | allow-b | Static template to the owner only |
+| Send a system notification | Core | n/a | none | n/a | Template, resolved parameters, own channel, rate limited; content-free on the out-of-browser notification channel (see D47) |
+| Draft a reply (drafter role) | any | 1 | none | allow-b | Draft stays local, labelled `external`, shown to the human only. The drafter reads the object being answered and the structured records the member selects, with no partition-wide read tool; the outbound content check marks matching fragments before the draft is shown |
+| Send a reply or a new mail to a third party | any | 2 (D46) | signed | queue | Confirmed on the native app; full recipient list and body shown; outbound content check applies (PRD FR-91) |
+| Send a mail to the member's own address (a digest, a report, a reminder) | any | 1 | light | elevate | I13 exception class `own_account_delivery`: the only recipient is the member's own address on their own account, resolved by the Core; the tool takes no destination argument, and the body is plain text or Core-rendered HTML referencing no remote resource (see D67, D81, PRD FR-91, FR-101). One light confirmation whatever the session's taint; never a spoken confirmation. A member's own accounts only, never across members. The provider policy by data type and the outbound content check apply: a local-only data type is never mailed to an account on a hosted provider (see D81) |
+| Bind a sender identity on a secondary channel, or remove a channel binding | human | H | step-up in the primary channel; binding proven by a code sent on the channel and typed in the primary channel | deny | Created from the primary channel only; one-to-one conversations only (see D42) |
+| Add a data type to a secondary channel's ceiling, or remove one | human (an adult) | H | to add: step-up in the primary channel, with a warning that the type then leaves through the messaging provider; to remove: none (safe direction) | deny | `presence`, `home_state`, `alarm_state`, `calendar` and `child` are outside the ceiling unless an adult adds them; `budget`, `mail_raw` and `health` can never be added (see D42, D82, D103) |
+| Act on a message from a bound sender on a secondary channel | human (bound member) | 0 or 1 | as the target row | as the target row | The sender acts as the member; the content is untrusted and taints the AI session. Tier 0 and tier 1 rows only; never tier 2 or H, never pairing, recovery or binding changes. A member may write their own data types this way, under the provider policy (see D42) |
+| Receive a message from an unbound sender or a group conversation | Core | n/a | none | n/a | Dropped, never processed, counted in the audit log (see D42) |
+| Reply on a secondary channel | Core | n/a | none | n/a | To the bound member only; from templates or within the channel's ceiling, an allowlist of data types that never includes `budget`, `mail_raw` or `health` and, by default, excludes `presence`, `home_state`, `alarm_state`, `calendar` and `child`, applied as input gating at token issuance (see D103); outbound content check; points to the app for details (see D42, D82). A scheduled task's result reaches a secondary channel only as a template ("briefing ready") or as content within the ceiling after the outbound check (PRD FR-87) |
+| Reply to a quick check-in on a bound secondary channel | human (bound member) | 1 | none | n/a | A one-word or one-number reply, matched to exactly one pending reminder by its short opaque reference; a reply that matches none or several is refused and asked again. The entry is health data (local model only). The channel's only answer is that the entry is logged; the binding screen states that replies transit the messaging provider (PRD FR-89) |
+| Send a free-text message to a third party through a secondary channel | n/a | n/a | n/a | n/a | Not supported: a secondary channel talks only to the bound member (see D42, superseding D30) |
+| Delete or move mail on the server | any | 2 (D46) | signed | deny | Write to an external account |
+| Change a mail account connection | human | H | step-up | deny | |
+| Grant write access on an OAuth account | human | H | step-up | deny | Read-only by default, per account and per action |
+
+## 9. Assistant memory
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Search memory | any | 0 | none | allow-b | Tags and taint always returned. Automatic retrieval returns `trusted` facts only; an `external` fact reaches a planner only through this explicit search, which taints the session; quarantined facts live in a separate index |
+| Record a fact from a trusted source | any | 1 | none | deny | A fact drawn from a transcribed turn (`spoken` provenance) is stored `external` until the member confirms it (see D112) |
+| Confirm a fact drawn from a spoken turn | human (that member) | 1 | light, in the app | n/a | One tap; the fact is then stored `trusted` (see D112) |
+| Record a fact from untrusted content | any | 1 | none | allow-b | Stored quarantined, tagged, not used for planning |
+| Promote a quarantined fact | human | H | host CLI only | deny | Was tier 2 with signed confirmation; promotion now happens only from the host CLI (see D45 and section 1) |
+| Invalidate a fact | any | 1 | none | elevate | Invalidated, not deleted; rollback available |
+| Roll back memory to an earlier state | any | 1 | none | elevate | |
+| Forget a record for good on request (final forgetting) | any | 2 (D46) | signed | deny | Confirmed on the native app after the candidate list is shown; destroys the record keys. The screen states that existing backups still hold the record until they expire (PRD FR-95) |
+| Purge memory | any | 2 (D46) | signed | deny | |
+| Enable the Graphiti annex backend | human | H | step-up | deny | Memory leaves the SQLCipher boundary |
+
+## 10. Plugins and connectors
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Install or enable a plugin | human | H | step-up, manifest diff shown by the Core, delay and adult veto | deny | Before V1, only plugins signed by the project's offline key; first-party plugins ship inside the signed main package, version-locked to the Core, so V0.1 has no plugin install command (see D102). After V1, a third-party plugin signed by its author may be installed; any of its write operations that does not map to a row of this matrix is tier 2, and it can declare no I13 exception class (see D92) |
+| Grant a plugin network destinations | human | H | step-up, manifest diff shown, delay and adult veto | deny | Exact hostnames only |
+| Grant a device adapter a named USB device, Unix socket path, shared private namespace with a managed daemon, or private address range with ports | human | H | step-up, grant shown | deny | A grant names exactly one target and is audited; ports are enforced per unit by an nftables rule installed by the root CLI with the grant; no unit is granted a loopback address; internet access stays behind the egress proxy (see D54, D115) |
+| Change a plugin's rights | human | H | step-up, diff shown | deny | New confirmation on every change |
+| Revoke or stop a plugin | human | H | none (safe direction, one action) | deny | Safe direction; also via signed revocation list |
+| Call a plugin read operation | any | 0 | none | allow-b | Output is `external` |
+| Call a plugin write operation | any | per manifest | per manifest | elevate | Any outbound network effect is tier 2 by rule (I13), unless the operation declares a named exception class (see D44, D56, D67); a third-party plugin declares none, and its write operations that map to no row of this matrix are tier 2 (see D92). Anything arriving from a plugin is stored `external` |
+
+## 10a. Home automation
+
+Home rows follow PRD FR-80 and FR-85 and decisions D53 to D60, D69 and D72. The module ships after V0.1.
+
+**Principals.** *member*: an adult's web session (or the host CLI where stated). *rule*: a home rule validated by an adult, run by the Core with every member locked, without a model (see D57, D58). *display*: a household display, a paired device without a member, limited to the home domain (see D55). *assistant*: Vilicus's own assistant through a capability token. A device adapter reports state and executes commands; it never initiates an action on its own (spine AD-38).
+
+**Taint.** Home rows are not taint-gated for the member, CLI, rule, display, adapter and event principals; the *Tainted session* column applies to the assistant only (spine AD-7). Stored taint is computed by the Core in every case: device state written from adapter reports is `external`, and a write derived from device state (a rule action triggered by a state change, for example) stores `external`, so an AI session that later reads it becomes tainted.
+
+**Safe direction.** On a safety-relevant device, rules and tier 1 callers only move toward the safe state: lock, arm, close, camera on, and power on for a switch that powers a safety-relevant device. Unlocking, disarming, opening and cutting power to the infrastructure (the server, a radio coordinator, a gateway) are not offered before the native app, then tier 2 on it (see D69); turning a camera off outside a rule is an H action. The assistant never performs any of them (see D56). Locks, alarms, cameras, gates, garage doors and covers of unknown kind are safety-relevant as soon as they are discovered; an adapter cannot change the class of a confirmed device, and reclassifying is an H action (see D72). An unclassified `switch`, `plug` or relay output accepts no command from the display, the assistant or a rule until an adult classifies it, because an opener wired to a relay reports as a switch; a `momentary` output is safety-relevant from discovery, never tier 1, and follows the unlock and open row when it drives an opener (see D109). A rule touching a safety-relevant device runs only while its structured form matches the version approved by an H action (spine AD-39).
+
+**Life safety first** (see D91, amending D56). The safe direction protects against intrusion, not against fire, water or frost. While a smoke or water alert is active, lock, close and cut commands are suspended for every principal, shutters may open, and every adult is alerted; unlocking and disarming stay as above (see D69). A heating valve is never closed below a floor temperature. A closing command on a gate or a garage door relies on the device's own obstacle detection and is refused when the device reports none.
+
+| Action | Principals allowed | Tier | Confirmation | Tainted session (assistant) | Stored taint | Notes |
+|--------|--------------------|------|--------------|-----------------------------|--------------|-------|
+| Read device state, rooms, groups, scenes, modes, rules and household presence | member, rule, display, assistant | 0 | none | allow-b | n/a | Device state is `external`, so reading it taints the AI session. The display reads the home domain and household presence only |
+| Read an adult's individual presence and its history | that adult; the other adult only if the adult concerned opts in | 0 | none | deny | n/a | Individual history lives in that adult's personal partition (PRD FR-76) |
+| Report device discovery, state and availability | adapter | n/a | none | n/a | `external` | Only the home module writes device state, and only from adapter reports. A discovered lock, alarm, camera, gate, garage door, cover of unknown kind or `momentary` output is safety-relevant at once; a `switch`, `plug` or relay output stays unclassified until an adult classifies it; a report that changes the class of a confirmed device is refused (see D72, D109) |
+| Restorable physical action on a device that is not safety-relevant: light, cover of a kind an adult confirmed as not safety-relevant, heating setpoint within a set range, vacuum start or stop, irrigation within a capped duration, plug or switch that an adult classified as powering nothing safety-relevant | member, rule, display, assistant | 1 | none | elevate | computed by the Core | I13 exception class for restorable physical actions (see D56). Undo sends a new command with the previous target state. An unclassified `switch`, `plug` or relay output accepts no command from the display, the assistant or a rule (see D109) |
+| Apply a scene | member, rule, display, assistant | 1 | none | elevate | computed by the Core | Each command of the scene follows its own row; the display and the assistant cannot apply a scene that contains an H command |
+| Safe-direction command on a safety-relevant device: lock, arm, close, camera on | member, rule, assistant | 1 | none | elevate | computed by the Core | Not available to the display (see D55). Reversing it follows the unlock, disarm or open row (2 (D69)) or, for a camera, the camera-off row; never an undo. A rule runs it only under an approved version |
+| Unlock, disarm, or open a safety-relevant device | member, on the native app | 2 (D69) | signed | deny | computed by the Core | Not offered before the native app; the household uses the vendor's app or a physical gesture meanwhile (see D69). Never a rule, a display or the assistant. When household presence turns to someone home while armed, the Core sends an alert that points the member to that path, and, once the native app exists, a disarm proposal completed on it with a signed confirmation (PRD FR-80). Proceeds while the audit writer is down (see D59) |
+| Turn a camera off | member; a rule only after a human disarm | H outside a rule | step-up | deny | computed by the Core | The assistant never turns a camera off |
+| Cut power to the infrastructure (the server, a radio coordinator, a gateway) | member, on the native app | 2 (D69) | signed | deny | computed by the Core | Not offered before the native app (see D69). Never a rule, a display or the assistant |
+| Change a mode that concerns no safety-relevant device | member, rule, display | 1 | none | n/a | computed by the Core | Not available to the assistant (PRD FR-79) |
+| Change a mode that concerns a safety-relevant device | member, rule | 1 toward the safe state; H otherwise | none toward the safe state; step-up otherwise | n/a | computed by the Core | Not available to the display or the assistant. A mode change that would unlock, disarm, open or cut infrastructure power follows those rows (see D69) |
+| Create or edit a home rule that touches no safety-relevant device | member | 1 | none | n/a | computed by the Core | Written by an adult in the rule editor; journaled |
+| Propose a home rule | assistant | 1 | none | elevate | `external` when the session is tainted | A proposal only. At validation by an adult, the rule is re-created from its structured fields, stored `trusted` with that adult as author (see D70), and keeps its assistant origin; the kill switch suspends every rule of assistant origin (see D58) |
+| Approve the creation or change of a rule that touches a safety-relevant device | member | H | step-up | deny | n/a | Approval is recorded by the Core against the rule's structured form (spine AD-35, AD-39) |
+| Run a rule dry with a trace | member | 0 | none | n/a | n/a | No side effect |
+| Suspend a rule for a set time | member, display | 1 | none | n/a | computed by the Core | The display may suspend only a rule that touches no safety-relevant device |
+| Pause all automations | member, CLI | H | step-up | deny | n/a | One control pauses every rule; proceeds while the audit writer is down (see D59) |
+| Acknowledge safety-relevant actions held after a wall-clock jump | member | H | step-up | deny | n/a | Schedule triggers continue on the monotonic clock meanwhile (see D59) |
+| Add, rename or organize devices, rooms, floors, groups and scenes | member | 1 | none | n/a | computed by the Core | Device quirks stay in adapters |
+| Confirm or change a device's class, mark it safety-relevant or infrastructure, or remove the mark | member | H | step-up | deny | n/a | Core policy, not module data (PRD FR-72, spine AD-35). A lock, alarm, camera, gate, garage door, cover of unknown kind or `momentary` output starts safety-relevant; only this row changes that, never an adapter report (see D72). Classifying a `switch`, `plug` or relay output also happens here (see D109) |
+| Pair a household display | member | H | step-up | deny | n/a | A paired device without a member; removed like any device (see D55) |
+| Suspend lock, close and cut commands while a smoke or water alert is active | Core | n/a | none | n/a | n/a | Every adult is alerted; shutters may open; ends when the alert ends (see D91) |
+| Send a home alert | Core | n/a | none | n/a | n/a | Own notification class and rate budget, one static template per alert kind, shown in the app; the push payload names no kind and carries one generic text per severity (spine AD-32); on each adult's out-of-browser notification channels and by mail through an external SMTP relay (PRD FR-82). The kill switch never suspends it (section 1) |
+
+## 10b. Scheduled tasks, playbooks and the researcher
+
+These rows follow PRD FR-87, FR-90 and FR-98 and decisions D62, D63, D65 and D73. They ship after V0.1. A scheduled task is a structured definition (a `kind` from a closed set with a prompt template shipped with Vilicus, trigger, tools, caps, delivery) with an optional instruction text, `trusted` only when the member typed it in full (see D99); a run starts tainted if any free-text field of its definition is `external`; each run is an AI session with its own capability token, so every tool call of a run follows its own row, including the *Tainted session* column. A playbook step is not taint-gated (spine AD-7), but its writes store the taint the Core computes. The researcher is tainted by every page it fetches; it is contained by the limits of D63 instead of being gated by taint, so its rows read n/a.
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Create or edit one's own scheduled task | human (the member it runs for) | 1 | none | n/a | Stored in the member's partition; times can differ on workdays, weekends and holidays and follow the household time zone (PRD FR-87) |
+| Propose a scheduled task | any | 1 | none | elevate | A proposal only; it keeps its assistant origin and its computed taint and does not run until validated; once the member validates it, its structured fields are stored `trusted` with that member as author and it keeps its assistant origin (see D70); an instruction text drafted by the assistant in a tainted session stays `external`, so its runs start tainted (see D99). Suspended by the kill switch |
+| Validate a proposed scheduled task | human (the member it runs for, and nobody else) | 1 | light, in the primary channel; never spoken | n/a | Another adult cannot validate it (PRD FR-87, see D68) |
+| Suspend, resume or delete a scheduled task | human (the member it runs for) | 1 | none | n/a | The kill switch suspends every task of assistant origin; deactivating a module suspends the tasks that use it (see D66) |
+| Run a scheduled task | Core | as the target rows | as the target rows | as the target rows | One capability token per run, limited by the member's tool policy and the task's caps. A late run happens at most once within the staleness limit (section 11), otherwise it is cancelled and recorded. Without a delegation sub-key, the run waits for the member's unlock and the member gets a content-free notification (see D62). With one, the Core reads the run descriptor in `core.db` (fire time and staleness limit in clear, structured definition sealed under the sub-key), and the run's output is stored `external` (see D111). A task that reads external content waits until the quarantined reader ships |
+| Create or validate a playbook | human (the member it acts for) | 1; H when it touches a safety-relevant device | none when the member writes it; light to validate an assistant proposal, never spoken; step-up when it touches a safety-relevant device | n/a | Declarative, versioned, schema-validated; no model step (see D65, PRD FR-98). A playbook touching a safety-relevant device follows the home rule rows of section 10a. A playbook triggers only on records written by a `Member`, `Rule`, `Adapter` or `Cli` principal (see D109). A message step uses a template from the closed set shipped with Vilicus or text the member typed in full; text drafted by the assistant is never a notification template |
+| Grant or revoke a standing approval for own-account delivery by a playbook | human (the member who owns the destination account) | 1 | light to grant, never spoken; none to revoke | n/a | Per destination; lets the member's playbook deliver to that account without a confirmation at each run; revocable, listed in the member's settings, and the delivery still follows the provider policy by data type (see D81, D89; PRD FR-98) |
+| Propose a playbook | any | 1 | none | elevate | Keeps its assistant origin; suspended by the kill switch |
+| Run a playbook step | playbook | at most 1, or a safe-direction home command | as the target row | n/a | Each step is a registered tool call through the pipeline; the run started from a record written by a `Member`, `Rule`, `Adapter` or `Cli` principal only (see D109). Outbound effects only through system notifications or own-account delivery; never tier 2 or H (see D65) |
+| Suspend a playbook | human (the member it acts for) | 1 | none | n/a | Safe direction |
+| Ask the researcher a question | human | 0 | none | n/a | The researcher receives only the question as the member typed it, never partition data, memory or conversation context; the screen says the question leaves the instance. The first query is built by a Core template stage and fetched by the trusted fetcher (see D73). The question is classified at the strictest provider policy rule unless the member picks a data type (see D63, PRD FR-90) |
+| Request a link | researcher | 0 | none | n/a | The researcher has no network of its own; it names a URL and the Core checks it before any request: only a link found verbatim in a page already fetched for that task, no query string composed by the model, capped URL length, internal addresses blocked (see D73) |
+| Fetch a researcher URL | Core (trusted fetcher) | 0 | none | n/a | A fetcher that runs no model and no page code performs the request after the Core's check: GET only, no cookies, through the egress proxy in researcher egress mode, within per-host budgets (PRD FR-105). It returns bytes only; they are parsed in the sandboxed researcher, never in the Core. Output is `external` (see D73) |
+| Render a fetched page | researcher (browser plugin, if kept) | 0 | none | n/a | The browser plugin has no network and renders only bytes the fetcher returned; it cannot make a request of its own (see D73) |
+| Produce a research report | researcher | 1 | none | n/a | The researcher has no other write tool. The report and its sources are stored `external` in the member's partition, shown to the human only, and never handed to the planner as text |
+
+## 10c. Activatable modules and generated documents
+
+These rows follow PRD FR-91 and FR-100 to FR-106 and decisions D66, D67 and D81. Each module here is off until activated (section 1); while off, none of its rows exists. Content read from an external account or feed is `external`.
+
+| Action | Actor | Tier | Confirmation | Tainted session | Notes |
+|--------|-------|------|--------------|-----------------|-------|
+| Add or change a watched feed | human | 1 | none | deny | The feed URL comes from a `Member` principal or from text the member typed in the current turn, verbatim, never from a model (PRD FR-40, FR-101) |
+| Fetch watched feeds and repository lists | Core | 0 | none | n/a | A Core stage through the egress proxy, within per-host budgets, never a model; content `external` (PRD FR-101) |
+| Build a daily or weekly digest | any | 1 | none | allow-b | Relevance scored by the quarantined reader (typed score and topic); stored in the member's partition. Sending it to the member's own address follows the own-account mail row of section 8 |
+| List or read files on the member's file server | any | 0 | none | allow-b | Through an isolated plugin; output `external` (PRD FR-102) |
+| Deposit a file in the member's dedicated folder | any | 1 | light | elevate | I13 exception class `own_account_delivery` (see D67). Never a spoken confirmation. The provider policy by data type and the outbound content check apply; a local-only data type is never deposited on a hosted account; a deposited HTML, Markdown or SVG file references no remote resource (see D81) |
+| Delete a file on the file server | any | 2 (D46) | signed | deny | Confirmed on the native app (PRD FR-102) |
+| Create or edit a blog post draft, its tags and images | any | 1 | light | elevate | I13 exception class `own_account_delivery` while nothing is public (see D67, PRD FR-103). The provider policy by data type and the outbound content check apply; the draft references no remote resource, and its images are only files the member uploaded (see D81) |
+| Publish a blog post | any | 2 (D46) | signed | queue | Public effect; confirmed on the native app after a human review of the final text (PRD FR-103) |
+| Write activity notes, track job applications, tailor a CV | any | 1 | none | elevate | Member's personal partition only; collected job offers are `external` and fetched by a plugin within per-host budgets (PRD FR-104) |
+| Download a generated document (report, export) | human (member) | 0 | none | n/a | A read by that member in the app, never an assistant action (PRD FR-106) |
+| Send a generated document anywhere else | any | 2 (D46) | signed | deny | Includes sending it to a third party or another service; own-account delivery does not apply (PRD FR-106). Children's routine and episode reports never leave without this row (PRD FR-93) |
+
+## 11. Default caps (to tune)
+
+| Cap | Initial value |
+|-----|---------------|
+| Orders per week | 2 (not applicable while Vilicus never places an order, see D44) |
+| Mails sent per hour | 5 |
+| System notifications per member per hour | 10 |
+| Home alerts | Own rate budget, separate from system notifications; value to tune (PRD FR-82) |
+| Spend per order without extra confirmation | 0 (always confirm) |
+| Tool calls per task | 50; in V0.1 a token's budget is this number of tool calls (see D113) |
+| Tokens and cost per task | Configurable, conservative default; alert before the budget is reached (PRD FR-97) |
+| Tokens and cost per member per day | Configurable, conservative default; alert before the budget is reached (PRD FR-97) |
+| Claude subscription connector, per task and per member | Counted in tokens from the usage the stream reports, with a default well below the plan's window limit (spine AD-53) |
+| Caps per scheduled task run | Tool calls, tokens and cost set in the task definition, never above the member's caps; values to tune (PRD FR-87) |
+| Staleness limit for a late scheduled task run | 12 hours (PRD FR-87, assumption); at most one late run, otherwise cancelled and recorded |
+| Per-host request budgets | One budget per host in the egress proxy, shared by every process that reaches it (recipe import, feeds, context sources, store connector, researcher, plugins); values to tune (PRD FR-105) |
+| Researcher link URL length | Capped; value to tune (PRD FR-90) |
+| Capability token lifetime | 10 minutes, bound to one task (see D113) |
+| Elevated tier 1 request expiry | 24 hours (PRD FR-28, assumption) |
+| Pending signed confirmations | 1 in the normal queue, 1 in the tainted queue, with a lower hourly rate for the tainted queue (proposal: 3 per hour) |
+| Signed confirmation expiry | Under 2 minutes |
+| Consecutive refusals before the task is suspended | 3 |
+| Wait for an unlock before a background task is canceled | 12 hours |
+| Recovery waiting period | 48 hours, extended up to its cap until the member redeems the alert's acknowledgement token (see D75; value of the cap in PRD FR-14) |
+| New device delay before tier 2 or pairing | 24 hours |
+
+## 12. How to use this matrix
+
+1. When adding a module or plugin, add its rows before writing code; the module registry loads tool definitions from the same table in code, and a build check compares them.
+2. Reviewers look for: tier 2 actions without signed confirmation, anything that sends or deletes that a tainted session may call, actions reachable by the AI that should be human-only, and, in home rows, any principal other than a human able to move a safety-relevant device away from the safe state.
+3. Each row maps to an invariant test where possible (`ai-safety.md`, section 3). The check that every tool with a network effect is tier 2 unless it declares one named exception class from the closed set (I13, see D44, D56, D67), that no H action is a tool (I18), and that no tool of a milestone before the native app is tier 2 (see D46) is automated over this table. Safety marks exist only at runtime, so the part of I13 that forbids moving a safety-relevant device away from the safe state, and the D69 rows, are checked by runtime tests, not by the build check.
+
+## 13. Review log
+
+| Date | Reviewer | Notes |
+|------|----------|-------|
+| 2026-10-08 | Author, draft v0 | Initial version |
+| 2026-10-08 | Author, revision 1 | Added Actor and Tainted session columns, tier H, outbound-effect rule, cross-partition rule, missing rows (notifications, routing, local lookup, administration, sync, recovery). Aligned with `architecture.md` |
+| 2026-10-15 | Author, revision 2 | Aligned with the PRD, the architecture spine and D34 to D61: outside assistant rows withdrawn, cart preparation tier 1, elevated request queue and low-risk exemptions, tier 2 rows marked unregistered before the native app, secondary channel rows, new H actions, home automation section, promotion from the host CLI |
+| 2026-10-16 | Author, revision 2 update | Aligned with PRD section 4.18 and D62 to D68: `own_account_delivery` exception class and spoken confirmation in the legend; delegation sub-keys after V0.1; disclosure grants, module activation and tool policy rows; scheduled task, playbook and researcher rows (section 10b); activatable module and generated document rows (section 10c); own-account mail, third-party mail, final forgetting and quick check-in rows; caps for scheduled tasks, per-host budgets and cost alerts |
+| 2026-10-16 | Author, revision 2 revalidation | Applied D69 to D86: unlock, disarm, open and infrastructure power cut marked 2 (D69); step-up bound to one action (D71) and its residual risk in the legend; member-approved writes stored `trusted` and structured `member` fields not tainting (D70); safety-relevant from discovery (D72); researcher fetch rows (D73); re-enroll and suspend rows, own-passphrase rule for host unlock and `device pair` (D77); provider binding and allergy filter note (D80); own-account delivery under the provider policy (D81); secondary channel ceiling as an allowlist with its H row (D82); upgrade check, scheduled backup and backup verify rows (D84, D85); recovery acknowledgement token (D75); home alerts exempt from the kill switch; runtime tests for safety marks. No row changed for D79 |
+| 2026-10-16 | Author, revision 2 update | Applied D87 to D96: lift-suspension row (D87); single-adult addition and CLI veto on the add-an-adult row (D88); standing approval row for playbook own-account delivery (D89); life-safety paragraph and row in section 10a (D91); project-signed plugins before V1 and third-party plugin rules after V1 (D92); delegated runs writing through the sealed inbox and re-keying at the next unlock (D94). D90, D93, D95 and D96 change no row |
+| 2026-10-16 | Author, revision 2 update | Aligned with D97 and D100: connecting a member's own Claude plan is an H action (D97); a spoken yes follows a template read-back (D100) |
+| 2026-10-16 | Author, revision 2 revalidation | Applied D101 to D115: host-only exposure, admin recovery code and first-member rows, host kill switch, self-suspension, provider configuration API-only in V0.1, connect and disconnect rows for the Claude plan with its own data type opt-in, and the lift-suspension residual (D87, D101); plugins in the main package before V1 (D102); channel ceiling as an allowlist of data types applied at token issuance (D103); structured-only exempt kinds and household writes from personal context (D104); test notification at re-enrollment and a private Core destination row (D105); backup rows split, target at the host CLI with delay, veto and alert, restore at the host CLI (D106, B52); unclassified relays and `momentary` outputs, playbook triggers (D109); connector opt-in and pinning (D110); delegated run descriptors (D111); spoken facts and per-item promotion (D112); unlock window, token lifetime and budget (D113); grants without loopback addresses (D115). Autofixes: D99 applied to the legend, the taint paragraph and the scheduled task rows; spoken scope and read-back (D100); out-of-browser alerts for every new way in; batch light confirmations; cart search by canonical name; drafter scope; own-account delivery without remote resources or a destination argument (D81); recipe and feed URLs never from a model, watched feed row; memory retrieval; home alert payload (spine AD-32); revocation at re-enrollment and recovery |

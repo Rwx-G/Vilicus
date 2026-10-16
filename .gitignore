@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Frontend
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Environment
+.env
+.env.*
+
+# SQLite / SQLCipher databases, even encrypted ones, never belong in the repo
+*.db
+*.db-wal
+*.db-shm

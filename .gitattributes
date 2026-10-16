@@ -1,0 +1,6 @@
+* text=auto
+
+# Files consumed inside Linux containers or by systemd must stay LF on a Windows checkout
+*.sh text eol=lf
+Dockerfile* text eol=lf
+*.service text eol=lf

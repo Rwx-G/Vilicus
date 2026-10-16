@@ -1,0 +1,220 @@
+# The E24 test bed. Every network is internal: nothing reaches the real internet, and every name
+# and address is a placeholder (RFC 2606 / RFC 6761 / RFC 8375 names, RFC 5737 TEST-NET-2, RFC 1918 and
+# RFC 6598 addresses).
+#
+# - wan (198.51.100.0/24): stands in for the internet; `public-dns` answers for the dynamic DNS
+#   provider's zone, with the household's private LAN address as the dynamic DNS record.
+# - lan (10.88.0.0/24): the household network; `router` is the home router's resolver
+#   (dnsmasq with DNS rebinding protection, as many routers ship, and an exception for the
+#   dynamic DNS zone). It knows nothing of the overlay. `lan-client` is a device on the LAN only.
+# - overlay (100.64.88.0/24): a private overlay network (shared address space, as mesh VPNs
+#   use). `overlay-dns` is the overlay client's resolver on a joined device: it answers for the
+#   overlay zone and forwards every other name to the home router. The browsers are a device
+#   that joined the overlay, so they use it.
+# - `router-strict` is a resolver with rebinding protection and no exception, reachable on every
+#   network, that asks the dynamic DNS zone and the overlay zone like any other name.
+name: vilicus-e24
+
+x-tools: &tools
+  image: vilicus-spike-e24-tools
+  init: true
+
+x-instance: &instance
+  <<: *tools
+  command: [/target/debug/naming-options]
+  volumes:
+    - target:/target:ro
+    - pki:/pki:ro
+
+networks:
+  wan:
+    internal: true
+    ipam:
+      config:
+        - subnet: 198.51.100.0/24
+  lan:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.88.0.0/24
+  overlay:
+    internal: true
+    ipam:
+      config:
+        - subnet: 100.64.88.0/24
+
+volumes:
+  pki:
+  target:
+    external: true
+    name: vilicus-e24-target
+
+services:
+  certs:
+    <<: *tools
+    build:
+      context: .
+      dockerfile: tools.Dockerfile
+    profiles: [setup]
+    network_mode: none
+    command: [bash, /spike/certs.sh]
+    volumes:
+      - pki:/pki
+      - ./certs.sh:/spike/certs.sh:ro
+
+  public-dns:
+    <<: *tools
+    command: [dnsmasq, --keep-in-foreground, --log-facility=-, --log-queries, --no-resolv, --no-hosts,
+              "--address=/household.dyn.example/10.88.0.21"]
+    networks:
+      wan:
+        ipv4_address: 198.51.100.53
+
+  overlay-dns:
+    <<: *tools
+    command: [dnsmasq, --keep-in-foreground, --log-facility=-, --log-queries, --no-resolv, --no-hosts,
+              "--address=/household.tailnet.example/100.64.88.22", "--server=10.88.0.53"]
+    depends_on: [router]
+    networks:
+      overlay:
+        ipv4_address: 100.64.88.53
+      lan:
+        ipv4_address: 10.88.0.52
+
+  router:
+    <<: *tools
+    command: [dnsmasq, --keep-in-foreground, --log-facility=-, --log-queries, --no-resolv, --no-hosts,
+              --stop-dns-rebind, "--rebind-domain-ok=/dyn.example/", "--server=198.51.100.53",
+              "--address=/vilicus.home.arpa/10.88.0.23", "--address=/vilicus.local/10.88.0.26",
+              "--address=/host01.home.arpa/10.88.0.25", "--address=/same.home.arpa/10.88.0.27"]
+    depends_on: [public-dns]
+    networks:
+      lan:
+        ipv4_address: 10.88.0.53
+      wan:
+        ipv4_address: 198.51.100.2
+
+  router-strict:
+    <<: *tools
+    command: [dnsmasq, --keep-in-foreground, --log-facility=-, --log-queries, --no-resolv, --no-hosts,
+              --stop-dns-rebind, "--server=198.51.100.53", "--server=/tailnet.example/100.64.88.53"]
+    depends_on: [public-dns, overlay-dns]
+    networks:
+      lan:
+        ipv4_address: 10.88.0.54
+      wan:
+        ipv4_address: 198.51.100.3
+      overlay:
+        ipv4_address: 100.64.88.54
+
+  srv-dyndns:
+    <<: *instance
+    environment:
+      E24_ORIGIN: https://household.dyn.example
+      E24_CERT: /pki/dyndns.crt
+      E24_KEY: /pki/dyndns.key
+    networks:
+      lan:
+        ipv4_address: 10.88.0.21
+
+  srv-overlay:
+    <<: *instance
+    environment:
+      E24_ORIGIN: https://household.tailnet.example
+      E24_CERT: /pki/overlay.crt
+      E24_KEY: /pki/overlay.key
+    networks:
+      overlay:
+        ipv4_address: 100.64.88.22
+
+  srv-localca:
+    <<: *instance
+    environment:
+      E24_ORIGIN: https://vilicus.home.arpa
+      E24_CERT: /pki/localca.crt
+      E24_KEY: /pki/localca.key
+    networks:
+      lan:
+        ipv4_address: 10.88.0.23
+
+  srv-ip:
+    <<: *instance
+    environment:
+      E24_ORIGIN: https://10.88.0.24
+      E24_CERT: /pki/ip.crt
+      E24_KEY: /pki/ip.key
+    networks:
+      lan:
+        ipv4_address: 10.88.0.24
+
+  srv-selfsigned:
+    <<: *instance
+    environment:
+      E24_ORIGIN: https://10.88.0.25
+      E24_CERT: /pki/selfsigned.crt
+      E24_KEY: /pki/selfsigned.key
+    networks:
+      lan:
+        ipv4_address: 10.88.0.25
+
+  srv-mdns:
+    <<: *instance
+    environment:
+      E24_ORIGIN: https://vilicus.local
+      E24_CERT: /pki/mdns.crt
+      E24_KEY: /pki/mdns.key
+    networks:
+      lan:
+        ipv4_address: 10.88.0.26
+
+  lan-client:
+    <<: *tools
+    profiles: [probe]
+    command: [sleep, infinity]
+    dns: [10.88.0.53]
+    networks:
+      lan:
+        ipv4_address: 10.88.0.98
+
+  srv-same:
+    <<: *tools
+    # One host name, two certificates: the temporary self-signed one on 8443, the real one on 443.
+    command: [bash, -c, "E24_LISTEN=0.0.0.0:8443 E24_CERT=/pki/selfsigned-same.crt E24_KEY=/pki/selfsigned-same.key /target/debug/naming-options & exec /target/debug/naming-options"]
+    environment:
+      E24_ORIGIN: https://same.home.arpa
+      E24_CERT: /pki/same.crt
+      E24_KEY: /pki/same.key
+    volumes:
+      - target:/target:ro
+      - pki:/pki:ro
+    networks:
+      lan:
+        ipv4_address: 10.88.0.27
+
+  probe:
+    <<: *tools
+    profiles: [probe]
+    command: [sleep, infinity]
+    networks:
+      lan:
+        ipv4_address: 10.88.0.99
+      overlay:
+        ipv4_address: 100.64.88.99
+
+  browsers:
+    build:
+      context: .
+      dockerfile: browsers.Dockerfile
+    image: vilicus-spike-e24-browsers
+    profiles: [browsers]
+    init: true
+    shm_size: 1gb
+    dns: [100.64.88.53]
+    volumes:
+      - pki:/pki:ro
+      - ./driver.mjs:/app/driver.mjs:ro
+    networks:
+      lan:
+        ipv4_address: 10.88.0.100
+      overlay:
+        ipv4_address: 100.64.88.100

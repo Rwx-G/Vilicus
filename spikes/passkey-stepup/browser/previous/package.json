@@ -1,0 +1,10 @@
+{
+  "name": "vilicus-e2-browser-driver-previous",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

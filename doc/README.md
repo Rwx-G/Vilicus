@@ -1,6 +1,6 @@
 # Vilicus design documents
 
-Status: Revision 2, design phase, no code yet. These documents are written before the code and are meant to be attacked. Each file has a review log or a status line; open questions are stated, not hidden. Update of 2026-10-16: glossary terms for assistant parity and activatable modules (PRD section 4.18) and ID ranges updated; then glossary terms changed or added by the revalidation decisions D69 to D86, by D87 to D96, by D97 to D100, and by the second revalidation, D101 to D115; then ID ranges updated for the owner decisions D116 to D118, and for D119 (AD-36 construction validated by the key prototype). Update of 2026-10-17: ID ranges updated for the V0.1 spike records D120 to D138, design changes DC-74 to DC-76, risks R54 and R55 and threats T67 and T68; glossary term **Pairing code** added and **Crypto-shredding** pointed to D132.
+Status: Revision 2, design phase, no code yet. These documents are written before the code and are meant to be attacked. Each file has a review log or a status line; open questions are stated, not hidden. Update of 2026-10-16: glossary terms for assistant parity and activatable modules (PRD section 4.18) and ID ranges updated; then glossary terms changed or added by the revalidation decisions D69 to D86, by D87 to D96, by D97 to D100, and by the second revalidation, D101 to D115; then ID ranges updated for the owner decisions D116 to D118, and for D119 (AD-36 construction validated by the key prototype). Update of 2026-10-17: ID ranges updated for the V0.1 spike records D120 to D139, design changes DC-74 to DC-77, risks R54 and R55 and threats T67 and T68; glossary terms **Pairing code** and **Content origin** added and **Crypto-shredding** pointed to D132.
 
 ## Reading order
 
@@ -21,9 +21,9 @@ Status: Revision 2, design phase, no code yet. These documents are written befor
 | [`key-management.md`](key-management.md) | Keys, unlock, recovery, rotation | Revision 2 |
 | [`ai-safety.md`](ai-safety.md) | Principles P1 to P14, invariants I1 to I43 | Revision 2 |
 | [`capability-matrix.md`](capability-matrix.md) | Action by tier by confirmation | Revision 2 |
-| [`decisions.md`](decisions.md) | Decisions D1 to D138 | Revision 2 |
+| [`decisions.md`](decisions.md) | Decisions D1 to D139 | Revision 2 |
 | [`research-notes.md`](research-notes.md) | Claims and experiments E1 to E32 (E21 unused) | Revision 2 |
-| [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-76 | Final |
+| [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-77 | Final |
 | [`architecture-spine.md`](architecture-spine.md) | Architecture decisions AD-1 to AD-56 | Final |
 
 Place architecture diagrams and images in [`assets/`](assets/).
@@ -72,6 +72,7 @@ Terms are used with one meaning across all documents.
 | **Upgrade check** | `vilicus upgrade check`: reports the migrations an upgrade has pending and those that failed; each migration runs on a copy of its file, swapped in only on success (see D84) |
 | **Crypto-shredding** | Deleting a record by destroying its key; on disk, that is a delete of the wrapped key under `secure_delete` followed by a TRUNCATE checkpoint (see D132) |
 | **Outbox** | Pattern for cross-module consistency without cross-database transactions |
+| **Content origin** | The separate origin, the instance name on port 8443, from which the Gateway serves sanitized external content in an empty sandbox; it never sets a cookie (see D139) |
 | **Content-free notification** | A notification carrying no title, sender or amount |
 | **Out-of-browser notification channel** | A channel, configured by each member, that delivers content-free security alerts without an open browser (see D47). An enrollment completes only after the member redeems the token of a test notification sent to it (see D105). A recovery alert carries a one-time acknowledgement token that the member redeems at the Core from a device they control (see D75) |
 | **Milestone** | A numbered, installable release. **V0.1** is the Core; later milestones add modules and connectors; **V1** is the first community release |

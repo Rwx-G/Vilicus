@@ -567,3 +567,127 @@ These are stated by the stories or the Accepted records and are not closed by an
 8. **Move the remaining spikes to `rustls` 0.23.46** and update the spine's pin.
 9. **Investigate the Firefox 155 load stalls** only if Firefox 155 stays in the supported list;
    otherwise record the retry count per run as now.
+
+## 15. Debian 13 VM run (2026-10-17)
+
+A second, partial campaign on a Debian 13 virtual machine, for the phases whose result depends
+on the host: `sandbox` (1.6), `locked-memory` (1.10), `egress` (1.12), `argon2id` (1.8) and
+`core-execution` (1.15). Sections 1 to 14 describe the Docker Desktop campaign and are not
+edited; the gate changes are listed here and in each gate file. Recommendation 4 of section 14
+is done by this run, except for the reference host.
+
+### 15.1 Run context
+
+| Field | Value |
+|---|---|
+| Harness | `e2e/vm/` (README there): QEMU 10.0.13 with KVM in a container on Docker Desktop, `-cpu host` |
+| Guest image | `debian-13-genericcloud-amd64-20261015-2632.qcow2`, SHA512 in `e2e/vm/IMAGE.lock`, fresh qcow2 overlay per boot |
+| Guest | Debian 13.7, kernel `6.12.111+deb13-cloud-amd64`, systemd 257.13-1~deb13u1 as PID 1 (`running`), AppArmor enabled, cgroup v2, `systemd-coredump` pipe `core_pattern`, no swap |
+| CPU and memory | 4 vCPUs (Intel Core Ultra 9 285K), 7 947 MiB |
+| Storage | 60 GiB virtio-blk, ext4 root, qcow2 `cache=none` on a volume of Docker Desktop's VM |
+| Docker in the guest | 26.1.5+dfsg1, Compose 2.26.1-4, buildx 0.13.1, all from the Debian archive |
+| Commit | `5130fe96fc018337c5e359df305af4fca8642649`, checked out in the guest from a git bundle of HEAD (committed content only) |
+
+### 15.2 Commands and phase table
+
+Main run, clean tree, every phase alone on the guest's engine:
+
+```sh
+bash e2e/vm/vm.sh up
+bash e2e/vm/vm.sh sync
+E2E_TIMEOUT_SCALE=2 \
+E12_IMAGE=rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a \
+  bash e2e/vm/vm.sh e2e sandbox locked-memory egress argon2id core-execution
+```
+
+`E12_IMAGE` pins `argon2id` to the digest the other spikes use (its `run.sh` defaults to the
+`rust:1.99-trixie` tag). Results: `e2e/results/vm-20261017T100711Z-5130fe9`.
+
+| Phase | Story | Status | PASS | FAIL | INFO | Duration (s) | Cause of the failure |
+|---|---|---|---|---|---|---|---|
+| sandbox | 1.6 | PASS | 146 | 0 | 75 | 58 | |
+| argon2id | 1.8 | FAIL | 9 | 1 | 6 | 342 | `selection_matches_constant` picked m = 512 MiB (15.4) |
+| locked-memory | 1.10 | FAIL | 64 | 1 | 21 | 37 | `harness-swap`: no swap in the guest (15.4) |
+| egress | 1.12 | FAIL | 188 | 1 | 7 | 85 | Compose log escape (15.3) |
+| core-execution | 1.15 | PASS | 41 | 0 | 51 | 995 | |
+
+Follow-up runs on the same VM and commit:
+
+| Run | Command | Results | Uncommitted paths | Outcome |
+|---|---|---|---|---|
+| Pipe restored | `bash e2e/vm/vm.sh e2e locked-memory` after `systemctl restart systemd-sysctl` | `vm-20261017T103320Z-5130fe9` | 0 | 63 PASS, 1 FAIL (`harness-swap`) |
+| Swap file | same, with a 2 GiB swap file for that run | `vm-20261017T103338Z-5130fe9` | 0 | 65 PASS, 0 FAIL |
+| Compose fix | `bash e2e/vm/vm.sh e2e egress` with the `run.sh` fix | `vm-20261017T103545Z-5130fe9` | 1 | 189 PASS, 0 FAIL |
+| Both fixes | `bash e2e/vm/vm.sh e2e sandbox locked-memory egress` with the three spike changes | `vm-20261017T103921Z-5130fe9` | 3 | sandbox 146/0, locked-memory 63/1 (`harness-swap`), egress 189/0; guest pipe intact afterwards |
+| argon2id again | `E12_IMAGE=<digest> bash e2e/vm/vm.sh e2e argon2id` | `vm-20261017T104405Z-5130fe9` | 0 | 9 PASS, 1 FAIL (`selection_matches_constant`, m = 512 MiB again) |
+| E10 on the host | story 1.6 manual procedure: `checks.sh` as root under the guest's systemd | `host-e10-checks.log` in the main folder | 0 | RESULT PASS: 131 PASS, 0 FAIL |
+| E14 ac3 on the host | `host-e14-ac3.sh`: the `ac3.*` matrix with `systemd-run` on the guest against the compose test network | `host-e14-ac3.log` in the main folder | 0 | RESULT PASS: 22 PASS, 0 FAIL |
+
+The fixed spike scripts were copied into the guest checkout for the runs marked with
+uncommitted paths; `run-info.txt` of those runs records the count.
+
+### 15.3 Spike changes made for a plain Linux Docker host
+
+Uncommitted at the time of this section; each was run in the VM and on Docker Desktop (sandbox
+146 PASS, egress 189 PASS on Docker Desktop after the changes).
+
+- `spikes/egress-filter/run.sh`: Debian's Compose 2.26 starts every `logs` line with an
+  erase-line escape (`ESC [2K`), even into a pipe. The anchored `logs.*` checks then failed
+  (`logs.internal_target_reached_only_by_named_destinations`) or passed whatever the log said
+  (`logs.forbidden_upstream_never_reached_through_the_proxy`, a count of 0). Every log read now
+  strips the escape.
+- `spikes/sandbox-profile/Dockerfile.systemd` and `spikes/egress-filter/compose/Dockerfile`:
+  `systemd-sysctl.service` masked. A privileged container that boots systemd shares the host's
+  `/proc/sys`; Debian's `10-coredump-debian.conf` replaced the guest's `systemd-coredump` pipe
+  with `core` until the next boot, so `locked-memory`, which runs after `sandbox`, tested the
+  file case on a pipe host. Reproduced on its own; with the mask the pipe survives both phases.
+  The same mechanism very likely produced the `core` the Docker Desktop runs recorded.
+
+### 15.4 Results that matter
+
+- **1.6, E10 on Debian 13:** all checks pass in the container on 6.12 and under the guest's own
+  systemd with AppArmor active. `LATE_PIDFD kernel=6.12.111+deb13-cloud-amd64
+  late_pidfd=refused(EINVAL)`: 6.12 refuses a pidfd for a reaped peer, where 6.18 returned one;
+  the reused pid is still refused (`reason=peer-exited`). The startup IP filter check passes;
+  `IPAddressDeny=any` blocks UDP with `EPERM` and makes TCP time out, on loopback and the own
+  address, with controls open. `systemd-analyze security` 0.4 and 0.2.
+- **1.10, E16:** under the pipe `core_pattern`, the hardened subjects leave no `coredumpctl`
+  entry; each run leaves exactly the control (`COREFILE present`, about 30.6 KiB) and the
+  `RLIMIT_CORE`-only subject (`COREFILE none`: the kernel pipes the image whatever the limit and
+  `systemd-coredump` does not store it, so `LimitCORE=0` alone is not the barrier on Debian;
+  non-dumpable is). With a pipe, `core-file-excludes-locked-pool` cannot run; it ran under `core`
+  in the main run (pool key 0 times, heap DEK once). The `swap` group needs swap: it fails on the
+  swapless guest and passes with a swap file.
+- **1.12, E14:** the 25 `ac3.*` checks pass on 6.12 in the container, and the same matrix passes
+  22 of 22 under the guest's systemd. Domain fronting (finding 2, D134) is unchanged.
+- **1.8, E12:** the recommended set stays far under target (single median 340.2 and 291.9 ms,
+  slower of a limit-1 pair 691.8 and 587.2 ms), but four dedicated vCPUs are faster than the CFS
+  quota emulation and the selection rule picks m = 512 MiB (slower-of-pair median 907.7 and
+  784.5 ms, under the 1 000 ms emulation margin) in both runs. Machine sensitivity of the pick, as
+  the story's contended run already showed; the constant is decided on the reference host, not
+  here.
+- **1.15, E32:** D116 holds with less margin: member probe p99 60.53 ms, token probe p99
+  70.62 ms, all actions p99 62.01 ms (max 329.78 ms, on an idle file, all in the write stage).
+  `fsync` p50 3.72 ms, p99 5.95 ms on the virtual disk against 1.70 ms on Docker Desktop; unlocks
+  are faster (p50 328 ms). Storage, not CPU, sets the tail; the reference host's SSD decides it.
+
+### 15.5 Gate changes
+
+| Story | Before | After | Why |
+|---|---|---|---|
+| 1.6 | CONCERNS | **PASS** | The only missing evidence was a Debian 13 host; it passed there. D125 can now be accepted by the owner. |
+| 1.8 | CONCERNS | CONCERNS | Reference host still missing; VM numbers and the m = 512 MiB pick recorded (E12-5). |
+| 1.10 | CONCERNS | CONCERNS | Pipe `core_pattern` now covered (E16-2 resolved); reference host still missing (FR-13); E16-4 and E16-5 added. |
+| 1.12 | FAIL | FAIL | D134 still with the owner; E14-2 resolved on Debian 13; E14-5 (Compose escape) added. |
+| 1.15 | CONCERNS | CONCERNS | Reference host still missing; VM numbers recorded; E32-4 raised to medium. |
+
+Gates after this run: 5 PASS, 11 CONCERNS, 1 FAIL.
+
+### 15.6 What this run is not
+
+A KVM guest on a 24-core desktop CPU, with that CPU's caches and memory bandwidth, and a virtual
+disk through two virtualisation layers. It is the right kernel line (the cloud flavour of 6.12;
+a physical host runs the generic flavour), the right systemd and the right Docker packages; it is
+not the reference host, so 1.8, 1.10 and 1.15 still wait for it. Not exercised here either: an
+unprivileged user manager creating a cgroup with a system unit's name (E10-3), and the core file
+that `systemd-coredump` stored for the control was not scanned.

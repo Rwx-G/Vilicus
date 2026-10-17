@@ -13,15 +13,19 @@ run:
   phase: 'egress'
   pass: 189
   fail: 0
+  vm_runs:
+    - { commit: '5130fe96fc018337c5e359df305af4fca8642649', command: 'E2E_TIMEOUT_SCALE=2 bash e2e/vm/vm.sh e2e sandbox locked-memory egress argon2id core-execution', results: 'e2e/results/vm-20261017T100711Z-5130fe9', pass: 188, fail: 1, note: 'logs.internal_target_reached_only_by_named_destinations: Debian Compose 2.26 prefixes log lines with ESC [2K (E14-5)' }
+    - { commit: '5130fe96fc018337c5e359df305af4fca8642649', command: 'bash e2e/vm/vm.sh e2e egress, with the run.sh fix copied in (1 uncommitted path)', results: 'e2e/results/vm-20261017T103545Z-5130fe9', pass: 189, fail: 0 }
+    - { commit: '5130fe96fc018337c5e359df305af4fca8642649', command: 'host-e14-ac3.sh under the guest systemd against the compose test network', results: 'e2e/results/vm-20261017T100711Z-5130fe9/host-e14-ac3.log', pass: 22, fail: 0 }
 top_issues:
   - id: 'E14-1'
     severity: high
     finding: 'Domain fronting by SNI or Host header carries requests to another tenant of a shared front end; the per-caller SNI check closes the SNI half, Host-header fronting stays open (R54, T67).'
     suggested_action: 'Owner decides D134 (SNI check, fallback not adopted, Host-header fronting a named risk) and how allowlists prefer dedicated infrastructure; the gate moves to CONCERNS once accepted.'
   - id: 'E14-2'
-    severity: medium
-    finding: 'The IPAddressDeny=any checks ran under systemd 257 in a container on the WSL2 kernel, not in the Debian 13 VM.'
-    suggested_action: 'Run the ac3.* commands with systemd-run in the Debian 13 VM (Story 5.5).'
+    severity: low
+    finding: 'Resolved on 2026-10-17: on a Debian 13 VM (kernel 6.12.111, systemd 257 as PID 1, AppArmor active) the 25 ac3.* checks passed in the sandbox container and the same matrix passed 22 of 22 under the guest systemd with systemd-run.'
+    suggested_action: 'Story 5.5 keeps the matrix as a VM test.'
   - id: 'E14-3'
     severity: medium
     finding: 'getaddrinfo consults the hosts file and name service modules, and a timed-out lookup keeps its thread.'
@@ -30,12 +34,16 @@ top_issues:
     severity: low
     finding: 'File descriptor exhaustion and Encrypted Client Hello end to end were not exercised.'
     suggested_action: 'Story 5.5 runs the LimitNOFILE=64 procedure of the story.'
+  - id: 'E14-5'
+    severity: medium
+    finding: 'Docker Compose 2.26 (Debian 13) starts every logs line with ESC [2K even into a pipe; the anchored logs.* checks then failed (internal target) or passed vacuously (forbidden upstream count 0). run.sh now strips the escape on every log read (uncommitted at the time of this gate; 189 PASS in the VM and on Docker Desktop).'
+    suggested_action: 'Commit the run.sh change; Story 5.5 tests read service logs through one filtered helper.'
 evidence:
   trace:
     ac_covered: [1, 2, 3]
     ac_gaps:
       - { ac: 1, reason: 'The three clauses pass; the spike criterion "no bypass" fails for shared front ends (finding 2).' }
-      - { ac: 3, reason: 'Direct connections fail in a container, not yet in the Debian 13 VM; the fallback was evaluated and not adopted, recorded as D134 Proposed.' }
+      - { ac: 3, reason: 'Direct connections fail on Docker Desktop and on a Debian 13 VM, in the container and under the guest systemd; the fallback was evaluated and not adopted, recorded as D134 Proposed.' }
 nfr_validation:
   security: { status: FAIL, notes: 'Hostname allowlist bypassable by domain fronting on shared front ends; every other bypass attempt, internal address and rebinding case refused.' }
   performance: { status: PASS, notes: '64 MiB download intact and 50 concurrent tunnels; per-caller connection limits hold.' }

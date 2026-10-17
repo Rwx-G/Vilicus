@@ -133,8 +133,23 @@ Command, from the repository root on the Windows development host with Docker De
 - The cgroup eBPF IP filter worked in this kernel; on a host it depends on the kernel configuration, which is what the Core's startup check covers (settled task 7).
 - The spoofed cgroup was created by root. Whether an unprivileged user manager can create a cgroup with a system unit's name in its delegated subtree was not exercised.
 - The plugin reached no egress proxy here: its proxy data socket would be granted the same way as its Core socket (one more bind-mounted directory). The proxy itself is E14 (story 1.12).
-- Until that rerun, the proposed decision record below stays Proposed.
+- Until that rerun, the proposed decision record below stays Proposed. (Rerun on 2026-10-17: see "Debian 13 VM run" below.)
 - Manual procedure on a Debian 13 host (a disposable VM: the run creates users, units and a cgroup, and writes `ns_last_pid`): build with `run.sh`, copy the binary out of the `vilicus-e10-target` volume (`/target/debug/e10-spike`), then on the VM as root, with `systemd` and `dbus` installed: create `/target/debug/` and `/spike/`, copy the binary to `/target/debug/e10-spike` and the spike directory's `checks.sh` and `units/` to `/spike/`, and run `bash /spike/checks.sh`. It prints the same `PASS` and `FAIL` lines and `RESULT PASS` or `RESULT FAIL`.
+
+### Debian 13 VM run (2026-10-17)
+
+Host: the `e2e/vm` harness, a KVM guest booted from `debian-13-genericcloud-amd64-20261015-2632.qcow2` (SHA512 in `e2e/vm/IMAGE.lock`): Debian 13.7, kernel `6.12.111+deb13-cloud-amd64`, systemd 257.13-1~deb13u1 as PID 1, AppArmor enabled (apparmor 4.1.0-1), cgroup v2, 4 vCPUs, 7 947 MiB, no swap, Docker 26.1.5+dfsg1 from the Debian archive. Commit `5130fe96fc018337c5e359df305af4fca8642649`, synced as committed content only.
+
+1. **Phase in the VM**, `E2E_TIMEOUT_SCALE=2 bash e2e/vm/vm.sh e2e sandbox locked-memory egress argon2id core-execution` (results `e2e/results/vm-20261017T100711Z-5130fe9`, clean tree): `run.sh` exit 0, 146 `PASS`, 0 `FAIL`, `RESULT PASS`, `RUN PASS`. The systemd container now runs on Debian 13's kernel.
+2. **Under the guest's own systemd**, the manual procedure above, as root, with the binary of that build: 131 `PASS`, 0 `FAIL`, `RESULT PASS` (log kept as `host-e10-checks.log` in the same results folder). This is the run the story asks for: systemd as PID 1 of a Debian 13 host, with AppArmor active.
+
+Same outcome as on Docker Desktop for every check; what the 6.12 kernel showed:
+
+- **Finding 2 pinned:** `LATE_PIDFD kernel=6.12.111+deb13-cloud-amd64 late_pidfd=refused(EINVAL)`, in both runs. Debian 13's kernel refuses a pidfd for a peer that has exited and been reaped, where 6.18 returned one for an exited process. The liveness check reads both as exited; the Core takes the pidfd at accept, so the reuse case still logs `reason=peer-exited` (`pidfd_alive=false pid_only_check=accept ... verdict=reject reason=peer-exited`, pid reuse forced on the first attempt in both runs).
+- **IP filter:** startup check `IPFILTER_CHECK pass probe=[PROBE udp_send blocked EPERM] datagram_received=false`, and its refusal of an unfiltered probe. Under `IPAddressDeny=any`, TCP to the loopback and own-address listeners timed out and UDP to those and to `192.0.2.10:9` failed with `EPERM`; without it both listeners answered and UDP left. Own address `172.17.0.2` in the container, `10.0.2.15` on the guest. `IPAddressDeny` printed `::/0 0.0.0.0/0` on these boots.
+- **Profile and probes:** every probe outcome as on Docker Desktop, plugin and `nobody` control alike, and the four openings of the architecture section 4 list alone (system bus, journal stream, host abstract socket, user plus network namespace) reproduced on the host. `systemd-analyze security` exposure 0.4 (Core) and 0.2 (plugin). AppArmor on the host changed none of them.
+- **Not exercised still:** an unprivileged user manager creating a cgroup with a system unit's name, and the egress proxy socket (spike plan question, not an AC clause).
+- **Harness interaction found by this run:** the privileged systemd container of `Dockerfile.systemd` applied Debian's `10-coredump-debian.conf` to the host's `/proc/sys` and replaced the guest's `systemd-coredump` pipe with `core` (it does the same to the Docker Desktop VM). The image now masks `systemd-sysctl.service`; rerun with that change (results `vm-20261017T103921Z-5130fe9`, 3 uncommitted spike paths): 146 `PASS`, 0 `FAIL`, the guest's pipe intact afterwards. On Docker Desktop after the change: 146 `PASS`, 0 `FAIL`.
 
 ## Proposed design document updates
 

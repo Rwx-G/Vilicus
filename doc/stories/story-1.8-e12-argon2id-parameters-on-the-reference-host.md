@@ -140,6 +140,30 @@ Limit 1 is chosen; neither unlock of a simultaneous pair exceeded the target in 
 - Rewrapping: when `COST` is raised later, a wrapper written with the old cost is unlocked with its header's cost and rewritten with the new one during the unlock (key-management.md section 9), so that unlock costs two derivations, one at each cost.
 - Measurements are wall-clock on a shared desktop; run 3 shows what contention from other containers does to them.
 
+### Debian 13 VM run (2026-10-17)
+
+Host: the `e2e/vm` harness, a KVM guest (Debian 13.7, kernel `6.12.111+deb13-cloud-amd64`, systemd 257) with 4 vCPUs (`-cpu host` on the same 24-core desktop CPU, Intel Core Ultra 9 285K), 7 947 MiB, no swap, nothing else running in the guest. The spike's own container limits still apply inside it (`cpu.max=400000 100000`, `memory.max=8589934592`, `available_parallelism=4`, `E12_HOST=emulation`, so the 1 000 ms selection margin). Commit `5130fe96fc018337c5e359df305af4fca8642649`, clean tree. Image pinned through the spike's override: `E12_IMAGE=rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a` (the digest of `rust:1.99-trixie` the other spikes pin; `run.sh` defaults to the tag).
+
+Commands: `E2E_TIMEOUT_SCALE=2 E12_IMAGE=<digest above> bash e2e/vm/vm.sh e2e sandbox locked-memory egress argon2id core-execution` (run A, results `e2e/results/vm-20261017T100711Z-5130fe9`) and `E12_IMAGE=<digest above> bash e2e/vm/vm.sh e2e argon2id` (run B, `vm-20261017T104405Z-5130fe9`).
+
+Both runs: exit 1, 9 `PASS`, 1 `FAIL`. The failure is `selection_matches_constant`: the rule picked m = 512 MiB, t = 3, p = 4 against the constant m = 384 MiB. Every other check passed, including the floor, both latency targets and the burst limiter.
+
+| Measure (ms) | Run A | Run B |
+|---|---|---|
+| Recommended set, single derivation, 2-thread pool, n=20: median / p95 / max | 340.2 / 351.3 / 352.3 | 291.9 / 295.4 / 296.1 |
+| Same, 1-thread and 4-thread pool medians | 613.9 and 223.9 | 504.2 and 190.7 |
+| Pair, limit 1: faster median; slower median / p95 / max | 349.9; 691.8 / 753.5 / 753.5 | 294.9; 587.2 / 598.3 / 598.3 |
+| Pair, limit 2: slower median / max | 624.3 / 1 098.2 | 522.9 / 535.0 |
+| Candidate m=256 t=3, slower of a pair, median | 462.2 | 384.7 |
+| Candidate m=384 t=3 | 680.9 | 581.8 |
+| Candidate m=512 t=3 | 907.7 | 784.5 |
+| Candidate m=768 t=3 | 1 378.0 | 1 183.4 |
+| Candidate m=1024 t=3 | 1 878.6 | 1 604.1 |
+
+Bursts of 8: under the 4 s bound 8 served, 0 refused, at most 1 at once, peak RSS 386 MiB; under the short bound (170 and 145 ms) 1 served, 7 refused.
+
+Reading: four dedicated vCPUs without a CFS quota over 24 cores are faster than the Docker Desktop emulation (single median 515.9 ms in the story's final run, 384.5 ms in the campaign), so m = 512 MiB falls under the emulation margin and the rule moves up one step. This is the sensitivity the story already names (m = 384 MiB sat 18 % below to 10 % above the margin); it says nothing about the reference host, which is slower per core and in memory bandwidth than this desktop CPU, and whose run decides the constant with the margin removed. The constant is not changed on the strength of a VM run. AC1 and AC2 stay "PASS on the emulation; not run on the reference host"; AC3 not triggered.
+
 ## Proposed design document updates
 
 Not applied: this spike does not edit shared design documents.

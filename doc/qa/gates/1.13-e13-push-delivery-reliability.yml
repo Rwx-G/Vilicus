@@ -5,6 +5,7 @@ gate: CONCERNS
 status_reason: 'The sender, collector, verdict rules and content-free payloads pass on a simulated network, but no E13 measurement exists: the criterion needs each household phone for 7 days on both servers, which has not started, and E13 gates V0.1.'
 reviewer: 'Claude (autonomous run) with independent review agents'
 updated: '2026-10-17'
+updated_reason: 'Android emulator run added; gate unchanged: it is a simulation and the household phones were not measured.'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
   command: 'bash e2e/run.sh --keep-going'
@@ -13,6 +14,14 @@ run:
   phase: 'push'
   pass: 78
   fail: 0
+android_emulator_run:
+  date: '2026-10-17'
+  commit: '007c9bc5547a2542d7f5b71733b6e6cbcbdbbbb9 plus the uncommitted spikes/push-delivery/android/'
+  label: 'criterion=simulation; an emulator simulation, not an E13 result'
+  images: 'Android emulator 37.2.12, platform-tools 37.0.1, system-images;android-35;google_apis;x86_64 r9, ntfy Android app 1.25.2 (F-Droid), ntfy server 2.31.0; all pinned in spikes/push-delivery/android/android.lock'
+  smoke: { command: 'bash spikes/push-delivery/android/run.sh --smoke', result: 'RESULT PASS', pass: 24, fail: 0, alerts: 70, in_time: 70, late: 0, lost: 0 }
+  compressed: { command: 'bash spikes/push-delivery/android/run.sh', duration: '3 h 11 min, 180 min of alerts', result: 'RESULT PASS', pass: 24, fail: 0, alerts: 479, in_time: 471, late: 8, lost: 0 }
+  per_state: 'Every forced state at 100 % in time (screen off, Doze exempt and not exempt, four standby buckets, the 4-minute network outage, force-stop, reboot) except the 13-minute network outage: 27 of 35 in time, 8 late, 0 lost.'
 top_issues:
   - id: 'E13-1'
     severity: high
@@ -22,6 +31,10 @@ top_issues:
     severity: medium
     finding: 'A push server stores the alert body, so a token in the payload is readable by its operator; and the design does not say how phones reach a self-hosted server off the household network (D135 Proposed).'
     suggested_action: 'Owner decides D135 before Story 8.1.'
+  - id: 'E13-4'
+    severity: low
+    finding: 'Emulator run: Doze, standby buckets and reboots did not delay the ntfy app (its foreground service keeps the network; forced buckets revert to active), outages delay by their length and lose nothing, a force-stopped app receives nothing until reopened; the app also logs and stores the message body on the device.'
+    suggested_action: 'Real run: record whether a phone vendor force-stops the app; owner reads story 1.13 proposed update 6 with D135.'
   - id: 'E13-3'
     severity: medium
     finding: 'A run made only at home would overstate delivery; the acknowledgement path through an automation app is part of the measured delay.'
@@ -35,6 +48,6 @@ evidence:
       - { ac: 3, reason: 'Not run here: no phone measured, so no fallback is due yet.' }
 nfr_validation:
   security: { status: PASS, notes: 'Stored messages are the generic text and an id only; topic access control refuses every other reader and writer; records hold no topic, token, URL or server name.' }
-  performance: { status: CONCERNS, notes: 'Delivery latency on real phones unknown.' }
-  reliability: { status: CONCERNS, notes: 'Unknown until the 7-day run; simulation shows a resumed outage costs late alerts and a non-resumed one loses them.' }
+  performance: { status: CONCERNS, notes: 'Delivery latency on real phones unknown; on the emulator p50 0.8 s, and under forced Doze 15 ms at most from send to notification.' }
+  reliability: { status: CONCERNS, notes: 'Unknown until the 7-day run; simulation shows a resumed outage costs late alerts and a non-resumed one loses them; the real ntfy app on an emulator resumed after every outage, force-stop and reboot (0 lost of 479).' }
   maintainability: { status: PASS, notes: 'An injected fault fails the run; incomplete runs report INCOMPLETE, never PASS.' }

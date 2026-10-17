@@ -1,0 +1,46 @@
+# Every download the Android emulator image of the E13 emulator run uses, pinned by version and
+# SHA-256. Sourced by the Dockerfile's download stage, which refuses any file whose checksum
+# differs; nothing is downloaded at run time. Recorded on 2026-10-17.
+#
+# Android SDK packages, from Google's SDK repository (repository2-3.xml and
+# sys-img/google_apis/sys-img2-3.xml). The SHA-1 is the one that repository publishes for the
+# archive; the SHA-256 was computed on the downloaded file, whose SHA-1 matched.
+SDK_REPOSITORY=https://dl.google.com/android/repository
+
+PLATFORM_TOOLS_VERSION=37.0.1
+PLATFORM_TOOLS_FILE=platform-tools_r37.0.1-linux.zip
+PLATFORM_TOOLS_SHA1=477254aa5f903c15cf51001717bdf347fb6b53e0
+PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+
+# The stable channel's emulator (channel-0), build 16428233.
+EMULATOR_VERSION=37.2.12
+EMULATOR_FILE=emulator-linux_x64-16428233.zip
+EMULATOR_SHA1=cd7362ea55dfb86a418958138dc396e74165dd01
+EMULATOR_SHA256=b08fc43d8608d2955f607f1b287beb525041e730086bdca3af152accac3af9c1
+
+# system-images;android-35;google_apis;x86_64, revision 9 (Android 15, Google APIs, no Play
+# Store, so `adb root` works and no Google account is involved).
+SYSTEM_IMAGE_API=35
+SYSTEM_IMAGE_TAG=google_apis
+SYSTEM_IMAGE_REVISION=9
+SYSTEM_IMAGE_FILE=sys-img/google_apis/x86_64-35_r09.zip
+SYSTEM_IMAGE_SHA1=0103e6dab21290c4b9d16550a3ce99476f884eef
+SYSTEM_IMAGE_SHA256=c67b9ba0ff5bc0eb6d046871bfa228af14d4d47b02f0cdae94f048e511b7566e
+
+# All three packages declare `uses-license ref="android-sdk-license"`: the Android Software
+# Development Kit License Agreement, as published in repository2-3.xml on 2026-10-17. Using the
+# emulator and the system image means accepting it. The value is the SHA-1 of the license text
+# (trimmed), the form sdkmanager writes to licenses/android-sdk-license on acceptance.
+SDK_LICENSE_ID=android-sdk-license
+SDK_LICENSE_SHA1=9002c006f4b8d9a16e715a9fa4df30ddb8abf9d9
+
+# The ntfy Android app, F-Droid build (no Firebase, so every subscription uses the instant
+# delivery connection), from the F-Droid main repository. The SHA-256 matches the one F-Droid's
+# index-v2.json lists for this file; the APK is signed by F-Droid (signer SHA-256 below). The
+# app is Apache-2.0 (github.com/binwiederhier/ntfy-android, tag v1.25.2).
+NTFY_APP_PACKAGE=io.heckel.ntfy
+NTFY_APP_VERSION=1.25.2
+NTFY_APP_VERSION_CODE=63
+NTFY_APP_URL=https://f-droid.org/repo/io.heckel.ntfy_63.apk
+NTFY_APP_SHA256=b4baa6f668bd57ad5df3b4e0e769165dcf25c5ee19fdb04f78077ee819616f2a
+NTFY_APP_SIGNER_SHA256=76e94d8e04706c5b99064c23210d8ca9910608abae8f3e972b41e388391646e0

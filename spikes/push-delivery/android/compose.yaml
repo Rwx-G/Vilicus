@@ -1,0 +1,86 @@
+# The E13 emulator test network: the self-hosted ntfy server, the sender and collector (`core`,
+# the same tool as the simulated run) and an Android emulator running the ntfy app. The network
+# is internal: neither the emulator nor anything else reaches the internet. android/run.sh
+# provides every ${...} value; nothing here is a secret kept between runs.
+name: vilicus-e13-android
+
+networks:
+  household:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.113.14.0/24
+
+volumes:
+  results:
+
+services:
+  ntfy-self:
+    # binwiederhier/ntfy, ntfy 2.31.0 as pulled on 2026-10-16 (the digest of ../compose).
+    image: binwiederhier/ntfy@sha256:803b2aaeb94df76c8b32ecd91039dc80b0fddb7041dcaf082b33bcdfd4ba39ad
+    command: [serve]
+    init: true
+    tmpfs:
+      - /var/lib/ntfy
+      - /var/cache/ntfy
+    environment:
+      NTFY_LISTEN_HTTP: ":80"
+      NTFY_BASE_URL: "http://10.113.14.10"
+      NTFY_CACHE_FILE: /var/cache/ntfy/cache.db
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_AUTH_USERS: ${E13_AUTH_USERS}
+      NTFY_AUTH_ACCESS: ${E13_AUTH_ACCESS}
+      NTFY_AUTH_TOKENS: ${E13_AUTH_TOKENS}
+      NTFY_VISITOR_REQUEST_LIMIT_EXEMPT_HOSTS: "10.113.14.20,10.113.14.30"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/v1/health"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    networks:
+      household:
+        ipv4_address: 10.113.14.10
+
+  # The sender and collector. Started by run.sh only once the phone is set up, for the scenario's
+  # duration; it then waits one deadline (10 minutes) for late acknowledgements.
+  core:
+    image: vilicus-spike-push-delivery-runtime
+    init: true
+    # The configuration comes from run.sh, so the mean interval and the window follow the mode.
+    command:
+      - sh
+      - -c
+      - printf '%s\n' "$$E13_CONF" >/var/lib/push-delivery/android.conf
+        && exec push-delivery run --config /var/lib/push-delivery/android.conf --duration-ms "$$E13_DURATION_MS"
+    environment:
+      E13_CONF: ${E13_CONF}
+      E13_DURATION_MS: ${E13_DURATION_MS}
+      TOPIC_PHONE: ${TOPIC_PHONE}
+      TOKEN_SENDER: ${TOKEN_SENDER}
+    volumes:
+      - results:/var/lib/push-delivery
+    depends_on:
+      ntfy-self:
+        condition: service_healthy
+    networks:
+      household:
+        ipv4_address: 10.113.14.20
+
+  # Android 15 emulator, headless, KVM, 4 cores, 4 GiB. The observer and the scenario driver run
+  # in this container next to adb (`docker compose exec emulator ...`).
+  emulator:
+    build:
+      context: .
+    image: vilicus-spike-push-delivery-android
+    init: true
+    devices:
+      - /dev/kvm
+    environment:
+      NTFY_URL: http://10.113.14.10
+      COLLECTOR_URL: http://10.113.14.20:8080
+    volumes:
+      - results:/var/lib/push-delivery
+    networks:
+      household:
+        ipv4_address: 10.113.14.30

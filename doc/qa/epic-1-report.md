@@ -691,3 +691,34 @@ a physical host runs the generic flavour), the right systemd and the right Docke
 not the reference host, so 1.8, 1.10 and 1.15 still wait for it. Not exercised here either: an
 unprivileged user manager creating a cgroup with a system unit's name (E10-3), and the core file
 that `systemd-coredump` stored for the control was not scanned.
+
+## 16. Android emulator run of E13 (2026-10-17)
+
+A run for story 1.13 only, on the same Windows development host: the real ntfy Android app
+1.25.2 (F-Droid build) on an Android 15 emulator (emulator 37.2.12, `google_apis` x86_64 image r9,
+KVM, headless, 4 cores, 4 GiB), fed by the unchanged sender from the self-hosted ntfy 2.31.0
+server on an internal network, while a scenario forces screen off, battery unplugged, deep Doze
+with and without the battery optimisation exemption, standby buckets, network loss, a force-stop
+and a reboot. A host-side observer reads the app's notifications over adb in place of MacroDroid.
+Every image and the APK are pinned in `spikes/push-delivery/android/android.lock`; the Android SDK
+licence is accepted by building the image. Procedure: `spikes/push-delivery/android/README.md`.
+It is labelled `criterion=simulation` and is **not an E13 result**.
+
+| Run | Command | Duration | Checks | Alerts | In time | Late | Lost |
+|---|---|---|---|---|---|---|---|
+| Smoke | `bash spikes/push-delivery/android/run.sh --smoke` | about 20 min | 24 PASS, 0 FAIL | 70 | 70 | 0 | 0 |
+| Compressed | `bash spikes/push-delivery/android/run.sh` | 3 h 11 min | 24 PASS, 0 FAIL | 479 | 471 | 8 | 0 |
+
+- Every forced state delivered 100 % within 10 minutes, at a p99 of 1.2 s under Doze and in every
+  standby bucket, except the 13-minute network outage (27 of 35 in time, 8 late, 0 lost): the app
+  resumed from its last message id after every outage, force-stop and reboot.
+- Doze did not hold alerts for a maintenance window or for the exit, with or without the
+  exemption: the app's instant delivery is a foreground service, which keeps its network in Doze.
+  Forced standby buckets reverted to `active` within a minute.
+- A force-stopped app received nothing until it was reopened; on a phone whose vendor force-stops
+  background apps, that is the delay the household run must watch for.
+- The app writes each message body to logcat and its database, which strengthens the first half
+  of D135 (story 1.13, proposed update 6). Nothing here argues for revisiting D118.
+- Not covered: carrier networks, radio power states, vendor battery management, idleness reached
+  naturally, 7 days. Gate 1.13 stays CONCERNS; gates after this run are unchanged (5 PASS,
+  11 CONCERNS, 1 FAIL).

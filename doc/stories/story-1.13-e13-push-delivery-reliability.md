@@ -139,6 +139,62 @@ A fault was injected once and reverted: giving phone 1 a 5 s lossy outage on the
 | AC2 (E13, D105): a server passes only at 99 % within 10 minutes over 7 days on every phone; E13 passes when the self-hosted server passes; a public server below the threshold is not recommended | **Not run here: needs the household phones for 7 days** | Verdict rules proven: at 400 alerts, 4 misses pass and 5 fail (`test.exactly_99_percent_passes_and_one_less_fails`); late and unpublished alerts are not delivered (`test.late_and_unpublished_alerts_are_not_delivered`); one failing phone fails its server, and E13 follows the self-hosted server either way (`test.a_failing_phone_fails_its_server_and_e13_follows_the_self_hosted_server`); end to end with simulation parameters, `ac2.server.self-hosted.pass`, `ac2.server.public.fail_not_recommended` and `ac2.e13_follows_the_self_hosted_server`, plus the injected fault above for the failing case. |
 | AC3 (E13, D105): a phone below the threshold records the fallback in `doc/decisions.md` | **Not run here: needs the household phones for 7 days** | No phone was measured, so no fallback is due. `RUNBOOK.md` step 10 states when and what to record. |
 
+### Android emulator run (2026-10-17)
+
+An emulator simulation, `criterion=simulation`: **not an E13 result**, and the story stays `in-progress`. It replaces the simulated phone with the real ntfy Android app on an Android 15 emulator and forces power and connectivity states while the unchanged sender posts alerts. Tooling and procedure: `spikes/push-delivery/android/` (README there).
+
+**Commands**, from the repository root on the Windows development host (Git Bash, Docker Desktop): `bash spikes/push-delivery/android/run.sh --smoke` and `bash spikes/push-delivery/android/run.sh` (180 minutes of alerts). Not an `e2e/run.sh` phase: it needs KVM and runs for hours.
+
+**Images and versions**, each pinned in `android/android.lock`:
+
+| Piece | Version | Pin |
+|---|---|---|
+| Android emulator | 37.2.12 (build 16428233, stable channel) | SHA-256 `b08fc43d...` |
+| platform-tools (adb) | 37.0.1 | SHA-256 `d230f138...` |
+| System image | `system-images;android-35;google_apis;x86_64` r9, Android 15, `AE3A.240806.043`, userdebug | SHA-256 `c67b9ba0...` |
+| ntfy Android app | 1.25.2 (version code 63), F-Droid build | SHA-256 `b4baa6f6...`, matching F-Droid's index; F-Droid signer `76e94d8e...` |
+| ntfy server | 2.31.0 | the digest of `../compose` |
+| Base image | `debian:trixie-slim` | the digest the other spikes use |
+
+The SDK packages are under the Android Software Development Kit License Agreement (`android-sdk-license`, referenced by all three); building the image accepts it, and the lock records the SHA-1 of the accepted text. Emulator: headless, `-gpu swiftshader_indirect`, KVM, 4 cores, 4 GiB, fresh AVD per run, no Play Store, no Google account. The test network is internal: neither the emulator nor the servers reach the internet. Docker 29.8.2; on this host the `kvm_intel` module of Docker Desktop's VM had to be loaded once (`modprobe` through `nsenter`), it was not loaded after a restart.
+
+**Setup**, checked by `run.sh`: APK checksum equal to the lock, ntfy 1.25.2 installed, `POST_NOTIFICATIONS` granted, the phone's read-only account stored in the app, one subscription with instant delivery and not muted (through an `ntfy://` link), the instant delivery foreground service running, battery optimisation exemption set (RUNBOOK step 6.4).
+
+**Acknowledgement without MacroDroid.** A host-side observer polls `dumpsys notification --noredact` every second, takes the id from each ntfy notification, posts it to the collector's `/ack` with the notification's post time as `t=`, then snoozes it (Android caps active notifications per app). The collector's arrival time, which the report uses, therefore includes the observer's delay; the post time is the phone-reported column.
+
+**Scenario** (default, scaled to 180 minutes; each disruptive segment followed by a baseline one): baseline (screen on, charging, exempt) 10 min; screen off and battery unplugged 12; deep Doze forced (`dumpsys deviceidle force-idle`) with the exemption 22, then without it 22, each with one maintenance window stepped halfway; standby buckets `working_set` 8, `frequent` 8, `rare` 10, `restricted` 14 (screen off, unplugged, not exempt); Wi-Fi and mobile data off 13 (longer than the deadline) and 4; ntfy force-stopped 8, then reopened; reboot 12. Mean interval 20 s, a Poisson schedule. The smoke mode runs every state once in 6 minutes at a 5 s mean. The scenario samples the device's actual state every minute; `pipeline.forced_states_observed_on_the_device` checks that the forced states took effect.
+
+**Smoke run**: `RESULT PASS`, 24 `PASS`, 0 `FAIL`, about 20 minutes; 70 alerts, all delivered in time (p50 0.9 s, max 35.1 s, the latter in the network-off segment). The first smoke run and the first compressed run exposed emulator and tooling faults, fixed before the runs recorded here: the emulator's virtual Wi-Fi does not rejoin after a reboot (the first run then lost every alert after the reboot, none of them reaching the app), and a forced maintenance window could be stepped twice.
+
+**Compressed run** (default mode, 15:45 to 18:56 UTC, 3 h 11 min): `RESULT PASS`, 24 `PASS`, 0 `FAIL`. 479 alerts, 471 in time, 8 late, 0 lost, 0 unpublished, no unknown or duplicate acknowledgement, every stored message content-free. Per state (latency to the collector's arrival, nearest rank; phone-reported is the median from send to the notification's post time):
+
+| State | Alerts | In time (10 min) | Late | Lost | Rate | p50 / p90 / p99 / max (s) | Phone-reported p50 (s) |
+|---|---|---|---|---|---|---|---|
+| baseline | 124 | 124 | 0 | 0 | 100.00 % | 0.7 / 1.2 / 19.9 / 21.1 | 0.0 |
+| screen-off-unplugged | 33 | 33 | 0 | 0 | 100.00 % | 0.7 / 1.1 / 1.2 / 1.2 | 0.0 |
+| doze-exempt | 59 | 59 | 0 | 0 | 100.00 % | 0.7 / 1.1 / 1.2 / 1.2 | 0.0 |
+| doze-not-exempt | 60 | 60 | 0 | 0 | 100.00 % | 0.8 / 1.1 / 1.2 / 1.2 | 0.0 |
+| bucket-working_set | 25 | 25 | 0 | 0 | 100.00 % | 0.6 / 1.1 / 1.2 / 1.2 | 0.0 |
+| bucket-frequent | 13 | 13 | 0 | 0 | 100.00 % | 0.9 / 1.1 / 1.1 / 1.1 | 0.0 |
+| bucket-rare | 28 | 28 | 0 | 0 | 100.00 % | 0.8 / 1.2 / 1.2 / 1.2 | 0.0 |
+| bucket-restricted | 30 | 30 | 0 | 0 | 100.00 % | 0.7 / 1.1 / 1.2 / 1.2 | 0.0 |
+| network-off-long (13 min) | 35 | 27 | 8 | 0 | 77.14 % | 325.7 / 703.4 / 779.9 / 779.9 | 324.5 |
+| network-off-short (4 min) | 18 | 18 | 0 | 0 | 100.00 % | 161.5 / 222.0 / 244.8 / 244.8 | 161.0 |
+| app-force-stopped (8 min) | 18 | 18 | 0 | 0 | 100.00 % | 192.5 / 400.9 / 418.5 / 418.5 | 191.7 |
+| reboot | 36 | 36 | 0 | 0 | 100.00 % | 0.7 / 2.0 / 11.8 / 11.8 | 0.0 |
+
+The baseline tail (p99 19.9 s) is the alerts sent in the first seconds of a recovery segment, shown with the replay. Observer delay: notification post to observation p50 0.76 s, p99 10.4 s, max 21.1 s (the maxima at the bursts after a network restore or a reopen); observation to accepted acknowledgement p50 6 ms, p99 142 ms; app reception (logcat) to notification post p50 4 ms. An earlier 3 h run, made before the observer batched its snoozes, gave the same picture (517 alerts, 506 in time, 11 late, 0 lost) but serialised a burst's acknowledgements by about 1.2 s each, up to 39 s, which turned 5 alerts late that the notification's post time showed in time; it is not the recorded run.
+
+**Findings.**
+
+1. **Doze did not delay the ntfy app at all, exempt or not.** Every alert sent during forced deep Doze outside a maintenance window was shown while the device was still idle, 7 ms after its send at the median and 15 ms at most, by the notification's post time (57 of 57 exempt, 59 of 59 not exempt), so none waited for a maintenance window or for the exit. The app's instant delivery is a foreground service (`specialUse` type), and Android lets a process with a foreground service keep its network in Doze; the battery optimisation exemption made no difference on this image. The forced maintenance windows ended by themselves in less than 60 seconds.
+2. **App standby buckets do not hold on the app.** A forced bucket (`working_set` to `restricted`) was in place at the first one-minute sample and gone at the next ones (1 of 8 to 14 samples per state): the system put the app back in `active`, consistent with its running foreground service. Delivery was unaffected in every bucket, including the first minute of `restricted`.
+3. **A network loss costs late alerts, never lost ones.** After each outage the app reconnected with the last message id and the server replayed everything: 0 lost over both outages. Alerts sent in the first 3 minutes of the 13-minute outage were shown more than 10 minutes after their send (8 late, 602 to 779 s by the post time too); a 4-minute outage cost nothing. This is the run's only state below 99 %, and it is the deadline, not the channel, that it measures.
+4. **A force-stopped app receives nothing until it is opened again**; then the replay delivered every alert of the stop (up to 418 s, bounded by the stop's 8 minutes). On a phone whose vendor force-stops background apps, this is how alerts would be delayed, and only reopening the app ends it; RUNBOOK step 6.4 (the exemption) is the defence the real run must record. One smoke run caught a narrower case: an alert read by the app in the same milliseconds as the force-stop was stored but never shown, and the app did not show it after the restart either.
+5. **A reboot costs the boot time.** The app's boot receiver restarted the service and the replay delivered the alerts sent during the reboot (max 11.8 s, the boot took about 21 s), once the network was back.
+6. **The distributor app keeps the alert text in three more places.** Besides the server's cache (finding 5 above), the ntfy app writes every message's body to logcat at debug level in its release build (`NtfySubscriberService: Received notification: ... message=...`), stores it in its database, and shows it in the notification. A token in the payload would be readable there too. Proposed as update 6.
+7. **What the emulator cannot say.** No carrier network, no radio power states, no vendor battery management (the force-stops and restrictions real phones add on top of Doze), forced states reached by `dumpsys` rather than by hours of idleness, Wi-Fi rejoined by the scenario after it is turned back on or after a reboot, and 3 hours instead of 7 days. The household run remains the only E13 measurement.
+
 ## Proposed design document updates
 
 Not applied: this spike does not edit shared design documents. Where a decision is needed it is written as "new decision record"; the number is assigned when it is added.
@@ -148,3 +204,5 @@ Not applied: this spike does not edit shared design documents. Where a decision 
 3. `doc/architecture-spine.md` AD-32 rule: after "single use and rate limited;", add "the push payload never carries the token in clear, which is shown when the member opens the alert in a Vilicus client [new decision record];". After "reached through a named private destination (AD-16);", add "members' phones reach it off the household network the way they reach Vilicus remotely [new decision record];".
 4. `doc/prd.md` FR-56, first consequence: after "On a public server, the topic uses an access token or a random name of at least 128 bits.", add "On any server, the push payload carries no redeemable acknowledgement token in clear, and a self-hosted server is reachable from members' phones off the household network [new decision record]."
 5. `doc/architecture.md`, out-of-browser notification channel paragraph: after "On any push server, the payload carries one generic text per severity (spine AD-32).", add "It carries no redeemable acknowledgement token in clear; the token is shown when the member opens the alert in a Vilicus client [new decision record]."
+6. `doc/decisions.md`, D135 (Proposed), Context: after "is readable by the server's operator,", add "and the Android emulator run (story 1.13) showed that the ntfy app, the V0.1 distributor, also writes every message body to logcat in its release build, stores it in its database and shows it in the notification, so a token in the payload is readable on the device by anything that can read those,". This strengthens the first half of D135 and changes neither its decision nor D118: on the emulator, Doze, standby buckets and reboots did not delay the self-hosted server's delivery through the ntfy app, so nothing in this run argues for revisiting D118's default. The owner decides D135 as before.
+7. `doc/research-notes.md` section 3, E13 row, Result column: after "the 7-day run on the household's phones has not started.", add "An Android 15 emulator run with the ntfy app 1.25.2 (story 1.13, `spikes/push-delivery/android/`, 3 hours, forced states, `criterion=simulation`, not an E13 result) delivered every alert sent under Doze, standby buckets, screen off and reboot within seconds and lost none; outages delayed alerts by the outage's length, so only an outage longer than 10 minutes made alerts late, and a force-stopped app received nothing until reopened."

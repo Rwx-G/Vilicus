@@ -1,0 +1,29 @@
+# Checks of run.sh that are expected to FAIL: one check name, then the story finding it records.
+# run.sh prints each as KNOWN-FAIL; if one passes (a browser fixed it), run.sh fails so the change is noticed.
+firefox-current.ddns.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.ddns.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.ddns.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.private.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.private.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.private.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.localca.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.localca.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+firefox-current.localca.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.ddns.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.ddns.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.ddns.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.private.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.private.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.private.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.localca.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.localca.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-158.localca.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 158 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.ddns.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.ddns.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.ddns.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.private.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.private.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.private.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.localca.direct.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.localca.caddy.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized
+branded-firefox-157.localca.nginx.unsanitized.ac2.blocked.preconnect Story 1.14 finding 2: Mozilla's Firefox 157 resolves a preconnect host despite CSP when the content is not sanitized

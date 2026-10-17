@@ -1,0 +1,22 @@
+# Caddy terminating TLS for both origins of the caddy instance names and forwarding each port to
+# the Gateway's matching plain listener. Certificates are picked by SNI among the loaded bundles.
+# Caddy keeps the client's Host header (with its port) by default.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+https://:443 {
+	tls {
+		load /pki/bundles/caddy
+	}
+	reverse_proxy 10.89.0.10:8080
+}
+
+https://:8443 {
+	tls {
+		load /pki/bundles/caddy
+	}
+	reverse_proxy 10.89.0.10:8081
+}

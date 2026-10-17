@@ -1,0 +1,30 @@
+# Layout of the E26 test network, read by the PKI, the DNS server, the Gateway and the browser
+# harness. Every name is a placeholder. The addresses must match the static addresses of
+# compose.yaml. Format: see src/instances.rs.
+
+# The three FR-65 naming options, each with the certificate authority that stands for its
+# certificate source. "public" stands for a publicly trusted CA issuing a DNS-01 certificate; in
+# the test it must be installed in the browsers like the others.
+ca public Public CA stand-in (DNS-01 certificate of a free dynamic DNS subdomain)
+ca private-network Private-network name CA stand-in
+ca household Household local CA
+
+deployment direct 10.89.0.10
+deployment caddy 10.89.0.20
+deployment nginx 10.89.0.21
+
+server dns 10.89.0.53
+server sink 10.89.0.30
+
+instance ddns direct house-direct.dyndns.example public
+instance ddns caddy house-caddy.dyndns.example public
+instance ddns nginx house-nginx.dyndns.example public
+instance private direct vilicus-direct.home.arpa private-network
+instance private caddy vilicus-caddy.home.arpa private-network
+instance private nginx vilicus-nginx.home.arpa private-network
+instance localca direct vilicus-direct.internal household
+instance localca caddy vilicus-caddy.internal household
+instance localca nginx vilicus-nginx.internal household
+
+# The attacker's site: a publicly trusted name.
+wildcard attacker.example public

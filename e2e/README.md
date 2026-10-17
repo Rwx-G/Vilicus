@@ -105,6 +105,8 @@ use `E2E_TIMEOUT_SCALE=2` for it.
 - The real reference host. `argon2id` and `core-execution` emulate it with a CPU and memory
   quota on a larger machine, which is not the same as four physical cores; their numbers are
   indicative until rerun on the reference host.
+- A Debian 13 host kernel and host systemd: containers share the engine's kernel. `e2e/vm/`
+  boots a Debian 13 VM and runs selected phases inside it (see `e2e/vm/README.md`).
 - Real push services: `push` is a simulation.
 - `cargo audit`, which needs the network for its advisory database: run it on the host.
 

@@ -20,7 +20,11 @@ FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        systemd systemd-sysv dbus curl ca-certificates socat iproute2 openssl python3 nginx-light \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && systemctl mask systemd-sysctl.service
+# The sandbox service is privileged, so its /proc/sys is the host's: without the mask, Debian's
+# 10-coredump-debian.conf would set the host's kernel.core_pattern to "core", replacing a host's
+# systemd-coredump pipe until its next boot. No check here depends on a sysctl.
 RUN useradd --system --uid 1000 --user-group --no-create-home egress \
     && for entry in core:2000 plugin-a:2001 plugin-b:2002 backup:2003 misconfigured:2004; do \
          useradd --uid "${entry#*:}" --user-group --no-create-home "${entry%:*}"; \

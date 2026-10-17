@@ -1,0 +1,3 @@
+# Per-run state written by vm.sh: the SSH key pair, the rendered cloud-init seed files and the
+# VM console log. Never committed.
+state/

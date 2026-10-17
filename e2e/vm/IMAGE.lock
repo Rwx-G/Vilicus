@@ -1,0 +1,11 @@
+# The Debian 13 (trixie) cloud image the e2e VM boots. Sourced by entrypoint.sh, which
+# downloads the file once into a Docker volume, checks that the published SHA512SUMS still
+# lists this exact checksum for this file, and verifies the file against it on every boot.
+# To move to a newer build: pick a dated directory under
+# https://cloud.debian.org/images/cloud/trixie/, copy the genericcloud amd64 qcow2 line of its
+# SHA512SUMS here, and record the change in the QA report that uses it.
+DEBIAN_IMAGE_BUILD=20261015-2632
+DEBIAN_IMAGE_FILE=debian-13-genericcloud-amd64-20261015-2632.qcow2
+DEBIAN_IMAGE_URL=https://cloud.debian.org/images/cloud/trixie/20261015-2632/debian-13-genericcloud-amd64-20261015-2632.qcow2
+DEBIAN_IMAGE_SUMS_URL=https://cloud.debian.org/images/cloud/trixie/20261015-2632/SHA512SUMS
+DEBIAN_IMAGE_SHA512=7f1d06b629fa01241ec5817735777d0554554ff8c8d9dc27f9eac65ba3c3a6f859deb6079ebc9c65795d1955abd00a77aa3ff9cb84ae6307dfbbd8b2e398dab2

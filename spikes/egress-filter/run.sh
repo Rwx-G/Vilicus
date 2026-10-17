@@ -110,7 +110,11 @@ unit() {
   shift
   on_sandbox systemd-run --wait --pipe --quiet --property=User=2001 "${props[@]}" "$@"
 }
-service_log() { "${compose[@]}" logs --no-log-prefix "$1" 2>/dev/null; }
+# Docker Compose 2.26 (the Debian 13 package) starts every `logs` line with an erase-line escape
+# (ESC [2K) even when its output is not a terminal, which breaks the checks anchored with `^`.
+# Every read of a service log strips it; on a Compose without the escape the filter is a no-op.
+strip_erase='s/\x1b\[[0-9;]*K//g'
+service_log() { "${compose[@]}" logs --no-log-prefix "$1" 2>/dev/null | sed "$strip_erase"; }
 
 ready=0
 for _ in $(seq 1 60); do
@@ -309,7 +313,7 @@ expect_ok ac2.advisory_lookup_sees_a_public_address 'answer=203.0.113.10' on_san
 expect_ok ac2.proxy_lookup_gets_the_internal_address_and_refuses 'status=403' tunnel 2001 plugin-a --target rebind-a.test:443 --expect-status 403 --expect-reason '10.77.0.10 is private'
 expect_ok ac2.proxy_dials_the_address_it_checked 'upstream=allowed' tunnel 2001 plugin-a --target rebind-b.test:443 --path /rebind-b --expect-status 200 --expect-upstream allowed
 expect_ok ac2.name_has_rebound_since 'answer=10.77.0.10' on_sandbox egress-probe dns-query --server 203.0.113.53:53 --name rebind-b.test --expect-a 10.77.0.10
-expect_ok ac2.proxy_resolved_the_name_once '^1$' sh -c "\"\$@\" | grep -c 'query name=rebind-b.test type=A .*from=\[::ffff:203.0.113.2\]'" _ "${compose[@]}" logs --no-log-prefix resolver
+expect_ok ac2.proxy_resolved_the_name_once '^1$' sh -c "\"\$@\" | sed '$strip_erase' |grep -c 'query name=rebind-b.test type=A .*from=\[::ffff:203.0.113.2\]'" _ "${compose[@]}" logs --no-log-prefix resolver
 expect_ok ac2.proxy_logged_the_dialled_address 'target=rebind-b.test:443 decision=allow addr=203.0.113.10:443' service_log proxy
 
 # ---------------------------------------------------------------------------------------------
@@ -341,12 +345,12 @@ expect_ok ac3.full_profile.proxy_still_works 'upstream=allowed' unit RestrictAdd
 
 # ---------------------------------------------------------------------------------------------
 # What the servers saw over the whole run.
-expect_ok logs.forbidden_upstream_never_reached_through_the_proxy '^0$' sh -c "\"\$@\" | grep -Ec '^(203\.0\.113\.2|2001:db8:113::2) ' || true" _ "${compose[@]}" logs --no-log-prefix forbidden
-expect_ok logs.internal_target_reached_only_by_named_destinations '^/core-named /backup-named $' sh -c "\"\$@\" | grep -E '^(10\.77\.0\.2|203\.0\.113\.2|fd00:77::2|2001:db8:113::2):' | sed -E 's/.*\"GET ([^ ]*) .*/\1/' | tr '\n' ' '" _ "${compose[@]}" logs --no-log-prefix internal
-expect_ok logs.proxy_host_loopback_reached_only_by_controls '^3$' sh -c "\"\$@\" | grep -c 'canary connection from'" _ "${compose[@]}" logs --no-log-prefix proxy
-expect_ok logs.refused_names_never_resolved '^0$' sh -c "\"\$@\" | grep -Ec 'query name=(forbidden\.test|dns\.google|cloudflare-dns\.com|exfil-secret-payload\.test) ' || true" _ "${compose[@]}" logs --no-log-prefix resolver
-expect_ok logs.search_list_never_applied '^0$' sh -c "\"\$@\" | grep -c 'corp\.test' || true" _ "${compose[@]}" logs --no-log-prefix resolver
-expect_ok logs.refused_target_names_not_logged '^0$' sh -c "\"\$@\" | grep -Ec 'forbidden\.test|dns\.google|cloudflare-dns|exfil-secret-payload|203\.0\.113\.11' || true" _ "${compose[@]}" logs --no-log-prefix proxy
+expect_ok logs.forbidden_upstream_never_reached_through_the_proxy '^0$' sh -c "\"\$@\" | sed '$strip_erase' |grep -Ec '^(203\.0\.113\.2|2001:db8:113::2) ' || true" _ "${compose[@]}" logs --no-log-prefix forbidden
+expect_ok logs.internal_target_reached_only_by_named_destinations '^/core-named /backup-named $' sh -c "\"\$@\" | sed '$strip_erase' |grep -E '^(10\.77\.0\.2|203\.0\.113\.2|fd00:77::2|2001:db8:113::2):' | sed -E 's/.*\"GET ([^ ]*) .*/\1/' | tr '\n' ' '" _ "${compose[@]}" logs --no-log-prefix internal
+expect_ok logs.proxy_host_loopback_reached_only_by_controls '^3$' sh -c "\"\$@\" | sed '$strip_erase' |grep -c 'canary connection from'" _ "${compose[@]}" logs --no-log-prefix proxy
+expect_ok logs.refused_names_never_resolved '^0$' sh -c "\"\$@\" | sed '$strip_erase' |grep -Ec 'query name=(forbidden\.test|dns\.google|cloudflare-dns\.com|exfil-secret-payload\.test) ' || true" _ "${compose[@]}" logs --no-log-prefix resolver
+expect_ok logs.search_list_never_applied '^0$' sh -c "\"\$@\" | sed '$strip_erase' |grep -c 'corp\.test' || true" _ "${compose[@]}" logs --no-log-prefix resolver
+expect_ok logs.refused_target_names_not_logged '^0$' sh -c "\"\$@\" | sed '$strip_erase' |grep -Ec 'forbidden\.test|dns\.google|cloudflare-dns|exfil-secret-payload|203\.0\.113\.11' || true" _ "${compose[@]}" logs --no-log-prefix proxy
 expect_ok logs.refused_targets_logged_as_length_and_hash 'target=redacted[(]len=[0-9]+,hash=[0-9a-f]{16}[)] decision=refuse' service_log proxy
 expect_ok logs.ipv6_dialled_for_ipv6_only_host 'target=allowed6.test:443 decision=allow addr=\[2001:db8:113::10\]:443' service_log proxy
 

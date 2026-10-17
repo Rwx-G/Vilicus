@@ -1,0 +1,5 @@
+# The image needs only IMAGE.lock and entrypoint.sh; the per-run state (SSH keys) never enters
+# a build context.
+*
+!IMAGE.lock
+!entrypoint.sh

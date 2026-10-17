@@ -5,7 +5,12 @@
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 RUN apt-get update \
  && apt-get install --yes --no-install-recommends dbus systemd systemd-sysv \
- && apt-get clean
+ && apt-get clean \
+ && systemctl mask systemd-sysctl.service
+# systemd-sysctl is masked because the container is privileged: /proc/sys is the host's, and
+# Debian's 10-coredump-debian.conf would set the host's kernel.core_pattern to "core", replacing
+# a host's systemd-coredump pipe until its next boot (seen in the Debian 13 VM run of
+# 2026-10-17). No check here depends on a sysctl.
 ENV container=docker
 STOPSIGNAL SIGRTMIN+3
 # systemd makes the root mount shared at boot on a host but not in a container; without it the

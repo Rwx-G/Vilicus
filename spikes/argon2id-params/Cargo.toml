@@ -1,0 +1,21 @@
+[package]
+name = "argon2id-params"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E12: Argon2id parameters for passphrase unlock on the reference host"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The version the architecture spine pins (Stack table). `parallel` computes lanes on threads
+# (without it every lane runs on the calling thread). `zeroize` implements `Zeroize` for `Block`,
+# which the spike uses to wipe its own block buffer; it does not wipe the crate's internal one.
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "parallel", "zeroize"] }
+# Already pulled by argon2's `parallel` feature; named directly only to give Argon2id a dedicated,
+# size-capped pool instead of rayon's global one. Adds no crate to the graph.
+rayon = "1.12"
+# Already pulled by argon2's `zeroize` feature and in the spine stack; wipes the derived KEK.
+zeroize = "1.8"

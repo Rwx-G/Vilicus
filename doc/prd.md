@@ -287,7 +287,7 @@ The operator holding the bootstrap token sets the instance name and provides a c
 - The instance admin and every member are alerted on the out-of-browser notification channel before the instance certificate expires. `[ASSUMPTION]` 14 days before. The alert applies to the certificate file option; with a reverse proxy, the documentation states that the operator monitors expiry.
 - The certificate source is the operator's choice: a certificate and key file (renewed by an external tool and reloaded by Vilicus), or a reverse proxy that terminates TLS for the instance name. `[ASSUMPTION]` No built-in ACME client in V0.1.
 - The documentation describes at least three ways to get a name and a certificate at no cost: a free dynamic DNS subdomain with a DNS-01 certificate, a private-network name with its certificate, and a local certificate authority installed on each device. Which of them support passkeys and PWA installation on each target browser is established by E24. The instance name is a DNS name, never an IP address: browsers refuse WebAuthn on an IP origin even with a valid certificate (E24). A certificate from a public CA, which the dynamic DNS and private-network options use, is published in Certificate Transparency logs, so the instance name becomes public. With a dynamic DNS record holding the host's private address, the documentation warns that router DNS rebinding protection may drop the answer and says how to add an exception. With a private-network name, every household device joins the overlay network, and on Android the overlay client and the WireGuard tunnel of FR-86 compete for the single VPN slot.
-- When a reverse proxy terminates TLS, the documentation says that the hybrid key exchange ends at the proxy (D27).
+- When a reverse proxy terminates TLS, the documentation says that the hybrid key exchange ends at the proxy (D27). The reverse proxy terminates TLS for the instance name on ports 443 and 8443, which are the only externally visible ports, and forwards the Host header with its port (spine AD-19).
 
 #### FR-66: Renaming the instance [V0.1]
 
@@ -463,7 +463,7 @@ A member can pair another browser with a short-lived code issued from an already
 
 #### FR-17: Web session hardening [V0.1]
 
-Web sessions follow `doc/architecture.md` section 6 (cookie flags; a session that ends after 15 minutes without activity and lasts 12 hours at most, every request signed by the browser's device key, re-authentication by a passkey assertion, D90; Core-side revocation; CSP with Trusted Types, external content in a sandboxed separate origin).
+Web sessions follow `doc/architecture.md` section 6 (cookie flags; a session that ends after 15 minutes without activity and lasts 12 hours at most, every request signed by the browser's device key, re-authentication by a passkey assertion, D90; Core-side revocation; CSP with Trusted Types, external content in a sandboxed separate origin (sanitized first; links shown outside the frame) (DC-77)).
 
 ### 4.7 Partitions, taint and segmentation
 
@@ -1095,6 +1095,7 @@ The product as specified needs these changes to the design documents. Each becom
 | DC-74 | A pairing code is a 3-digit handle and an 8-digit secret that is the OPAQUE password; every login start gets an OPAQUE answer, so a used, expired, locked or unknown code is answered like a wrong one, and starts are rate limited per source (E22) | FR-16 | D35, D38; DC-2, DC-5 (recorded as D122) | V0.1 |
 | DC-75 | Deletion that must be real, the journal retention purge included, is `secure_delete` ON followed by a TRUNCATE checkpoint; wrapped record keys are never journaled (E17) | FR-29 | D2, D113; DC-68 (recorded as D132) | V0.1 |
 | DC-76 | Per-host budgets in the egress proxy count tunnels, not requests, with a reserve for the Core and the backup caller, because the proxy cannot see requests inside a tunnel (E14) | FR-105 | D105; DC-29, DC-60 (recorded as D133) | after V0.1 |
+| DC-77 | External HTML is sanitized with an allowlist (`ammonia`) before the sandboxed content origin on port 8443; the externally visible ports are exactly 443 and 8443; the content origin sets no cookie and its production CSP has no `report-uri` (E26) | FR-17, FR-52, FR-65 | D26; AD-19 (recorded as D139) | V0.1 |
 
 ### 8.2 Residual risks to record
 

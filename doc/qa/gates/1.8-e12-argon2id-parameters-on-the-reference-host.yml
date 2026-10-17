@@ -2,7 +2,7 @@ schema: 1
 story: '1.8'
 story_title: 'E12: Argon2id parameters on the reference host'
 gate: CONCERNS
-status_reason: 'm = 384 MiB, t = 3, p = 4 meets the floor and stays under 2 s singly and in a simultaneous pair on a 4-CPU, 8 GB container, but E12 passes only on the reference host, which was not used; D128 stays Proposed.'
+status_reason: 'm = 384 MiB, t = 3, p = 4 meets the floor and stays under 2 s singly and in a simultaneous pair on a 4-CPU, 8 GB container and on a 4-vCPU Debian 13 VM (slower of a pair median 691.8 and 587.2 ms), but the VM, faster than the emulation, picks m = 512 MiB under the emulation margin, and E12 passes only on the reference host, which was not used; D128 stays Proposed.'
 reviewer: 'Claude (autonomous run) with independent review agents'
 updated: '2026-10-17'
 run:
@@ -13,6 +13,9 @@ run:
   phase: 'argon2id'
   pass: 10
   fail: 0
+  vm_runs:
+    - { commit: '5130fe96fc018337c5e359df305af4fca8642649', command: 'E2E_TIMEOUT_SCALE=2 E12_IMAGE=rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a bash e2e/vm/vm.sh e2e sandbox locked-memory egress argon2id core-execution', results: 'e2e/results/vm-20261017T100711Z-5130fe9', host: 'Debian 13 VM, kernel 6.12.111+deb13-cloud-amd64, 4 vCPUs, 7947 MiB', pass: 9, fail: 1 }
+    - { commit: '5130fe96fc018337c5e359df305af4fca8642649', command: 'E12_IMAGE=rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a bash e2e/vm/vm.sh e2e argon2id', results: 'e2e/results/vm-20261017T104405Z-5130fe9', host: 'same VM', pass: 9, fail: 1 }
 top_issues:
   - id: 'E12-1'
     severity: high
@@ -30,15 +33,19 @@ top_issues:
     severity: low
     finding: 'The story records 11 PASS for its final run while naming 10 checks; this campaign shows 10.'
     suggested_action: 'Correct the count in the story Result.'
+  - id: 'E12-5'
+    severity: medium
+    finding: 'In the Debian 13 VM (4 dedicated vCPUs of the desktop CPU, no CFS quota over 24 cores) selection_matches_constant failed in both runs: the rule picked m = 512 MiB (slower-of-pair median 907.7 and 784.5 ms, under the 1 000 ms emulation margin) against the constant 384 MiB. The pick depends on the machine, as the story already showed under contention.'
+    suggested_action: 'Keep the constant until the reference host run, which decides it with the margin removed; do not tune it on a VM.'
 evidence:
   trace:
     ac_covered: [1, 2, 3]
     ac_gaps:
-      - { ac: 1, reason: 'Emulation only: single derivation median 384.5 ms, p95 398.2 ms in this campaign; not the reference host.' }
-      - { ac: 2, reason: 'Emulation only: slower of a pair under limit 1, median 747.9 ms, max 815.3 ms; not the reference host.' }
+      - { ac: 1, reason: 'Emulation only: single derivation median 384.5 ms, p95 398.2 ms in this campaign; Debian 13 VM median 340.2 and 291.9 ms, p95 351.3 and 295.4 ms; not the reference host.' }
+      - { ac: 2, reason: 'Emulation only: slower of a pair under limit 1, median 747.9 ms, max 815.3 ms; Debian 13 VM median 691.8 and 587.2 ms, max 753.5 and 598.3 ms; not the reference host.' }
       - { ac: 3, reason: 'Not triggered on the emulation; may still be triggered on the reference host.' }
 nfr_validation:
   security: { status: PASS, notes: 'Floor from RFC 9106 in memory and passes; headers outside floor and ceiling refused before queuing; working memory wiped by the Core.' }
-  performance: { status: CONCERNS, notes: 'Under target on the emulation; from about the fourth simultaneous unlock the target is exceeded; reference host pending.' }
+  performance: { status: CONCERNS, notes: 'Under target on the emulation and on the Debian 13 VM; from about the fourth simultaneous unlock the target is exceeded; reference host pending.' }
   reliability: { status: PASS, notes: 'FIFO limiter, 4 s refusal as retryable, burst of 8 served with peak RSS 386 MiB.' }
   maintainability: { status: CONCERNS, notes: 'Pool design undecided between D128 and D136.' }

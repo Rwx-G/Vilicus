@@ -210,6 +210,41 @@ To remove the container from the measurement, build in it and copy `/target/rele
 
 **Decision task:** already settled by D116, and applied as written.
 
+### Debian 13 VM run (2026-10-17)
+
+Host: the `e2e/vm` harness, a KVM guest (Debian 13.7, kernel `6.12.111+deb13-cloud-amd64`, systemd 257) with 4 vCPUs on the 24-core desktop CPU (`-cpu host`), 7 947 MiB, no swap, nothing else running in the guest or on the Docker engine around it. Storage: a 60 GiB virtio-blk disk (ext4 root), a qcow2 overlay with `cache=none` in a volume of Docker Desktop's VM, so a guest `fdatasync` reaches the desktop SSD through two virtualisation layers; the spike's work directory is overlayfs in its container, as before. The spike's container limits still apply (`--cpus=4 --memory=8g`; 0 of 6 166 CFS periods throttled). Commit `5130fe96fc018337c5e359df305af4fca8642649`, clean tree. Command: `E2E_TIMEOUT_SCALE=2 bash e2e/vm/vm.sh e2e sandbox locked-memory egress argon2id core-execution` (results `e2e/results/vm-20261017T100711Z-5130fe9`); the phase ran alone after the others.
+
+Exit 0, `RESULT PASS`, 41 `PASS`, 0 `FAIL`, in 995 s.
+
+- `fsync_bench` (4 KiB write + `fdatasync`, 2 000 samples): p50 3.723 ms, p99 5.954 ms, max 13.730 ms (campaign on Docker Desktop: p50 1.70 ms).
+- Gate run `ad9` (600 s, pool 3): 1 482 unlocks (at most 2 at once), 260 backup cycles, 0 errors, at most 3 permits, longest watchdog gap 104.8 ms over 7 400 ticks, audit chain verified over 18 183 entries.
+  - `d116_probe_p99`: p99 60.53 ms, max 279.44 ms (6 000 samples).
+  - `d116_socket_probe_p99`: p99 70.62 ms, max 289.81 ms (6 000 samples).
+  - `d116_all_actions_p99`: p99 62.01 ms, max 329.78 ms (23 736 samples).
+  - Rule thread wake to dispatch: p99 0.088 ms.
+
+| Measure | Samples | p50 ms | p95 ms | p99 ms | max ms |
+|---|---|---|---|---|---|
+| Member probe | 6,000 | 14.13 | 27.89 | 60.53 | 279.44 |
+| Member probe stage: write | 6,000 | 6.84 | 16.64 | 48.95 | 248.04 |
+| Member probe stage: audit | 6,000 | 6.27 | 12.53 | 20.54 | 44.82 |
+| Token probe (socket) | 6,000 | 20.19 | 36.30 | 70.62 | 289.81 |
+| All pipeline actions, pooled | 23,736 | 17.53 | 32.85 | 62.01 | 329.78 |
+| All actions, file idle | 17,027 | 16.05 | 29.07 | 40.06 | 329.78 |
+| All actions, file paused for a backup copy | 404 | 48.76 | 87.98 | 107.27 | 121.57 |
+| All actions, home file under online backup | 305 | 15.85 | 36.63 | 57.37 | 77.42 |
+| Rule: event to action done | 1,781 | 16.52 | 33.15 | 46.95 | 77.53 |
+| Background: unlock | 1,444 | 328.25 | 340.04 | 348.52 | 400.93 |
+| Background: writer pause per file | 1,265 | 31.10 | 60.66 | 197.88 | 350.78 |
+| Background: audit flush and copy | 253 | 17.16 | 25.89 | 29.44 | 32.02 |
+| Background: home online backup | 253 | 157.70 | 182.39 | 202.35 | 213.61 |
+
+- The ten slowest actions were all on idle files, with 92 to 319 ms in the write stage (the slowest: `testbed plugin reference.write household`, 329.78 ms, 318.94 ms of write), which points at storage stalls, not at backups or the CPU: unlocks are faster here (p50 328 ms against 445 ms in the story run above) while the write-bound rows have about twice that run's p50 (member probe 14.13 against 7.58 ms) and about three times the Docker Desktop campaign's p99 (60.53 against 21.18 ms).
+- Sensitivity run `saturated-pool4` (informational): member probe p99 66.22 ms (max 161.24), token probe p99 80.02 ms (max 188.50), all actions p99 71.06 ms.
+- `pause-bound`: 70 MiB file, 78.6 MiB WAL: checkpoint 139.9 ms, copy 113.9 ms, pause 253.8 ms; 280 MiB: 216.7, 390.5, 607.1 ms; 559 MiB: 265.2, 771.0, 1 036.2 ms. Copy fit 18.0 ms + 1.34 ms per MiB (100 ms at about 61 MiB); checkpoint 1.78 to 3.38 ms per MiB of WAL.
+
+Reading: D116 still holds, with the margin cut from about 4x to about 1.4x, and the cut comes from the virtual disk. This VM is a worse storage stack than the reference host's SSD should be and a faster CPU than its 4 cores; neither is the reference host, whose run remains the measurement (AC1 and AC2 stay "in emulation"). The finding E32-4 (tail on idle files) is larger here: 329.78 ms on an idle file, all in the write stage.
+
 ## Proposed design document updates
 
 1. `doc/research-notes.md`, section 3, E32 row, Pass criterion column: after "...under a simulated load of two active adults plus the testbed", add: "Met in emulation on 2026-10-16 (story 1.15, `spikes/core-execution/`, Docker `--cpus=4 --memory=8g` on a larger desktop, storage shared with other workloads): one member action through policy, write and audit had a p99 of 28.01 ms over 6,000 samples, one token action sent over a Unix socket a p99 of 34.72 ms, with two unlocks, a backup, journal retention and a long reader running throughout, and rule thread wake to dispatch a p99 of 0.02 ms; the run on the reference host itself is still to do." The status stays "To test" until that run.

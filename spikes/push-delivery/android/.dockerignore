@@ -1,0 +1,8 @@
+# The build context is this directory; only the files the Dockerfile copies belong in it.
+*
+!android.lock
+!avd/
+!observer.py
+!scenario.py
+!analyse.py
+!emulator.sh

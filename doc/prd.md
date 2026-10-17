@@ -3,7 +3,7 @@ title: Vilicus PRD
 author: Rwx-G
 status: final
 created: 2026-10-08
-updated: 2026-10-16
+updated: 2026-10-17
 ---
 
 # PRD: Vilicus
@@ -286,7 +286,7 @@ The operator holding the bootstrap token sets the instance name and provides a c
 - No passkey enrollment page, for the instance admin or a member, is served until an instance name is configured with a certificate that validates in the wizard's browser.
 - The instance admin and every member are alerted on the out-of-browser notification channel before the instance certificate expires. `[ASSUMPTION]` 14 days before. The alert applies to the certificate file option; with a reverse proxy, the documentation states that the operator monitors expiry.
 - The certificate source is the operator's choice: a certificate and key file (renewed by an external tool and reloaded by Vilicus), or a reverse proxy that terminates TLS for the instance name. `[ASSUMPTION]` No built-in ACME client in V0.1.
-- The documentation describes at least three ways to get a name and a certificate at no cost: a free dynamic DNS subdomain with a DNS-01 certificate, a private-network name with its certificate, and a local certificate authority installed on each device. Which of them support passkeys and PWA installation on each target browser is established by E24.
+- The documentation describes at least three ways to get a name and a certificate at no cost: a free dynamic DNS subdomain with a DNS-01 certificate, a private-network name with its certificate, and a local certificate authority installed on each device. Which of them support passkeys and PWA installation on each target browser is established by E24. The instance name is a DNS name, never an IP address: browsers refuse WebAuthn on an IP origin even with a valid certificate (E24). A certificate from a public CA, which the dynamic DNS and private-network options use, is published in Certificate Transparency logs, so the instance name becomes public. With a dynamic DNS record holding the host's private address, the documentation warns that router DNS rebinding protection may drop the answer and says how to add an exception. With a private-network name, every household device joins the overlay network, and on Android the overlay client and the WireGuard tunnel of FR-86 compete for the single VPN slot.
 - When a reverse proxy terminates TLS, the documentation says that the hybrid key exchange ends at the proxy (D27).
 
 #### FR-66: Renaming the instance [V0.1]
@@ -455,7 +455,7 @@ The browser used to complete an enrollment becomes a paired device of that membe
 A member can pair another browser with a short-lived code issued from an already-paired device or by `vilicus device pair`.
 
 **Consequences (testable):**
-- The code is single use, expires after 2 minutes, and allows 3 attempts.
+- The code is single use, expires after 2 minutes, and allows 3 attempts; it is 11 digits, a 3-digit handle and an 8-digit secret, and a used, expired, locked or unknown code is answered like a wrong one (DC-74).
 - The code is bound to the new browser's key exchange by a password-authenticated key exchange, so a party that observes or relays network traffic cannot use it. A compromised Gateway, which serves the page's code, can still capture it (section 8.2).
 - A newly paired browser cannot issue pairing codes for 24 hours.
 - A code issued by `vilicus device pair` notifies the member on every paired device and on the out-of-browser notification channel.
@@ -616,7 +616,7 @@ The subset of the invariants that V0.1 can exercise is the decided list of `doc/
 Every tier 1 write is journaled and can be undone by the member.
 
 **Consequences (testable):**
-- Journal entries are kept 30 days in personal and household partitions, and undo is available for that period; expired entries are deleted under `secure_delete` (DC-68). This retention concerns the undo journal only, not the audit log.
+- Journal entries are kept 30 days in personal and household partitions, and undo is available for that period; expired entries are deleted under `secure_delete` and followed by a TRUNCATE checkpoint, so they leave the live files (DC-68, DC-75). This retention concerns the undo journal only, not the audit log.
 - Undoing a write restores the previous state of every record it changed and is itself journaled and audited.
 - Undo is refused, with an explanation, when a later write changed the same record; the member can undo the later write first.
 
@@ -924,7 +924,7 @@ The web client and the notification templates exist in French and English (DC-68
 - FR-102: files (activatable): listing, reading and depositing files on a self-hosted file server through an isolated plugin; depositing in a dedicated folder is own-account delivery (DC-33); content read from it is `external`; deleting a file is tier 2.
 - FR-103: publishing (activatable): creating and editing post drafts, tags and images on a self-hosted blog through an isolated plugin, as own-account delivery (DC-33) while nothing is public; publishing has a public effect and is tier 2, confirmed on the native app after a human review of the final text.
 - FR-104: professional activity (activatable): daily activity notes, a monthly activity report generated as a document (FR-106), tracking of job applications and tailoring a CV to an offer, in the member's personal partition only; job offers are collected by a plugin within per-host budgets.
-- FR-105: per-host request budgets in the egress proxy, shared by every process that reaches a host (recipe import, feeds, context sources, store connector, researcher, plugins), so that no combination of tasks gets the household's address blocked by a site.
+- FR-105: per-host budgets in the egress proxy, counted in tunnels with a reserve for Core-originated traffic (one tunnel per request for the trusted fetcher and the Core egress mode) (DC-76), shared by every process that reaches a host (recipe import, feeds, context sources, store connector, researcher, plugins), so that no combination of tasks gets the household's address blocked by a site.
 - FR-106: documents and exports: a document generated by the Core and downloaded by a member in the app is a read by that member, never an assistant action; sending it anywhere else is tier 2.
 
 ## 5. Non-goals
@@ -973,7 +973,7 @@ Two documentation criteria were verified and closed on 2026-10-16, before the ep
 Ordered by value to the household. The split into V0.2, V0.3 and so on is decided when V0.1 ships.
 
 1. Home automation module (4.17), the first module after V0.1, with the first shipped plugins (device adapters), mail alerts through an SMTP relay (FR-38, FR-82), the installable web client (the installability part of FR-51), and the architecture changes it depends on (DC-20 to DC-27, DC-35, DC-38, DC-44, DC-45, DC-62 for cross-partition events and sealed inboxes, DC-63, DC-64, DC-70), at parity with the current software (FR-83). It works without a model and exercises the module platform, the plugin runtime and the home partition first. Unlocking, disarming and opening stay with the device vendors' apps and physical gestures until step 8 (FR-80). The current software keeps running until the parity checklist passes, except that it hands the Zigbee coordinator to Vilicus on cutover day (FR-83).
-2. Meals and groceries module (4.14), with the first concrete model connectors, the Claude subscription connector among them, and the local model runtime (FR-33), a read-only (tier 0) conversation over meals data (FR-34) after the evaluation suite (FR-64), the scheduler with opt-in delegation sub-keys for member-created tasks that read no external content (FR-87, FR-88), supervision without memory health (FR-96), and per-host request budgets (FR-105), under the runtime isolation and connector rules of DC-65. Until the per-member tool policy ships (step 4), scheduled tasks are limited to the household's standard tools. Requires E18 and the recipe app export check (open question 9) before it starts.
+2. Meals and groceries module (4.14), with the first concrete model connectors, the Claude subscription connector among them, and the local model runtime (FR-33), a read-only (tier 0) conversation over meals data (FR-34) after the evaluation suite (FR-64), the scheduler with opt-in delegation sub-keys for member-created tasks that read no external content (FR-87, FR-88), supervision without memory health (FR-96), and per-host budgets (FR-105), under the runtime isolation and connector rules of DC-65. Until the per-member tool policy ships (step 4), scheduled tasks are limited to the household's standard tools. Requires E18 and the recipe app export check (open question 9) before it starts.
 3. Store connector (4.16), as soon as the meals module produces a list. Cart preparation is started by a member from the shopping list (principal `Member`); the assistant path arrives with step 4.
 4. Full assistant conversation with writes, memory and the quarantined reader (FR-34, FR-35, FR-67, FR-69), including reading the house and proposing home rules and tasks, waiting-task notifications (FR-63), the researcher with its trusted fetcher (FR-90), memory upkeep and memory health (FR-95, FR-96), cost control (FR-97), playbooks (FR-98), the per-member tool policy (FR-99), activatable modules (FR-100) and documents (FR-106).
 5. Messaging connectors (FR-38) with the binding screens (FR-37), before the personal journal, because meal logging happens through messages today and a journal without them would not be used.
@@ -1092,6 +1092,9 @@ The product as specified needs these changes to the design documents. Each becom
 | DC-71 | E32 passes at p99 under 100 ms for one action through the full pipeline (policy, write, audit) on the reference host, under a simulated load of two active adults plus the testbed; on failure the execution model is revised before the Core process is built | section 7, FR-109 | E32; architecture spine AD-9 (recorded as D116) | V0.1 |
 | DC-72 | If the AD-36 construction does not hold, V0.1 exits with a single member and FR-8 ships in V0.1.x; a browser that fails the login half of E2 leaves the supported list, and if every supported browser fails, TOTP temporarily becomes the primary second factor | FR-8, FR-10, FR-50 | D33, D74, D107; DC-40, DC-62 (recorded as D117) | V0.1 |
 | DC-73 | The out-of-browser channel defaults to a self-hosted UnifiedPush server reached through a named private destination; a public server is allowed when the household chooses it and sees only delivery timing metadata; E13 is measured on both | FR-56 | D47, D105; DC-14, DC-60; open question 8 (recorded as D118) | V0.1 |
+| DC-74 | A pairing code is a 3-digit handle and an 8-digit secret that is the OPAQUE password; every login start gets an OPAQUE answer, so a used, expired, locked or unknown code is answered like a wrong one, and starts are rate limited per source (E22) | FR-16 | D35, D38; DC-2, DC-5 (recorded as D122) | V0.1 |
+| DC-75 | Deletion that must be real, the journal retention purge included, is `secure_delete` ON followed by a TRUNCATE checkpoint; wrapped record keys are never journaled (E17) | FR-29 | D2, D113; DC-68 (recorded as D132) | V0.1 |
+| DC-76 | Per-host budgets in the egress proxy count tunnels, not requests, with a reserve for the Core and the backup caller, because the proxy cannot see requests inside a tunnel (E14) | FR-105 | D105; DC-29, DC-60 (recorded as D133) | after V0.1 |
 
 ### 8.2 Residual risks to record
 
@@ -1141,7 +1144,7 @@ V0.1 experiments run in this order, because the first groups can invalidate the 
 | E3 | V0.1, README wording only | Honest wording of the hybrid transport claim; its result informs the README wording and blocks nothing else |
 | E10 | V0.1 | Sandbox profile, Core-created sockets and peer identity for Gateway, audit writer, plugins and AI processes. Fallback: if `SO_PEERPIDFD` and the cgroup unit cannot be read, each first-party unit runs under its own static user and the Core checks the uid with `SO_PEERCRED`, recorded as weaker |
 | E11 | V0.1 | Migration authorizer |
-| E12 | V0.1 | Argon2id parameters on the reference host. Fallback: lower the concurrency limit, keep the memory floor, accept a longer unlock |
+| E12 | V0.1 | Argon2id parameters on the reference host. Fallback: lower the concurrency limit, keep the memory floor, accept a longer unlock. Emulated result and provisional values in story 1.8; reference-host run outstanding |
 | E14 | V0.1 | Egress proxy domain filtering against real client traffic |
 | E16 | V0.1 | Locked memory and zeroization. Fallback: a shorter unlock window maximum (FR-12), stated in the documentation |
 | E17 | V0.1 | `secure_delete` and WAL behavior, which protects the V0.1 claim that expired journal entries are deleted (FR-29) |

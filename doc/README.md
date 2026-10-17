@@ -1,6 +1,6 @@
 # Vilicus design documents
 
-Status: Revision 2, design phase, no code yet. These documents are written before the code and are meant to be attacked. Each file has a review log or a status line; open questions are stated, not hidden. Update of 2026-10-16: glossary terms for assistant parity and activatable modules (PRD section 4.18) and ID ranges updated; then glossary terms changed or added by the revalidation decisions D69 to D86, by D87 to D96, by D97 to D100, and by the second revalidation, D101 to D115; then ID ranges updated for the owner decisions D116 to D118, and for D119 (AD-36 construction validated by the key prototype).
+Status: Revision 2, design phase, no code yet. These documents are written before the code and are meant to be attacked. Each file has a review log or a status line; open questions are stated, not hidden. Update of 2026-10-16: glossary terms for assistant parity and activatable modules (PRD section 4.18) and ID ranges updated; then glossary terms changed or added by the revalidation decisions D69 to D86, by D87 to D96, by D97 to D100, and by the second revalidation, D101 to D115; then ID ranges updated for the owner decisions D116 to D118, and for D119 (AD-36 construction validated by the key prototype). Update of 2026-10-17: ID ranges updated for the V0.1 spike records D120 to D138, design changes DC-74 to DC-76, risks R54 and R55 and threats T67 and T68; glossary term **Pairing code** added and **Crypto-shredding** pointed to D132.
 
 ## Reading order
 
@@ -16,14 +16,14 @@ Status: Revision 2, design phase, no code yet. These documents are written befor
 
 | Document | Purpose | Status |
 |----------|---------|--------|
-| [`architecture.md`](architecture.md) | Central design, diagrams, challenge log, remaining risks R1 to R53 | Revision 2 |
-| [`threat-model.md`](threat-model.md) | Threats T1 to T66 against adversaries A1 to A20 | Revision 2 |
+| [`architecture.md`](architecture.md) | Central design, diagrams, challenge log, remaining risks R1 to R55 | Revision 2 |
+| [`threat-model.md`](threat-model.md) | Threats T1 to T68 against adversaries A1 to A20 | Revision 2 |
 | [`key-management.md`](key-management.md) | Keys, unlock, recovery, rotation | Revision 2 |
 | [`ai-safety.md`](ai-safety.md) | Principles P1 to P14, invariants I1 to I43 | Revision 2 |
 | [`capability-matrix.md`](capability-matrix.md) | Action by tier by confirmation | Revision 2 |
-| [`decisions.md`](decisions.md) | Decisions D1 to D119 | Revision 2 |
+| [`decisions.md`](decisions.md) | Decisions D1 to D138 | Revision 2 |
 | [`research-notes.md`](research-notes.md) | Claims and experiments E1 to E32 (E21 unused) | Revision 2 |
-| [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-73 | Final |
+| [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-76 | Final |
 | [`architecture-spine.md`](architecture-spine.md) | Architecture decisions AD-1 to AD-56 | Final |
 
 Place architecture diagrams and images in [`assets/`](assets/).
@@ -62,6 +62,7 @@ Terms are used with one meaning across all documents.
 | **Spoken confirmation** | A spoken "yes", transcribed locally only and recognized by the Core, never by an AI process, after a read-back from a fixed template filled only with the request's structured fields; it approves an elevated tier 1 request that carries no I13 exception class, and nothing else: never a cart, an own-account delivery or a restorable physical action, never a rule, a scheduled task, a playbook, an H action or tier 2 (see D68, D100) |
 | **Signed confirmation** | Tier 2 approval from a paired native app that displays the canonical hash and signs it with a hardware-bound key |
 | **Step-up** | A fresh passkey assertion required for human-only actions, bound to the hash of exactly one pending action and never replayable for another (see D71) |
+| **Pairing code** | A short-lived code that pairs a further browser: a handle that names the pending pairing and a secret that is the OPAQUE password, so a party that observes or relays the pairing cannot use it (see D35, D122) |
 | **Paired device** | A client with a registered public key: a native app, a browser holding a non-extractable device key (see D35), or a household display; new ones wait 24 hours before tier 2 |
 | **DEK / KEK** | Data-encryption key / key-encryption key. A member DEK is wrapped by several KEKs |
 | **Household key (HK)** | Versioned key of the household partition |
@@ -69,7 +70,7 @@ Terms are used with one meaning across all documents.
 | **Instance key** | Key protecting Core metadata and the home partition (see D53); never opens a personal partition or the household partition, except, after V0.1, the module files of the delegation sub-keys it seals (see D62). Sealed to PCR 7 (see D96), so a live image signed under the same Secure Boot authorities can unseal it. Does not protect the secrets that let a device open the house, which are entered only at the host CLI and sealed to the TPM under a signed boot policy instead (see D78, D108). Each backup carries it wrapped to the backup public key (see D85) |
 | **Backup public key** | The public key to which each backup's keys (instance key, audit key) are wrapped, so backups run unattended; its private key is derived from the backup secret, generated by the Core (at least 128 bits) and kept offline, so making a backup needs no secret; restoring or checking a backup's contents does (see D85, D106) |
 | **Upgrade check** | `vilicus upgrade check`: reports the migrations an upgrade has pending and those that failed; each migration runs on a copy of its file, swapped in only on success (see D84) |
-| **Crypto-shredding** | Deleting a record by destroying its key |
+| **Crypto-shredding** | Deleting a record by destroying its key; on disk, that is a delete of the wrapped key under `secure_delete` followed by a TRUNCATE checkpoint (see D132) |
 | **Outbox** | Pattern for cross-module consistency without cross-database transactions |
 | **Content-free notification** | A notification carrying no title, sender or amount |
 | **Out-of-browser notification channel** | A channel, configured by each member, that delivers content-free security alerts without an open browser (see D47). An enrollment completes only after the member redeems the token of a test notification sent to it (see D105). A recovery alert carries a one-time acknowledgement token that the member redeems at the Core from a device they control (see D75) |

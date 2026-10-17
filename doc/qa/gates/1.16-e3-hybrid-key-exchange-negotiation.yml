@@ -1,0 +1,38 @@
+schema: 1
+story: '1.16'
+story_title: 'E3: hybrid key exchange negotiation'
+gate: CONCERNS
+status_reason: 'The negotiated group is recorded for every client that runs on this host and the README wording stays within D27, but AC1 names Safari, Android System WebView, OkHttp and Cronet, which need Apple or Android devices and were not run.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'hybrid-kex'
+  pass: 100
+  fail: 0
+top_issues:
+  - id: 'E3-1'
+    severity: medium
+    finding: 'Safari, Android System WebView, Chrome for Android, OkHttp, Cronet and the native app not run.'
+    suggested_action: 'Run the manual procedure of the story; the README names only clients that were run.'
+  - id: 'E3-2'
+    severity: low
+    finding: 'rustls as a TLS 1.3 server follows the client group order, so architecture section 15 "the server prefers the hybrid exchange" is inaccurate.'
+    suggested_action: 'Apply the wording change proposed in the story and the clarifying sentence in D27.'
+  - id: 'E3-3'
+    severity: low
+    finding: 'The story file records no review triage; browsers ran with certificate validation off (key exchange unaffected).'
+    suggested_action: 'None for the result; note it in the device run.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Recorded for desktop and command-line clients only; Apple and Android clients not run.' }
+nfr_validation:
+  security: { status: PASS, notes: 'TLS 1.3 only; TLS 1.2-only client refused; classical clients still connect, as D27 keeps.' }
+  performance: { status: PASS, notes: 'No HelloRetryRequest except the deliberate case.' }
+  reliability: { status: PASS, notes: 'Server record cross-checked against the client side for rustls, Node and Go.' }
+  maintainability: { status: CONCERNS, notes: 'Debian package versions in the client images are not pinned, only printed.' }

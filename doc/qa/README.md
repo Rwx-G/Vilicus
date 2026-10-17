@@ -46,7 +46,7 @@ updated: '2026-10-16T00:00:00Z'
 run:
   commit: '<full sha>'
   command: 'bash e2e/run.sh'
-  report: 'doc/qa/epic-1-e2e-report.md'
+  report: 'doc/qa/epic-1-report.md'
 top_issues: []        # each: { id, severity: low|medium|high, finding, suggested_action }
 evidence:
   trace:
@@ -65,6 +65,6 @@ Gate values:
 - **CONCERNS**: the run passes, but an AC is covered only partly (emulated reference host,
   simulated service, device run still pending) or a top issue needs a decision. The gaps are
   listed, not hidden.
-- **FAIL**: a check covering an AC fails, or an AC has no evidence at all.
+- **FAIL**: a check covering an AC fails, the spike's own pass criterion is not met, or an AC has no evidence at all.
 
 A gate's verdict cites the run it rests on; a gate never claims more than the run showed.

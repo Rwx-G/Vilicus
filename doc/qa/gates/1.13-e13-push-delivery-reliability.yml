@@ -1,0 +1,40 @@
+schema: 1
+story: '1.13'
+story_title: 'E13: push delivery reliability'
+gate: CONCERNS
+status_reason: 'The sender, collector, verdict rules and content-free payloads pass on a simulated network, but no E13 measurement exists: the criterion needs each household phone for 7 days on both servers, which has not started, and E13 gates V0.1.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'push'
+  pass: 78
+  fail: 0
+top_issues:
+  - id: 'E13-1'
+    severity: high
+    finding: 'No measurement: every verdict of the run is computed with simulation parameters and labelled criterion=simulation; the story stays in-progress.'
+    suggested_action: 'Run the 7-day measurement with spikes/push-delivery/RUNBOOK.md on each household phone and both server kinds.'
+  - id: 'E13-2'
+    severity: medium
+    finding: 'A push server stores the alert body, so a token in the payload is readable by its operator; and the design does not say how phones reach a self-hosted server off the household network (D135 Proposed).'
+    suggested_action: 'Owner decides D135 before Story 8.1.'
+  - id: 'E13-3'
+    severity: medium
+    finding: 'A run made only at home would overstate delivery; the acknowledgement path through an automation app is part of the measured delay.'
+    suggested_action: 'Follow the runbook: reach the server and collector over mobile data before the run, and use --explain to separate late from missing.'
+evidence:
+  trace:
+    ac_covered: []
+    ac_gaps:
+      - { ac: 1, reason: 'Not run here: needs the household phones for 7 days; tooling proven in a 45 s simulation with no night.' }
+      - { ac: 2, reason: 'Not run here: verdict rules proven on synthetic weeks and simulation only.' }
+      - { ac: 3, reason: 'Not run here: no phone measured, so no fallback is due yet.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Stored messages are the generic text and an id only; topic access control refuses every other reader and writer; records hold no topic, token, URL or server name.' }
+  performance: { status: CONCERNS, notes: 'Delivery latency on real phones unknown.' }
+  reliability: { status: CONCERNS, notes: 'Unknown until the 7-day run; simulation shows a resumed outage costs late alerts and a non-resumed one loses them.' }
+  maintainability: { status: PASS, notes: 'An injected fault fails the run; incomplete runs report INCOMPLETE, never PASS.' }

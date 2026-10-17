@@ -1,0 +1,44 @@
+schema: 1
+story: '1.15'
+story_title: 'E32: Core execution model'
+gate: CONCERNS
+status_reason: 'D116 is met in emulation (member probe p99 21.18 ms, token probe p99 25.21 ms, all actions p99 22.51 ms under two unlocks, a backup and retention), but D116 is defined on the reference host, which was not used; D136 stays Proposed.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'core-execution'
+  pass: 41
+  fail: 0
+top_issues:
+  - id: 'E32-1'
+    severity: high
+    finding: 'Emulation on a CPU quota and overlayfs storage; the pipeline is fsync-bound, so the reference host SSD decides the tail.'
+    suggested_action: 'Run spikes/core-execution/run.sh on the reference host and record fsync_bench, the d116 lines and both tables.'
+  - id: 'E32-2'
+    severity: high
+    finding: 'D136 sizes the pool on Argon2id lanes running on one thread, which conflicts with the two-thread parallel pool of D128.'
+    suggested_action: 'Owner settles D128, D129 and D136 together before Story 5.1.'
+  - id: 'E32-3'
+    severity: medium
+    finding: 'Not modelled: AD-12 handshake, CBOR framing, MCP, peer identity, outbox delivery, systemd units, the real hpke crate, the final Argon2id parameters.'
+    suggested_action: 'Story 5.1 remeasures with the real pipeline pieces as they land.'
+  - id: 'E32-4'
+    severity: low
+    finding: 'The tail on idle files (story run maximum 88 ms) is not explained by backups.'
+    suggested_action: 'Watch it in the reference host run.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Recorded in emulation, not on the reference host.' }
+      - { ac: 2, reason: 'Passes D116 in emulation only.' }
+      - { ac: 3, reason: 'Not triggered; the fallbacks remain parameters of the spike.' }
+nfr_validation:
+  performance: { status: CONCERNS, notes: 'p99 well under 100 ms in emulation, rule wake to dispatch p99 0.022 ms, 0 throttled CFS periods; reference host pending.' }
+  security: { status: PASS, notes: 'Capability tokens with scope, expiry and budget; audit chain verified over 18 135 entries.' }
+  reliability: { status: PASS, notes: '0 pipeline or background errors over 600 s; a pause behind a long reader is retried without blocking writes.' }
+  maintainability: { status: CONCERNS, notes: 'Execution model parameters undecided until D128 and D136 are settled.' }

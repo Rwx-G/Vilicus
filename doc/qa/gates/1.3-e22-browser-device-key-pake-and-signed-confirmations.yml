@@ -1,0 +1,41 @@
+schema: 1
+story: '1.3'
+story_title: 'E22: browser device key, PAKE pairing and signed confirmations'
+gate: CONCERNS
+status_reason: 'AC1 to AC3 pass on Chrome for Testing 155 and 154 and Firefox 158 and 157, headless with certificate validation, but the pass criterion also names Android, which was not run, so E22 is not passed.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'device-key'
+  pass: 271
+  fail: 0
+top_issues:
+  - id: 'E22-1'
+    severity: high
+    finding: 'Android Chrome and Firefox (current and previous) not run; the pass criterion requires them.'
+    suggested_action: 'Run the manual Android procedure of the story and record each check; apply the matching D107 fallback if a part fails.'
+  - id: 'E22-2'
+    severity: medium
+    finding: 'opaque-ke 4.0.1 is three majors past its 2021 audit and the browser build has no known audit (D123 Proposed).'
+    suggested_action: 'Owner decides D123; review and cross-test before FR-16 code.'
+  - id: 'E22-3'
+    severity: low
+    finding: 'Chrome for Testing has no field trials, and an enrolled browser pins the Core identity key by trust on first use.'
+    suggested_action: 'Cover with the Android and branded-browser manual run; keep the trust-on-first-use limit stated in D122.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Desktop only; Android not run, Safari (best effort) not run.' }
+      - { ac: 2, reason: 'Desktop only; Android not run.' }
+      - { ac: 3, reason: 'Desktop only; Android not run.' }
+      - { ac: 4, reason: 'Not triggered on the browsers run; stays open until Android runs.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Relay, replay, substituted registration, out-of-order and cross-device attacks refused; CSP probes run from the page, with a positive control page.' }
+  performance: { status: CONCERNS, notes: 'OPAQUE issue 142 to 222 ms and redeem 231 to 477 ms in containers (story run); Android phones not measured.' }
+  reliability: { status: PASS, notes: 'Signed requests are serialized per session; sessions do not survive a Core restart, by design.' }
+  maintainability: { status: CONCERNS, notes: 'Chrome for Testing archives pinned by a trust-on-first-use hash; argon2 0.5 duplicated through opaque-ke.' }

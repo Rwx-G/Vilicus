@@ -1,0 +1,40 @@
+schema: 1
+story: '1.10'
+story_title: 'E16: locked memory and zeroization'
+gate: CONCERNS
+status_reason: 'No key material is found after drop on any tested path in the Core shape, with the default-shape residue asserted as control, and no crash path dumps core, but only in Debian 13 containers on the Docker Desktop kernel with a file core_pattern; FR-13 asks for the reference host, and a pipe core_pattern was not run.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'locked-memory'
+  pass: 66
+  fail: 0
+top_issues:
+  - id: 'E16-1'
+    severity: medium
+    finding: 'Not run on the reference host (FR-13 consequence); the kernel is 6.18 WSL2.'
+    suggested_action: 'Run spikes/locked-memory/run.sh, or its four groups with the same capabilities, in the Story 2.3 VM harness.'
+  - id: 'E16-2'
+    severity: medium
+    finding: 'AC2 no-core-dump is shown with a file core_pattern only; Debian 13 with systemd-coredump uses a pipe.'
+    suggested_action: 'Run the noptrace group on a Debian 13 host; coredumpctl list must show only core-dump-control.'
+  - id: 'E16-3'
+    severity: medium
+    finding: 'The pass holds only under the D131 rules (pool, stack scrub, per-operation key objects, Core-owned Argon2id memory); the default shape leaves HPKE schedule values and keys behind.'
+    suggested_action: 'Story 4.2 reuses the inspection method as a regression test on the product build.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Container on the Docker Desktop kernel; the Gateway and IPC path, the async runtime, recovery and backup secrets, and SQLCipher internals not exercised.' }
+      - { ac: 2, reason: 'File core_pattern only; pipe core_pattern (systemd-coredump) not run.' }
+      - { ac: 3, reason: 'Not triggered: no key material found after drop in the Core shape.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Pool locked, dump-excluded, wiped on fork; panics outside handlers and SIGTERM wipe it; same-user readers refused after hardening. Abort paths without user code keep keys until exit (accepted in D131).' }
+  performance: { status: PASS, notes: 'Scrub costs 8.3 microseconds, so it belongs to key operations, not record operations.' }
+  reliability: { status: PASS, notes: 'mlock refusal fails closed with keys_read=0.' }
+  maintainability: { status: CONCERNS, notes: 'Results hold for this build; the closure-only slot API that makes the rules structural is proposed, not built.' }

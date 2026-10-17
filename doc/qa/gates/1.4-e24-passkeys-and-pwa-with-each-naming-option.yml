@@ -1,0 +1,44 @@
+schema: 1
+story: '1.4'
+story_title: 'E24: passkeys and PWA with each naming option'
+gate: CONCERNS
+status_reason: 'The three FR-65 options pass registration, login and Chrome installability on desktop Linux Chrome 155 and 154 and Firefox 158 and 157 with virtual authenticators, and AC2 holds, but Android, Safari, real authenticators and a real public CA were not run, and the two-passkey Firefox case is open.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'naming'
+  pass: 199
+  fail: 0
+top_issues:
+  - id: 'E24-1'
+    severity: high
+    finding: 'Android, Windows and macOS desktops, Safari and real authenticators not run; the pass criterion needs every supported browser.'
+    suggested_action: 'Run the manual procedure of the story per option and device.'
+  - id: 'E24-2'
+    severity: medium
+    finding: 'The Firefox virtual authenticator refused every allow list of two credentials; the story holds the E24 gate on it.'
+    suggested_action: 'Test Firefox with a real authenticator and a user with two passkeys.'
+  - id: 'E24-3'
+    severity: medium
+    finding: 'D137 (overlay addresses and FR-6) and D138 (temporary certificate names IP addresses only) await the owner.'
+    suggested_action: 'Owner decides both before Story 8.3.'
+  - id: 'E24-4'
+    severity: low
+    finding: 'Both test CAs are user-added roots, so public trust and Certificate Transparency are not exercised; installability on Firefox is not measured.'
+    suggested_action: 'Use a real DNS-01 certificate in the device run.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Desktop Linux only, virtual authenticators, user-added roots; Android and Safari not run.' }
+      - { ac: 2, reason: 'Covered on the desktop browsers; on localhost both browsers run the ceremony, which the D76 order still covers.' }
+      - { ac: 3, reason: 'Not triggered: no documented option failed on a browser run here.' }
+nfr_validation:
+  security: { status: PASS, notes: 'IP origins refused by every browser; self-signed ceremonies refused or bound to a host unusable on the instance name; positive control per target.' }
+  performance: { status: PASS, notes: 'Not a performance spike.' }
+  reliability: { status: CONCERNS, notes: 'The Chrome CDP virtual authenticator stopped creating credentials mid-run until replaced; cause not established.' }
+  maintainability: { status: PASS, notes: 'The driver fails when its check count differs from its plan.' }

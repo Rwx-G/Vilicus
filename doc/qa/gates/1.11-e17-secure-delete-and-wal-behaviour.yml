@@ -1,0 +1,34 @@
+schema: 1
+story: '1.11'
+story_title: 'E17: secure_delete and WAL behaviour'
+gate: PASS
+status_reason: 'With secure_delete ON and a TRUNCATE checkpoint, no run of 8 bytes or more of any deleted row or destroyed wrapped key remains in the decrypted file, WAL or shm, with live-content controls; the measurement is of file content and does not depend on the host.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'secure-delete'
+  pass: 29
+  fail: 0
+top_issues:
+  - id: 'E17-1'
+    severity: medium
+    finding: 'Deleting under secure_delete alone does not remove rows before a checkpoint, and a PASSIVE checkpoint leaves them in the WAL; the claim needs a TRUNCATE checkpoint after the purge (D132).'
+    suggested_action: 'Stories 3.1 and 3.6 apply the per-connection setup, the C API checkpoint and the never-journal-the-wrapped-key rule.'
+  - id: 'E17-2'
+    severity: low
+    finding: 'A busy TRUNCATE checkpoint behind a concurrent reader was not exercised.'
+    suggested_action: 'Story 3.6 tests the retry with a reader holding a snapshot.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 3, reason: 'Not triggered; the VACUUM fallback was still exercised and removes content deleted with secure_delete off.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Deleted rows and destroyed keys absent after the checkpoint; FAST mode shown to leave overflow pages, so ON is required. Backups and SSD remanence outside the claim (D132).' }
+  performance: { status: PASS, notes: 'Not a performance spike.' }
+  reliability: { status: PASS, notes: 'The checkpoint C API works under the authorizer; journal_size_limit cuts stale frames as defence in depth.' }
+  maintainability: { status: PASS, notes: 'Procedure reusable by Story 3.6.' }

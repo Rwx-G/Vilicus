@@ -1,0 +1,40 @@
+schema: 1
+story: '1.2'
+story_title: 'HPKE internal review and cross-test'
+gate: CONCERNS
+status_reason: 'Vectors, the 10 000-case two-way cross-test against two hpke-rs providers and the error-path checks pass in the pinned Debian 13 image, but the D107 done state requires them in CI, which does not exist yet, and the review dispositions await the owner.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'hpke'
+  pass: 12
+  fail: 0
+top_issues:
+  - id: 'HPKE-1'
+    severity: medium
+    finding: 'No CI job runs the vectors and the cross-test; D61 and D107 require one, and D120 keeps the gate open until its first green run.'
+    suggested_action: 'Add the job with the first CI story (spine AD-33), triggered on changes under spikes/hpke-review/, and link its first green run.'
+  - id: 'HPKE-2'
+    severity: medium
+    finding: 'REVIEW.md findings are closed or accepted by the author; they become final only when the owner approves them (F12 leads to D121).'
+    suggested_action: 'Owner approves spikes/hpke-review/REVIEW.md before FR-8 code.'
+  - id: 'HPKE-3'
+    severity: low
+    finding: 'cargo audit ran on the host only, not in the pinned container.'
+    suggested_action: 'Run cargo audit in the CI job of HPKE-1.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Vectors pass, but not in a CI job; no CI exists.' }
+      - { ac: 2, reason: 'Cross-test agrees on 10 000 cases per provider in both directions, but not in CI on every change.' }
+      - { ac: 4, reason: 'Not triggered: no finding needs an upstream fix, so no fallback record is due.' }
+nfr_validation:
+  security: { status: CONCERNS, notes: 'No High finding; F1 and F2 (secrets left in freed memory) accepted under usage rules U1 to U10 and measured by story 1.10; the crate is not called audited.' }
+  performance: { status: PASS, notes: 'Not a performance spike.' }
+  reliability: { status: PASS, notes: 'The cross-test is deterministic (fixed seed, queued randomness) and identical on host and container.' }
+  maintainability: { status: PASS, notes: 'hpke pinned at 0.13.0; any version change reopens the review (D120).' }

@@ -1,0 +1,44 @@
+schema: 1
+story: '1.8'
+story_title: 'E12: Argon2id parameters on the reference host'
+gate: CONCERNS
+status_reason: 'm = 384 MiB, t = 3, p = 4 meets the floor and stays under 2 s singly and in a simultaneous pair on a 4-CPU, 8 GB container, but E12 passes only on the reference host, which was not used; D128 stays Proposed.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'argon2id'
+  pass: 10
+  fail: 0
+top_issues:
+  - id: 'E12-1'
+    severity: high
+    finding: 'Measured on a CPU quota of a 24-core desktop, not on 4 physical cores; Argon2id is bound by memory bandwidth, so the reference host will be slower by an unmeasured factor.'
+    suggested_action: 'Run E12_HOST=reference bash spikes/argon2id-params/run.sh on the reference host and follow the story procedure.'
+  - id: 'E12-2'
+    severity: high
+    finding: 'D128 (two-thread Argon2id pool with parallel lanes) conflicts with D136 (lanes on one blocking-pool thread, no parallel feature).'
+    suggested_action: 'Owner settles D128, D129 and D136 together, then E12 and E32 run on the reference host in one session.'
+  - id: 'E12-3'
+    severity: medium
+    finding: 'No known third-party audit of the argon2 crate; the parallel feature pulls rayon as new Core dependencies (D129 Proposed).'
+    suggested_action: 'Owner decides D129.'
+  - id: 'E12-4'
+    severity: low
+    finding: 'The story records 11 PASS for its final run while naming 10 checks; this campaign shows 10.'
+    suggested_action: 'Correct the count in the story Result.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Emulation only: single derivation median 384.5 ms, p95 398.2 ms in this campaign; not the reference host.' }
+      - { ac: 2, reason: 'Emulation only: slower of a pair under limit 1, median 747.9 ms, max 815.3 ms; not the reference host.' }
+      - { ac: 3, reason: 'Not triggered on the emulation; may still be triggered on the reference host.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Floor from RFC 9106 in memory and passes; headers outside floor and ceiling refused before queuing; working memory wiped by the Core.' }
+  performance: { status: CONCERNS, notes: 'Under target on the emulation; from about the fourth simultaneous unlock the target is exceeded; reference host pending.' }
+  reliability: { status: PASS, notes: 'FIFO limiter, 4 s refusal as retryable, burst of 8 served with peak RSS 386 MiB.' }
+  maintainability: { status: CONCERNS, notes: 'Pool design undecided between D128 and D136.' }

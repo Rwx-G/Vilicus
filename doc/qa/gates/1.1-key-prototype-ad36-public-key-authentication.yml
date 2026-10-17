@@ -1,0 +1,37 @@
+schema: 1
+story: '1.1'
+story_title: 'Key prototype: AD-36 public-key authentication'
+gate: PASS
+status_reason: 'Every I/O matrix case passes in the Debian 13 container (44 tests, fmt and clippy clean), no key bytes appear in output, and D119 records the construction; the criterion asks for nothing this environment could not run.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'ad36'
+  pass: 48
+  fail: 0
+top_issues:
+  - id: 'AD36-1'
+    severity: medium
+    finding: 'wrappers.db is authenticated per record, not as a set: deleting a record or restoring an older file (a vetoed member record) raises no alert.'
+    suggested_action: 'Keep the deferred-work entry; design a monotonic counter and a MAC over the record set in the keys and storage epics.'
+  - id: 'AD36-2'
+    severity: medium
+    finding: 'HPKE base mode authenticates no sender, so a disk writer can seal a chosen HK to a member at first receipt (D121 Proposed, R55, T68).'
+    suggested_action: 'Owner decides D121, including the first-receipt anchor, before FR-8 code.'
+  - id: 'AD36-3'
+    severity: low
+    finding: 'spikes/ad36-key-prototype/.cargo/ is redundant and was the one uncommitted path of the run.'
+    suggested_action: 'Owner deletes it (rm is denied in this workspace).'
+evidence:
+  trace:
+    ac_covered: [1, 2]
+    ac_gaps: []
+nfr_validation:
+  security: { status: PASS, notes: 'Substituted keys, edited tags and wraps, a later-edited MAC, and wrong or reused tokens are refused; known-answer tests pin the layouts. Whole-store integrity is out of scope (AD36-1).' }
+  performance: { status: PASS, notes: 'Not a performance spike; the phase ran in 3 s.' }
+  reliability: { status: PASS, notes: 'A pending enrollment does not survive an HK rotation; it is refused as stale, as D119 records.' }
+  maintainability: { status: PASS, notes: 'readme_layouts.rs keeps the README byte layouts in step with the code.' }

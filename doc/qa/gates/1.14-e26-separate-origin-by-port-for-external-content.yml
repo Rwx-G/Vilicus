@@ -1,0 +1,45 @@
+schema: 1
+story: '1.14'
+story_title: 'E26: separate origin by port for external content'
+gate: CONCERNS
+status_reason: 'With the sanitizer, CSP and an empty sandbox, isolation and blocking hold on Playwright Chromium 156 and 153 and Firefox 157 and 155 and Mozilla Firefox 158.0 and 157.0.1, on all three naming options, directly and behind Caddy and nginx, but the criterion names every supported browser and Android and Safari were not run.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'separate-origin'
+  pass: 5590
+  fail: 0
+  known_fail: 27
+top_issues:
+  - id: 'E26-1'
+    severity: high
+    finding: 'Android Chrome and Firefox not run; Safari (best effort) and branded Chrome not run.'
+    suggested_action: 'Run the Android procedure of the story (compose on a LAN host, phone DNS to the host, user CAs installed).'
+  - id: 'E26-2'
+    severity: medium
+    finding: 'Without the sanitizer, Firefox 157 and 158 resolve a preconnect host despite CSP; the sanitizer, not CSP, closes it. These are the 27 KNOWN-FAIL lines of the unsanitized control.'
+    suggested_action: 'Keep the sanitizer mandatory (D139) and keep the control in the Story 7.5 tests.'
+  - id: 'E26-3'
+    severity: low
+    finding: 'Firefox 155 under Playwright 1.63 needed 22 page-load retries in this campaign (13 in the story run); every retry succeeded on its first repeat.'
+    suggested_action: 'Investigate only if Firefox 155 stays supported; keep counting retries per run.'
+  - id: 'E26-4'
+    severity: low
+    finding: 'rustls 0.23.45 is flagged by RUSTSEC-2026-0346 to 0349.'
+    suggested_action: 'Move to 0.23.46.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Desktop Linux browsers only; Android and Safari not run; the stand-in public CA is installed in the browsers.' }
+      - { ac: 2, reason: 'Every attempt blocked; CSP reports are incomplete and recorded as monitoring only.' }
+      - { ac: 3, reason: 'Recorded per proxy for Caddy 2.11.7 and nginx 1.31.7; fallback not taken (D139).' }
+nfr_validation:
+  security: { status: PASS, notes: 'No script, form, popup, navigation, subresource, preconnect, DNS prefetch or API probe reached any server in production; content-started requests cross-site without the cookie.' }
+  performance: { status: PASS, notes: 'Not a performance spike; the phase took 1 695 s.' }
+  reliability: { status: CONCERNS, notes: 'Firefox 155 page-load stalls handled by bounded retries.' }
+  maintainability: { status: PASS, notes: 'The harness fails on an unlisted FAIL, a listed check that passes, or a check count off its expectation.' }

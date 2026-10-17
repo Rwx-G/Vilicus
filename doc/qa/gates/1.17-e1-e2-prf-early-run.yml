@@ -1,0 +1,39 @@
+schema: 1
+story: '1.17'
+story_title: 'E1 and E2 PRF half: early run'
+gate: CONCERNS
+status_reason: 'The probe is proven with a Chromium virtual authenticator (stable 32-byte output per salt and credential, never posted raw) and the library behaviour is recorded, but the criterion needs the household devices, which were not run; the story gates nothing in V0.1.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'prf-probe'
+  pass: 45
+  fail: 0
+top_issues:
+  - id: 'PRF-1'
+    severity: medium
+    finding: 'No real authenticator measured; a virtual authenticator says nothing about a phone, a platform authenticator or a password manager.'
+    suggested_action: 'Run spikes/prf-probe/RUNBOOK.md on the household devices when PRF unlock is scheduled.'
+  - id: 'PRF-2'
+    severity: low
+    finding: 'The native Credential Manager app of AC1 is not built.'
+    suggested_action: 'Build it only if the browser rows leave Android in doubt.'
+  - id: 'PRF-3'
+    severity: low
+    finding: 'The PRF output is an unsigned client extension result; the virtual authenticator leaves no signed trace.'
+    suggested_action: 'Record in key management section 3 as the story proposes.'
+evidence:
+  trace:
+    ac_covered: [2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Not run here: needs the household devices; the native app is not built.' }
+      - { ac: 2, reason: 'Library half answered (webauthn-rs 0.5.5 has no prf extension); browser half not run on real devices.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Only digests leave the page; replayed login refused; local CA name-constrained.' }
+  performance: { status: PASS, notes: 'Not a performance spike.' }
+  reliability: { status: CONCERNS, notes: 'Stability across contexts, browsers and reboots is what the household run measures.' }
+  maintainability: { status: PASS, notes: 'Test count enforced; serve.sh reduces the device run to opening a page.' }

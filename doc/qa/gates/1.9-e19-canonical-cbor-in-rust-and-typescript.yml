@@ -1,0 +1,38 @@
+schema: 1
+story: '1.9'
+story_title: 'E19: canonical CBOR in Rust and TypeScript'
+gate: PASS
+status_reason: 'dcbor and cbor2 behind the profile layer agree on bytes and SHA-256 for every corpus item and on every rejection, on the committed and a fresh larger set, and the vectors are committed; the Kotlin part belongs to the native app milestone under the terms of the story.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'cbor'
+  pass: 39
+  fail: 0
+top_issues:
+  - id: 'E19-1'
+    severity: medium
+    finding: 'dcbor 0.25.2 accepts integral floats, decodes without a nesting bound and collapses keys equal after NFC; the profile layer is required, not optional (D130).'
+    suggested_action: 'Story 2.5 takes the profile layer and the vectors into vilicus-proto.'
+  - id: 'E19-2'
+    severity: low
+    finding: 'dcbor brings paste (RUSTSEC-2024-0436, unmaintained) and chrono into the Core tree.'
+    suggested_action: 'List the advisory in deny.toml with a review date, as D130 states.'
+  - id: 'E19-3'
+    severity: low
+    finding: 'A signer on newer Unicode tables than the Core may refuse a confirmation holding new code points; fails closed.'
+    suggested_action: 'Accepted in D130; keep unicode-normalization pinned exactly.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 3, reason: 'Kotlin part not run; the story assigns it to the native app milestone. Fallback not triggered.' }
+nfr_validation:
+  security: { status: PASS, notes: '90 hand-written and 102 514 fuzzed inputs (committed and fresh) get the same verdict on both sides; nesting bounded before recursion.' }
+  performance: { status: PASS, notes: 'Not a performance spike.' }
+  reliability: { status: PASS, notes: 'Committed vectors checked against SHA256SUMS and a fresh generation.' }
+  maintainability: { status: PASS, notes: 'Vector headers carry the profile constants and Unicode version, and every decoder checks them.' }

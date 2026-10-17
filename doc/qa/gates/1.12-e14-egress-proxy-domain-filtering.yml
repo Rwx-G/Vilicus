@@ -1,0 +1,43 @@
+schema: 1
+story: '1.12'
+story_title: 'E14: egress proxy domain filtering'
+gate: FAIL
+status_reason: 'Every AC check passes, but the spike pass criterion "no bypass of the allowlist" is not met: domain fronting on a shared front end reaches a service off the allowlist, the documented fallback (per-plugin IP ranges) does not close it, and the mitigation (D134) awaits the owner.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'egress'
+  pass: 189
+  fail: 0
+top_issues:
+  - id: 'E14-1'
+    severity: high
+    finding: 'Domain fronting by SNI or Host header carries requests to another tenant of a shared front end; the per-caller SNI check closes the SNI half, Host-header fronting stays open (R54, T67).'
+    suggested_action: 'Owner decides D134 (SNI check, fallback not adopted, Host-header fronting a named risk) and how allowlists prefer dedicated infrastructure; the gate moves to CONCERNS once accepted.'
+  - id: 'E14-2'
+    severity: medium
+    finding: 'The IPAddressDeny=any checks ran under systemd 257 in a container on the WSL2 kernel, not in the Debian 13 VM.'
+    suggested_action: 'Run the ac3.* commands with systemd-run in the Debian 13 VM (Story 5.5).'
+  - id: 'E14-3'
+    severity: medium
+    finding: 'getaddrinfo consults the hosts file and name service modules, and a timed-out lookup keeps its thread.'
+    suggested_action: 'Story 5.5 uses an asynchronous resolver that queries only the configured DNS servers, with cancellation.'
+  - id: 'E14-4'
+    severity: low
+    finding: 'File descriptor exhaustion and Encrypted Client Hello end to end were not exercised.'
+    suggested_action: 'Story 5.5 runs the LimitNOFILE=64 procedure of the story.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'The three clauses pass; the spike criterion "no bypass" fails for shared front ends (finding 2).' }
+      - { ac: 3, reason: 'Direct connections fail in a container, not yet in the Debian 13 VM; the fallback was evaluated and not adopted, recorded as D134 Proposed.' }
+nfr_validation:
+  security: { status: FAIL, notes: 'Hostname allowlist bypassable by domain fronting on shared front ends; every other bypass attempt, internal address and rebinding case refused.' }
+  performance: { status: PASS, notes: '64 MiB download intact and 50 concurrent tunnels; per-caller connection limits hold.' }
+  reliability: { status: PASS, notes: 'One caller cannot exhaust the proxy; a black-holed address does not stall the next one.' }
+  maintainability: { status: PASS, notes: 'Test set kept for Story 5.5; the documentation-range switch exists only in a test-network build.' }

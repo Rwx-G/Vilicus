@@ -1,0 +1,40 @@
+schema: 1
+story: '1.6'
+story_title: 'E10: sandbox profile and peer identity'
+gate: CONCERNS
+status_reason: 'The plugin works under the fixed profile, direct sockets fail and peers are identified by unit under systemd 257 of Debian 13 as PID 1, but in a privileged container on kernel 6.18, not on the Debian 13 host the story names; D125 stays Proposed until that rerun.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'sandbox'
+  pass: 146
+  fail: 0
+top_issues:
+  - id: 'E10-1'
+    severity: high
+    finding: 'Not run on a Debian 13 host (kernel 6.12, AppArmor active); the late-pidfd behaviour already differs on 6.18.'
+    suggested_action: 'Run checks.sh on a disposable Debian 13 VM (Story 2.3 harness) and record the LATE_PIDFD line; then accept D125.'
+  - id: 'E10-2'
+    severity: medium
+    finding: 'AD-24 as written (unit from the cgroup of the pidfd) does not work under ProtectProc=invisible; the method changed to cgroup.procs membership then pidfd liveness.'
+    suggested_action: 'Carry the method into Story 5.3 AC2 and the spine AD-24 text (D125).'
+  - id: 'E10-3'
+    severity: low
+    finding: 'Whether an unprivileged user manager can create a cgroup with a system unit name was not exercised.'
+    suggested_action: 'Add the case to the Debian host rerun.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Ran in a container on kernel 6.18, not on Debian 13; the egress proxy socket was not exercised.' }
+      - { ac: 2, reason: 'Ran in a container on kernel 6.18, not on Debian 13.' }
+      - { ac: 3, reason: 'Not triggered: the unit was read on every connection; the weakness of the fallback was measured anyway.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Same-uid other unit, spoofed leaf name, process outside a unit and reused pid refused; every probe outcome compared with an unsandboxed control.' }
+  performance: { status: PASS, notes: 'systemd-analyze exposure 0.4 (Core) and 0.2 (plugin).' }
+  reliability: { status: PASS, notes: 'Restarts of the plugin and of the Core alone keep identity checks correct; a connection outliving its verified process is closed.' }
+  maintainability: { status: PASS, notes: 'Every line of the fixed profile is asserted against systemctl show.' }

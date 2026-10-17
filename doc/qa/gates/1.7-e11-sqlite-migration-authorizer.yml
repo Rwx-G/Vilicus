@@ -1,0 +1,38 @@
+schema: 1
+story: '1.7'
+story_title: 'E11: SQLite migration authorizer'
+gate: PASS
+status_reason: 'Every hostile statement is refused in migrations and on read and write connections with nothing written, controls show each would run without the authorizer, and the criterion (all forbidden statements rejected) depends on the SQLCipher build, not on the host.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'authorizer'
+  pass: 255
+  fail: 0
+top_issues:
+  - id: 'E11-1'
+    severity: medium
+    finding: 'The bundled build enables the extension loading C API, which the authorizer cannot see; the spike turns it off at open, and the compile-out build was not run.'
+    suggested_action: 'Story 3.1 applies the compile-out procedure and a test that the C API is off (D126).'
+  - id: 'E11-2'
+    severity: medium
+    finding: 'The migration policy refuses every virtual table, so no module can create its FTS5 index (D127 Proposed).'
+    suggested_action: 'Owner decides D127; E15 checks writes to FTS5 shadow tables.'
+  - id: 'E11-3'
+    severity: low
+    finding: 'The story file records no review triage, so the review findings for this spike cannot be cited.'
+    suggested_action: 'None; the run evidence stands on its own.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 3, reason: 'Not triggered: no forbidden SQL statement passed the authorizer.' }
+nfr_validation:
+  security: { status: PASS, notes: '23 hostile statements in migrations and 25 on read and write connections refused; plaintext export via sqlcipher_export refused; planted triggers and views refused.' }
+  performance: { status: PASS, notes: 'Not a performance spike.' }
+  reliability: { status: PASS, notes: 'A migration connection is left closed on every exit path, failed BEGIN included.' }
+  maintainability: { status: PASS, notes: 'A test fails when the engine offers a function in neither the allowed nor the denied list; the hostile set is kept for Story 3.1.' }

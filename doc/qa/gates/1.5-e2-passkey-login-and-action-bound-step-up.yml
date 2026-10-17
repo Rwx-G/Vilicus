@@ -1,0 +1,44 @@
+schema: 1
+story: '1.5'
+story_title: 'E2 login half: passkey login and action-bound step-up'
+gate: CONCERNS
+status_reason: 'Registration, login and the action-bound step-up pass with webauthn-rs 0.5.5 on Playwright Chromium 156 and 153 and Firefox 157 and 155 with virtual authenticators, but the criterion names every supported browser, and Android, Safari and real authenticators were not run.'
+reviewer: 'Claude (autonomous run) with independent review agents'
+updated: '2026-10-17'
+run:
+  commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
+  command: 'bash e2e/run.sh --keep-going'
+  report: 'doc/qa/epic-1-report.md'
+  results: 'e2e/results/20261017T083324Z-6665c6b'
+  phase: 'passkey'
+  pass: 112
+  fail: 0
+top_issues:
+  - id: 'E2L-1'
+    severity: high
+    finding: 'Android Chrome and Firefox (supported per D107), Safari and real authenticators not run; Playwright builds stand in for the vendor channels.'
+    suggested_action: 'Run the manual procedure of the story on each device; a failing browser leaves the supported list under D117.'
+  - id: 'E2L-2'
+    severity: medium
+    finding: 'webauthn-rs 0.5.5 has no API to set the challenge; it is set through the serialized state (danger-allow-state-serialisation).'
+    suggested_action: 'Keep the guarded bind_challenge tests; propose a caller-supplied challenge upstream (D124).'
+  - id: 'E2L-3'
+    severity: low
+    finding: 'The server refusal of an unverified assertion is shown by ceremony tests only; browsers refused first.'
+    suggested_action: 'Keep the ceremony test in Story 7.6.'
+  - id: 'E2L-4'
+    severity: low
+    finding: 'rustls 0.23.45 is flagged by RUSTSEC-2026-0346 to 0349.'
+    suggested_action: 'Move to 0.23.46.'
+evidence:
+  trace:
+    ac_covered: [1, 2, 3]
+    ac_gaps:
+      - { ac: 1, reason: 'Desktop Playwright builds only; Android and Safari not run.' }
+      - { ac: 2, reason: 'Shown on the four desktop browsers with virtual authenticators only.' }
+      - { ac: 3, reason: 'Not triggered on the browsers run.' }
+nfr_validation:
+  security: { status: PASS, notes: 'Cross-request, cross-hash, replay, expiry, cross-session and missing user verification refused; the counter is tracked across ceremonies.' }
+  performance: { status: PASS, notes: 'Not a performance spike; product expiry values not chosen here.' }
+  reliability: { status: PASS, notes: 'A concurrent double submission yields exactly one approval.' }
+  maintainability: { status: CONCERNS, notes: 'Depends on a serialization detail of webauthn-rs, gated by tests.' }

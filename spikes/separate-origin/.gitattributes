@@ -1,0 +1,9 @@
+# Shell scripts and the files mounted into Linux containers keep LF line endings on a Windows checkout.
+*.sh text eol=lf
+*.mjs text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.conf text eol=lf
+docker/Caddyfile text eol=lf
+docker/playwright.Dockerfile text eol=lf
+docker/branded.Dockerfile text eol=lf

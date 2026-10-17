@@ -1,0 +1,27 @@
+[package]
+name = "separate-origin"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Spike E26: external content in a script-less sandboxed iframe from a separate origin by port, tested with each naming option and behind reverse proxies"
+
+# Standalone on purpose: the spike never joins the Vilicus workspace (Epic 2 creates it).
+[workspace]
+
+[dependencies]
+# The versions the spine Stack table pins. hyper serves HTTP/1.1 and HTTP/2 on both origins; axum
+# is not needed for a dozen fixed routes.
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+hyper = { version = "=1.12.0", features = ["server", "http1", "http2"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs"] }
+# hyper's own companions: the tokio executor and I/O adapter, and a full-body type.
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2"] }
+http-body-util = "0.1"
+# Test PKI only (three CAs standing for the FR-65 naming options). The aws-lc-rs backend avoids
+# pulling ring next to aws-lc-rs.
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
+# The allowlist HTML sanitizer of the content origin (html5ever parser), approved by the owner on
+# 2026-10-17 for E26; exact pin so the recorded result names the version that produced it.
+ammonia = "=4.2.4"

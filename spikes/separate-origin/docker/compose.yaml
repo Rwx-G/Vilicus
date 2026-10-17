@@ -1,0 +1,141 @@
+# The E26 test network. The network is internal: nothing reaches the real internet, so every
+# request a hostile page manages to send lands on a server of this file and is logged.
+# Static addresses must match network/instances.txt. Every image is pinned by digest (tags as
+# pulled on 2026-10-16 in the comments).
+
+x-images:
+  # rust:1-trixie (Debian 13), rustc 1.99.1: runs the release binary built by run.sh.
+  rust: &rust_image rust@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+
+x-binary: &binary
+  image: *rust_image
+  init: true
+  volumes:
+    - target:/target:ro
+    - pki:/pki
+    - ../network/instances.txt:/layout/instances.txt:ro
+
+x-browser: &browser
+  ipc: host
+  entrypoint: ["sh", "/docker/browser-entrypoint.sh"]
+  depends_on:
+    pki:
+      condition: service_completed_successfully
+  volumes:
+    - pki:/pki:ro
+    - ../network/instances.txt:/layout/instances.txt:ro
+    # Under /app so that the ESM import of `playwright` finds /app/node_modules.
+    - ../harness:/app/harness:ro
+    - ./browser-entrypoint.sh:/docker/browser-entrypoint.sh:ro
+
+networks:
+  lan:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24
+
+volumes:
+  # Built by run.sh's cargo step; shared read-only.
+  target:
+    external: true
+    name: vilicus-separate-origin-target
+  # The test PKI of this run only; `down --volumes` deletes it.
+  pki: {}
+
+services:
+  pki:
+    <<: *binary
+    command: ["/target/release/separate-origin", "pki", "/layout/instances.txt", "/pki"]
+    network_mode: none
+
+  dns:
+    <<: *binary
+    command: ["/target/release/separate-origin", "dns", "/layout/instances.txt"]
+    networks:
+      lan:
+        ipv4_address: 10.89.0.53
+
+  gateway:
+    <<: *binary
+    command: ["/target/release/separate-origin", "gateway", "/layout/instances.txt", "/pki", "--test-controls"]
+    depends_on:
+      pki:
+        condition: service_completed_successfully
+    networks:
+      lan:
+        ipv4_address: 10.89.0.10
+
+  sink:
+    <<: *binary
+    command: ["/target/release/separate-origin", "sink", "/layout/instances.txt", "/pki"]
+    depends_on:
+      pki:
+        condition: service_completed_successfully
+    networks:
+      lan:
+        ipv4_address: 10.89.0.30
+
+  caddy:
+    # caddy:2-alpine.
+    image: caddy@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    depends_on:
+      pki:
+        condition: service_completed_successfully
+    volumes:
+      - pki:/pki:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      lan:
+        ipv4_address: 10.89.0.20
+
+  nginx:
+    # nginx:1-alpine.
+    image: nginx@sha256:892bb2152464f0c5d8972593a5f5afaf8054552580b699d95f8ff4af08c2d33d
+    depends_on:
+      pki:
+        condition: service_completed_successfully
+    volumes:
+      - pki:/pki:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      lan:
+        ipv4_address: 10.89.0.21
+
+  browser-current:
+    <<: *browser
+    build:
+      context: .
+      dockerfile: playwright.Dockerfile
+      args:
+        # mcr.microsoft.com/playwright:v1.64.1-noble; the npm package must match the tag.
+        BASE: mcr.microsoft.com/playwright@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf
+        PLAYWRIGHT_VERSION: 1.64.1
+    image: vilicus-e26-playwright-current
+    networks:
+      lan:
+        ipv4_address: 10.89.0.100
+
+  browser-previous:
+    <<: *browser
+    build:
+      context: .
+      dockerfile: playwright.Dockerfile
+      args:
+        # mcr.microsoft.com/playwright:v1.63.0-noble; the npm package must match the tag.
+        BASE: mcr.microsoft.com/playwright@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+        PLAYWRIGHT_VERSION: 1.63.0
+    image: vilicus-e26-playwright-previous
+    networks:
+      lan:
+        ipv4_address: 10.89.0.101
+
+  browser-branded:
+    <<: *browser
+    build:
+      context: .
+      dockerfile: branded.Dockerfile
+    image: vilicus-e26-firefox-branded
+    networks:
+      lan:
+        ipv4_address: 10.89.0.102

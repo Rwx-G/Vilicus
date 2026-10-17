@@ -49,7 +49,7 @@ development_status:
   1-11-e17-secure_delete-and-wal-behaviour: review
   1-12-e14-egress-proxy-domain-filtering: review
   1-13-e13-push-delivery-reliability: in-progress
-  1-14-e26-separate-origin-by-port-for-external-content: ready-for-dev
+  1-14-e26-separate-origin-by-port-for-external-content: review
   1-15-e32-core-execution-model: review
   1-16-e3-hybrid-key-exchange-negotiation: review
   1-17-e1-and-e2-prf-half-early-run: in-progress

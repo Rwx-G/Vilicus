@@ -1,0 +1,16 @@
+# Smoke unit of the CI VM harness (ci/vm/README.md). `ci/vm_harness.py smoke` installs it in the
+# Debian 13 guest, starts it with systemctl, asserts that it reaches the active state and collects
+# its journal. The harness looks for the line the shell prints below; ci/test_vm_harness.py keeps
+# the two in agreement. The sandbox lines show that the guest's systemd applies them.
+[Unit]
+Description=Vilicus CI harness smoke unit
+
+[Service]
+Type=exec
+ExecStart=/bin/sh -c 'echo "vilicus-ci-smoke: running as uid $$(id -u) under PID 1 $$(cat /proc/1/comm)"; exec sleep infinity'
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict

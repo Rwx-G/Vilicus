@@ -11,10 +11,15 @@
 #   e2e <phase...>    run e2e/run.sh --only <phases> --keep-going in the VM and copy the
 #                     results back to e2e/results/vm-<timestamp>-<sha>/
 #   info              kernel, OS, CPUs, memory, systemd, Docker and disk facts of the VM
+#   console           print the guest console (the VM container's log) so far
 #   down              stop and remove the VM container and its overlay
 #
 # Environment:
 #   VM_SSH_PORT  host port forwarded to the guest's SSH, bound to 127.0.0.1 (default 2222)
+#   VM_CPUS, VM_MEMORY_MIB, VM_DISK_SIZE  guest size, passed to entrypoint.sh when set
+#                (its defaults: 4, 8192, 60G)
+#   VM_IMAGES_DIR  host directory holding the verified base image instead of the
+#                vilicus-vm-images volume, so that CI can cache it (ci/vm/README.md)
 #   E2E_*, E[0-9]*_*  forwarded to e2e/run.sh in the VM (for example E2E_TIMEOUT_SCALE=2,
 #                     or a spike's image override)
 set -euo pipefail
@@ -50,7 +55,7 @@ log() { echo "[vm] $*" >&2; }
 die() { log "error: $*"; exit 1; }
 
 usage() {
-  sed -n '6,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '6,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 container_running() {
@@ -115,18 +120,27 @@ cmd_up() {
   # A new key pair for every run; the answer overwrites the previous run's key.
   ssh-keygen -q -t ed25519 -N '' -C "vilicus-vm-run" -f "$STATE_DIR/id_ed25519" <<<y >/dev/null
   render_seed
-  log "booting the VM (container $CONTAINER, SSH on 127.0.0.1:$VM_SSH_PORT)"
+  local images="$IMAGES_VOLUME"
+  if [ -n "${VM_IMAGES_DIR:-}" ]; then
+    mkdir -p "$VM_IMAGES_DIR"
+    images="$(host_path "$(cd "$VM_IMAGES_DIR" && pwd)")"
+  fi
+  log "booting the VM (container $CONTAINER, SSH on 127.0.0.1:$VM_SSH_PORT, base image in $images)"
+  # `--env NAME` without a value passes NAME only when it is set here; entrypoint.sh defaults it.
   docker run --detach --name "$CONTAINER" \
     --device /dev/kvm \
+    --env VM_CPUS --env VM_MEMORY_MIB --env VM_DISK_SIZE \
     --publish "127.0.0.1:$VM_SSH_PORT:2222" \
-    --volume "$IMAGES_VOLUME:/images" \
+    --volume "$images:/images" \
     --volume "$RUN_VOLUME:/vm-run" \
     --volume "$(host_path "$STATE_DIR"):/state:ro" \
     "$HOST_IMAGE" >/dev/null
 
   local waited=0 limit=1800
   log "waiting for SSH"
-  until vm_ssh true 2>/dev/null; do
+  # container_running first: vm_ssh exits the script when the container is gone, and with its
+  # stderr silenced here the reason in the container log would never be printed.
+  until container_running && vm_ssh true 2>/dev/null; do
     container_running || { docker logs --tail 40 "$CONTAINER" >&2; die "the VM container stopped"; }
     [ "$waited" -lt "$limit" ] || die "no SSH after ${limit}s; see 'docker logs $CONTAINER'"
     sleep 5
@@ -229,6 +243,11 @@ cmd_e2e() {
   return "$status"
 }
 
+cmd_console() {
+  docker inspect "$CONTAINER" >/dev/null 2>&1 || die "no VM container: run 'vm.sh up' first"
+  docker logs "$CONTAINER" 2>&1
+}
+
 cmd_down() {
   if docker inspect "$CONTAINER" >/dev/null 2>&1; then
     docker logs "$CONTAINER" >"$STATE_DIR/console.log" 2>&1 || true
@@ -250,6 +269,7 @@ case "$command" in
   sync) cmd_sync ;;
   e2e) cmd_e2e "$@" ;;
   info) cmd_info ;;
+  console) cmd_console ;;
   down) cmd_down ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;

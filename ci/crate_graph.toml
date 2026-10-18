@@ -1,0 +1,104 @@
+# The crate dependency graph of doc/architecture-spine.md AD-3, read by ci/check_workspace.py.
+#
+# AD-3 is the source. Node ids and edges are those of its Mermaid flowchart, and a test
+# (ci/test_check_workspace.py) fails when this file and the flowchart disagree, so a change to
+# the graph is made in the spine first, then here.
+#
+# A node matches workspace crates by exact name (`crates`), by manifest directory relative to
+# the repository root (`paths`) or by name pattern (`pattern`), tried in that order.
+# `depends_on` lists the node's edges. A crate may depend on any crate it reaches through
+# these edges, except that a `private` node accepts only its direct dependents (D140). A
+# `dev_only` node is reached from a node with an edge to it, or through a dev-dependency from a
+# node that already reaches everything the dev-only node depends on, and never sits in the
+# normal or build closure of a `shipped` node. A `required` node is a crate of Story 2.1 AC1:
+# the check fails when no workspace crate matches it.
+
+[node.types]
+required = true
+crates = ["vilicus-types"]
+
+[node.proto]
+required = true
+crates = ["vilicus-proto"]
+depends_on = ["types"]
+
+[node.modapi]
+required = true
+crates = ["vilicus-module-api"]
+depends_on = ["types"]
+
+[node.mods]
+pattern = "vilicus-mod-*"
+depends_on = ["modapi"]
+
+[node.crypto]
+required = true
+crates = ["vilicus-crypto"]
+depends_on = ["types"]
+private = true
+
+[node.storage]
+required = true
+crates = ["vilicus-storage"]
+depends_on = ["types"]
+private = true
+
+[node.core]
+required = true
+crates = ["vilicus-core"]
+depends_on = ["proto", "modapi", "crypto", "storage"]
+
+[node.gw]
+required = true
+crates = ["vilicus-gateway"]
+depends_on = ["proto"]
+
+[node.aud]
+required = true
+crates = ["vilicus-audit"]
+depends_on = ["proto"]
+
+[node.egr]
+required = true
+crates = ["vilicus-egress"]
+depends_on = ["proto"]
+
+[node.ai]
+required = true
+crates = ["vilicus-ai"]
+depends_on = ["proto"]
+
+[node.sdk]
+required = true
+crates = ["vilicus-plugin-sdk"]
+depends_on = ["proto"]
+
+[node.plugins]
+pattern = "vilicus-plugin-*"
+depends_on = ["sdk"]
+
+[node.bin]
+required = true
+crates = ["vilicus"]
+depends_on = ["core", "mods", "gw", "aud", "egr", "ai"]
+shipped = true
+
+[node.testing]
+crates = ["vilicus-mod-reference"]
+paths = ["testing"]
+depends_on = ["core"]
+dev_only = true
+
+[node.testbed]
+crates = ["vilicus-testbed"]
+depends_on = ["core", "testing"]
+
+# D140 and the spine's Consistency Conventions, Unsafe code. The crates in `allowed` are the
+# only ones where unsafe code may appear: each denies unsafe_code at crate level and denies
+# clippy's undocumented_unsafe_blocks, instead of inheriting [workspace.lints]. Every other
+# workspace crate inherits [workspace.lints], where unsafe_code is forbidden. Crates matching a
+# `forbid_attribute` pattern also carry #![forbid(unsafe_code)] in every crate root. Adding a
+# crate to `allowed` needs a decision record first (D140).
+[unsafe_code]
+allowed = ["vilicus-crypto", "vilicus-storage", "vilicus-core", "vilicus-gateway"]
+forbid_attribute = ["vilicus-mod-*", "vilicus-plugin-*"]

@@ -1,0 +1,15 @@
+[package]
+name = "vilicus-proto"
+description = "Vilicus wire and client API types, CBOR framing and canonical encoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vilicus-types.workspace = true

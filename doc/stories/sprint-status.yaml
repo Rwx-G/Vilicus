@@ -55,8 +55,8 @@ development_status:
   1-17-e1-and-e2-prf-half-early-run: in-progress
   epic-1-retrospective: optional
 
-  epic-2: backlog
-  2-1-cargo-workspace-and-crate-graph-check: ready-for-dev
+  epic-2: in-progress
+  2-1-cargo-workspace-and-crate-graph-check: review
   2-2-merge-gates-format-lint-and-supply-chain: ready-for-dev
   2-3-debian-13-vm-ci-harness: ready-for-dev
   2-4-shared-vocabulary-in-vilicus-types: ready-for-dev

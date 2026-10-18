@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# Each spike is a standalone package with its own lockfile and never joins the workspace.
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# Kept equal to the channel of rust-toolchain.toml; ci/check_workspace.py fails when they differ.
+rust-version = "1.99.0"
+license = "Apache-2.0"
+repository = "https://github.com/Rwx-G/Vilicus"
+publish = false
+
+# Every crate inherits these lints except the crates where D140 allows unsafe code, listed once
+# under [unsafe_code] in ci/crate_graph.toml; ci/check_workspace.py fails when any other crate
+# stops inheriting them.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+# Workspace crates depend on each other by path only; the allowed edges are in ci/crate_graph.toml.
+[workspace.dependencies]
+vilicus-types = { path = "crates/vilicus-types" }
+vilicus-proto = { path = "crates/vilicus-proto" }
+vilicus-crypto = { path = "crates/vilicus-crypto" }
+vilicus-storage = { path = "crates/vilicus-storage" }
+vilicus-module-api = { path = "crates/vilicus-module-api" }
+vilicus-core = { path = "crates/vilicus-core" }
+vilicus-gateway = { path = "crates/vilicus-gateway" }
+vilicus-audit = { path = "crates/vilicus-audit" }
+vilicus-egress = { path = "crates/vilicus-egress" }
+vilicus-ai = { path = "crates/vilicus-ai" }
+vilicus-plugin-sdk = { path = "crates/vilicus-plugin-sdk" }

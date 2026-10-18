@@ -1,0 +1,19 @@
+[package]
+name = "vilicus"
+description = "Vilicus executable: subcommand dispatch and the host CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vilicus-core.workspace = true
+vilicus-gateway.workspace = true
+vilicus-audit.workspace = true
+vilicus-egress.workspace = true
+vilicus-ai.workspace = true

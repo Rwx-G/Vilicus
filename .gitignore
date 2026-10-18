@@ -2,6 +2,9 @@
 /target/
 **/*.rs.bk
 
+# Python (CI tooling under ci/)
+__pycache__/
+
 # Frontend
 node_modules/
 

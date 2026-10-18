@@ -1,0 +1,12 @@
+[package]
+name = "vilicus-types"
+description = "Shared vocabulary of Vilicus: ids, taint, tier, principal and source"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

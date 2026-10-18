@@ -21,7 +21,7 @@ Status: Revision 2, design phase, no product code yet (the V0.1 spikes live in `
 | [`key-management.md`](key-management.md) | Keys, unlock, recovery, rotation | Revision 2 |
 | [`ai-safety.md`](ai-safety.md) | Principles P1 to P14, invariants I1 to I43 | Revision 2 |
 | [`capability-matrix.md`](capability-matrix.md) | Action by tier by confirmation | Revision 2 |
-| [`decisions.md`](decisions.md) | Decisions D1 to D139 | Revision 2 |
+| [`decisions.md`](decisions.md) | Decisions D1 to D140 | Revision 2 |
 | [`research-notes.md`](research-notes.md) | Claims and experiments E1 to E32 (E21 unused) | Revision 2 |
 | [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-81 | Final |
 | [`architecture-spine.md`](architecture-spine.md) | Architecture decisions AD-1 to AD-56 | Final |

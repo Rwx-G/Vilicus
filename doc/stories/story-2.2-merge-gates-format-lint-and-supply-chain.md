@@ -2,7 +2,7 @@
 title: 'Merge gates: format, lint and supply chain'
 epic: 2
 story: 2
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [AD-33, D28, D29, NFR-6, D61, D120]

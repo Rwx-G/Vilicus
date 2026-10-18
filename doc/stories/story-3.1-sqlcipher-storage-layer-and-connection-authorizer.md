@@ -53,7 +53,7 @@ So that no connection can attach another file, load an extension or run an unsaf
 **AC7 (D126, E11)**
 **Given** the workspace build
 **When** `libsqlite3-sys` compiles SQLCipher
-**Then** extension loading is compiled out where the toolchain allows, with `LIBSQLITE3_FLAGS="-USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION"` in the workspace `.cargo/config.toml` `[env]`, `SELECT load_extension('x')` failing with `no such function`, and `cargo tree -e features` never showing the `rusqlite` feature `load_extension` (procedure of Story 1.7, finding 1, not run there)
+**Then** extension loading is compiled out where the toolchain allows, with `LIBSQLITE3_FLAGS="-USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION"` in the `[env]` table of `ci/cargo-vendored.toml`, the Cargo configuration every CI build passes with `--config` (Story 2.2; its content check is extended to allow exactly that key, and no `.cargo/config.toml` may exist, Story 2.1), `SELECT load_extension('x')` failing with `no such function`, and `cargo tree -e features` never showing the `rusqlite` feature `load_extension` (procedure of Story 1.7, finding 1, not run there)
 **And** if the toolchain cannot compile it out, the runtime switch of AC6 stays the control and the reason is recorded.
 
 **AC8 (D126, I6)**

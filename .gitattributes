@@ -4,3 +4,8 @@
 *.sh text eol=lf
 Dockerfile* text eol=lf
 *.service text eol=lf
+
+# Vendored crates are checked against the checksums cargo vendor records: never convert them
+vendor/** -text
+# Spike vectors are compared byte for byte with recorded SHA-256 sums and shared across languages
+spikes/*/vectors/** -text

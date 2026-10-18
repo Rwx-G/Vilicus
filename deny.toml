@@ -1,0 +1,73 @@
+# cargo-deny policy (D28, D29). Run by the `deny` job of .github/workflows/ci.yml as
+# `cargo deny --locked check`; every check below fails the merge.
+
+[graph]
+# No `targets`: every platform is judged. A crate pulled in for another platform never ships on
+# Debian 13, but it is vendored, so its licence and advisories still matter. Every optional
+# dependency is judged too, so enabling a feature never brings an unchecked crate.
+all-features = true
+
+[advisories]
+# A vulnerability is always an error. Unmaintained and unsound crates are errors too, and a
+# yanked version is an error: an exception names its advisory and a reason here.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# D29: every dependency must be compatible with Apache-2.0. The list holds permissive licences
+# from the Apache Software Foundation's Category A (https://www.apache.org/legal/resolved.html,
+# read on 2026-10-18): their only conditions are notices and disclaimers, so they can be
+# combined into an Apache-2.0 work without adding terms to it. `Unicode-3.0` and
+# `Unicode-DFS-2016` are two versions of the Unicode, Inc. data files and software licence ASF
+# lists. `Apache-2.0 WITH LLVM-exception` only removes conditions from Apache-2.0. Weak
+# copyleft (MPL-2.0, Category B), copyleft and licences not listed (OpenSSL,
+# CDLA-Permissive-2.0) are refused until a dependency that needs one is approved together with
+# its addition here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# The list is a policy, not a record of what the tree uses today.
+unused-allowed-license = "allow"
+exceptions = []
+
+[licenses.private]
+# Workspace crates are checked too: they declare Apache-2.0 (D29).
+ignore = false
+
+[bans]
+# D28 and the spine's Consistency Conventions (Dependencies): no crate may appear in two
+# versions, cryptographic crates above all. Denying every duplicate avoids keeping a list of
+# which crates count as cryptographic. A duplicate that a dependency forces is listed under
+# `skip` as { crate = "<name>@<exact version>", reason = "forced by <name>@<version>: <why>" };
+# ci/check_supply_chain.py checks that the forcing package exists and depends on that version.
+# `skip-tree` is refused, because it would hide a whole subtree. Dev-dependencies count: a second
+# version of a crate that only tests pull in is still a crate to vet and vendor twice.
+multiple-versions = "deny"
+multiple-versions-include-dev = true
+wildcards = "deny"
+# Workspace crates depend on each other by path without a version; they are never published.
+allow-wildcard-paths = true
+skip = []
+skip-tree = []
+
+[sources]
+# crates.io only, read through vendor/ (ci/cargo-vendored.toml); no git source (D28).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

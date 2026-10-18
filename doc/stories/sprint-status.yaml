@@ -56,8 +56,8 @@ development_status:
   epic-1-retrospective: optional
 
   epic-2: in-progress
-  2-1-cargo-workspace-and-crate-graph-check: review
-  2-2-merge-gates-format-lint-and-supply-chain: ready-for-dev
+  2-1-cargo-workspace-and-crate-graph-check: done
+  2-2-merge-gates-format-lint-and-supply-chain: review
   2-3-debian-13-vm-ci-harness: ready-for-dev
   2-4-shared-vocabulary-in-vilicus-types: ready-for-dev
   2-5-wire-framing-and-canonical-encoding-in-vilicus-proto: ready-for-dev

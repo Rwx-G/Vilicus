@@ -1,0 +1,16 @@
+# Exceptions to the advisory gate on this spike's Cargo.lock (gate HPKE-3), read by
+# ci/check_audit_report.py from the `hpke-review` job: every vulnerability fails, and every
+# cargo-audit warning (unmaintained, unsound, yanked, notice) fails unless it is listed here.
+# cargo-audit itself can only ignore an advisory id, and cannot except one yanked crate without
+# turning the yanked check off, hence this file. An entry that matches nothing fails too.
+#
+# Cargo.lock is the reviewed tree of D120: an exception is removed by updating the lockfile,
+# which reopens the review, never by editing this file alone.
+
+# Advisory id = reason.
+[advisories]
+RUSTSEC-2026-0173 = "proc-macro-error2 2.0.1 is unmaintained. It runs at build time only, as a dependency of the hax-lib-macros procedural macro under libcrux-intrinsics, in the hpke-rs 0.8.0 chain that is a dev-dependency of the cross-test; nothing of it is linked into hpke or the Core (Story 1.2, Result)."
+
+# "<crate>@<version>" = reason.
+[yanked]
+"inout@0.2.3" = "Yanked after Story 1.2 pinned the tree. It is reached only through aead 0.6.1 and aes-gcm 0.11.1 of hpke-rs-rust-crypto 0.8.0, the RustCrypto provider of the dev-only cross-test oracle; hpke 0.13.0 uses aes-gcm 0.10.3 and inout 0.1.4."

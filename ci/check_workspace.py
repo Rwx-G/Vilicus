@@ -5,15 +5,21 @@
   allowed by ci/crate_graph.toml, every required node has a crate, and no dev-only crate may sit
   in the normal or build closure of a shipped crate.
 - Dependency sources: a workspace crate takes no path dependency outside the workspace members,
-  no git dependency, and no Vilicus-named package other than the workspace member of that name.
+  no git dependency, and no Vilicus-named package other than the workspace member of that name;
+  the tree holds no path package other than the members, and the root manifest has no `[patch]`
+  or `[replace]` table, either of which would swap a registry crate for local code that
+  cargo-deny reports as `sources ok` and cargo-vet as first-party.
 - Manifests (D29, D1): every workspace crate declares the Apache-2.0 licence, edition 2024 and
-  the rust-version of rust-toolchain.toml, every manifest under the crate directories is a
+  the rust-version of rust-toolchain.toml and is never published (cargo-vet treats unpublished
+  crates as first-party, D28), every manifest under the crate directories is a
   member, and no source or configuration file carries an SPDX header.
 - Unsafe code (D140, Consistency Conventions): the workspace forbids unsafe code and every crate
   inherits its lints, except the crates ci/crate_graph.toml allows, which repeat those lints with
   unsafe code denied and undocumented unsafe blocks denied, and never allow unsafe code for a
   whole module; module and plugin crates also carry the forbid attribute in each crate root; no
   Cargo configuration file can change lint levels for the workspace.
+- Vendored sources (D28): ci/cargo-vendored.toml, the configuration CI passes to every workspace
+  build with `--config`, exists and holds nothing but the replacement of crates.io by vendor/.
 
 Standard library only, Python 3.11 or later. Exits 1 and prints every violation when a check fails.
 """
@@ -54,6 +60,17 @@ VILICUS_NAMES = ("vilicus", "vilicus-*")
 # file may sit (with the repository root). Spikes keep their own configuration.
 CRATE_DIRECTORIES = ("crates", "testing")
 CARGO_CONFIG_NAMES = ("config", "config.toml")
+# Third-party sources as `cargo vendor` writes them (D28); they keep their own headers.
+VENDOR_DIRECTORY = "vendor"
+# Passed with `--config`, not kept in a root .cargo/config.toml, which cargo would also apply
+# inside spikes/. Cargo resolves its `directory` against the parent of ci/, the repository root.
+VENDORED_CONFIG_FILE = PurePosixPath("ci/cargo-vendored.toml")
+VENDORED_SOURCE_CONFIG = {
+    "source": {
+        "crates-io": {"replace-with": "vendored-sources"},
+        "vendored-sources": {"directory": VENDOR_DIRECTORY},
+    }
+}
 WALK_SKIPPED_DIRECTORIES = frozenset({".git", "target"})
 ROOT_TARGET_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin"})
 LINKED_KINDS = frozenset({"normal", "build"})
@@ -157,6 +174,7 @@ class Crate:
     license: str | None
     edition: str | None
     rust_version: str | None
+    publish: list[str] | None
     roots: tuple[Path, ...]
     dependencies: tuple[Dependency, ...]
 
@@ -186,6 +204,7 @@ def load_workspace(metadata: dict) -> list[Crate]:
                 license=package.get("license"),
                 edition=package.get("edition"),
                 rust_version=package.get("rust_version"),
+                publish=package.get("publish"),
                 roots=tuple(
                     Path(target["src_path"])
                     for target in package["targets"]
@@ -226,6 +245,13 @@ def check_sources(metadata: dict) -> list[str]:
             ):
                 violations.append(f"source: {edge} names a Vilicus crate that is not the workspace member of that name")
 
+    for package in metadata["packages"]:
+        if package["id"] not in member_ids and package.get("source") is None:
+            violations.append(
+                f"source: {package['name']} {package['version']} ({package['manifest_path']}) is a path "
+                "package that is not a workspace member; no supply-chain gate reviews it"
+            )
+
     packages = {package["id"]: package for package in metadata["packages"]}
     for node in (metadata.get("resolve") or {}).get("nodes", []):
         if node["id"] not in member_ids:
@@ -237,6 +263,15 @@ def check_sources(metadata: dict) -> list[str]:
                     f"source: {packages[node['id']]['name']} resolves {name} to {dep['pkg']}, not a workspace member"
                 )
     return violations
+
+
+def check_root_manifest(root_manifest: dict) -> list[str]:
+    return [
+        f"source: the root Cargo.toml has a [{table}] table, which substitutes a dependency's source; "
+        "add the crate as a dependency instead"
+        for table in ("patch", "replace")
+        if table in root_manifest
+    ]
 
 
 def check_graph(graph: Graph, crates: list[Crate]) -> list[str]:
@@ -325,14 +360,18 @@ def check_manifests(
                 f"manifest: {crate.name} declares rust-version {crate.rust_version!r}, "
                 f"expected {toolchain_channel!r} from rust-toolchain.toml"
             )
+        # cargo metadata reports `publish = false` as an empty registry list, and its absence as null.
+        if crate.publish != []:
+            violations.append(f"manifest: {crate.name} may be published ({crate.publish!r}); expected publish = false")
     member_manifests = {crate.manifest_path for crate in crates}
     for directory in CRATE_DIRECTORIES:
         for manifest in sorted((workspace_root / directory).rglob("Cargo.toml")):
             if manifest not in member_manifests and not WALK_SKIPPED_DIRECTORIES.intersection(manifest.parts):
                 violations.append(f"manifest: {manifest} is not a workspace member, so no check covers it")
     marker = re.compile(re.escape(SPDX_MARKER), re.IGNORECASE)
+    vendor = workspace_root / VENDOR_DIRECTORY
     for path in files:
-        if path.suffix not in SPDX_SCANNED_SUFFIXES:
+        if path.suffix not in SPDX_SCANNED_SUFFIXES or path.is_relative_to(vendor):
             continue
         header = path.read_text(encoding="utf-8", errors="replace").splitlines()[:SPDX_HEADER_LINES]
         if any(marker.search(line) for line in header):
@@ -425,6 +464,25 @@ def check_cargo_config(workspace_root: Path) -> list[str]:
     ]
 
 
+def check_vendored_config(workspace_root: Path) -> list[str]:
+    """The `--config` file of the vendored build holds only the source replacement: any other key,
+    rustflags above all, would reach every build that reads it."""
+    path = workspace_root / VENDORED_CONFIG_FILE
+    if not path.is_file():
+        return [f"vendor: {path} is missing; builds must read the vendored sources (D28)"]
+    try:
+        content = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as error:
+        return [f"vendor: {path} is not valid TOML ({error})"]
+    if content != VENDORED_SOURCE_CONFIG:
+        return [
+            f"vendor: {path} must hold only the replacement of crates.io by `{VENDOR_DIRECTORY}/` "
+            f"({json.dumps(VENDORED_SOURCE_CONFIG)}), found {json.dumps(content)}; "
+            "any other key could override the workspace lint levels"
+        ]
+    return []
+
+
 def run_checks(
     metadata: dict, config: dict, root_manifest: dict, toolchain_channel: str, files: Iterable[Path]
 ) -> list[str]:
@@ -432,10 +490,12 @@ def run_checks(
     workspace_root = Path(metadata["workspace_root"])
     return [
         *check_sources(metadata),
+        *check_root_manifest(root_manifest),
         *check_graph(Graph.from_config(config), crates),
         *check_manifests(crates, workspace_root, toolchain_channel, files),
         *check_unsafe(config, root_manifest, crates),
         *check_cargo_config(workspace_root),
+        *check_vendored_config(workspace_root),
     ]
 
 
@@ -460,7 +520,7 @@ def repository_files(root: Path) -> list[Path]:
 
 def cargo_metadata(root: Path) -> dict:
     output = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked"],
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--config", str(VENDORED_CONFIG_FILE)],
         cwd=root,
         check=True,
         capture_output=True,

@@ -35,6 +35,8 @@ WORKSPACE_LINTS = tomllib.loads((cw.REPO_ROOT / "Cargo.toml").read_text(encoding
 ROOT_MANIFEST = {"workspace": {"lints": WORKSPACE_LINTS}}
 UNSAFE_ALLOWED = CONFIG["unsafe_code"]["allowed"]
 INHERITED_LINTS = "[lints]\nworkspace = true\n"
+# The repository's vendored-build configuration, which every synthetic workspace carries.
+VENDORED_CONFIG_TEXT = (cw.REPO_ROOT / cw.VENDORED_CONFIG_FILE).read_text(encoding="utf-8")
 
 
 def lints_toml(levels: dict[tuple[str, str], str | None], as_tables: bool = False) -> str:
@@ -73,6 +75,9 @@ class Workspace:
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        self.vendored_config = root / cw.VENDORED_CONFIG_FILE
+        self.vendored_config.parent.mkdir(parents=True, exist_ok=True)
+        self.vendored_config.write_text(VENDORED_CONFIG_TEXT, encoding="utf-8")
         self.packages: dict[str, dict] = {}
         self.outside: list[dict] = []
         self.extra_resolved: dict[str, list[str]] = {}
@@ -86,6 +91,7 @@ class Workspace:
         license: str | None = cw.LICENSE,
         edition: str = cw.EDITION,
         rust_version: str = CHANNEL,
+        publish: tuple[str, ...] | None = (),
         lints: str | None = None,
         forbid_attribute: bool | None = None,
         root_source: str | None = None,
@@ -110,6 +116,7 @@ class Workspace:
             "license": license,
             "edition": edition,
             "rust_version": rust_version,
+            "publish": None if publish is None else list(publish),
             "targets": [{"kind": [target_kind], "src_path": str(root_file)}],
             "dependencies": [],
         }
@@ -123,8 +130,19 @@ class Workspace:
         self.packages[source]["dependencies"].append({"source": None, **dependency})
 
     def resolve_outside(self, source: str, name: str, package_id: str) -> None:
-        """`source` resolves a dependency to a package that is not a workspace member."""
-        self.outside.append({"id": package_id, "name": name, "dependencies": []})
+        """`source` resolves a dependency to a package that is not a workspace member; its source
+        and version are read from the package id, and a `path+` id has no source, as in cargo."""
+        location, version = package_id.split("#", 1)[0], package_id.rsplit("@", 1)[1]
+        self.outside.append(
+            {
+                "id": package_id,
+                "name": name,
+                "version": version,
+                "source": None if location.startswith("path+") else location,
+                "manifest_path": f"{location}/Cargo.toml",
+                "dependencies": [],
+            }
+        )
         self.extra_resolved.setdefault(source, []).append(package_id)
 
     def metadata(self) -> dict:
@@ -420,6 +438,24 @@ class SourceTest(WorkspaceTestCase):
         self.workspace.resolve_outside("vilicus-gateway", "vilicus-crypto", "git+file:///tmp/repo#vilicus-crypto@0.0.0")
         self.assert_single(self.workspace.check(), "vilicus-gateway resolves vilicus-crypto to git+file:///tmp/repo")
 
+    def test_path_package_outside_the_members_fails(self) -> None:
+        self.full_graph()
+        location = (self.workspace.root / "third_party" / "itoa").as_uri()
+        self.workspace.resolve_outside("vilicus-gateway", "itoa", f"path+{location}#itoa@1.0.99")
+        self.assert_single(self.workspace.check(), "source: itoa 1.0.99", "is a path package that is not a workspace member")
+
+    def test_patch_or_replace_table_in_the_root_manifest_fails(self) -> None:
+        tables = {
+            "patch": {"crates-io": {"itoa": {"path": "third_party/itoa"}}},
+            "replace": {"itoa:1.0.15": {"path": "third_party/itoa"}},
+        }
+        for table, content in tables.items():
+            with self.subTest(table=table):
+                self.setUp()
+                self.full_graph()
+                violations = self.workspace.check(root_manifest={**ROOT_MANIFEST, table: content})
+                self.assert_single(violations, f"the root Cargo.toml has a [{table}] table")
+
     def test_registry_dependency_with_another_name_passes(self) -> None:
         self.full_graph()
         source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -435,6 +471,8 @@ class ManifestTest(WorkspaceTestCase):
             "missing license": {"license": None},
             "edition": {"edition": "2021"},
             "rust-version": {"rust_version": "0.9.0"},
+            "publishable": {"publish": None},
+            "publishable to a registry": {"publish": ("crates-io",)},
         }
         for label, override in cases.items():
             with self.subTest(case=label):
@@ -473,13 +511,20 @@ class ManifestTest(WorkspaceTestCase):
         prose.write_text(f"Files carry no {cw.SPDX_MARKER} header.\n", encoding="utf-8")
         self.assertEqual(self.workspace.check(files=[deep, prose]), [])
 
+    def test_spdx_header_in_vendored_sources_passes(self) -> None:
+        self.full_graph()
+        vendored = self.workspace.root / cw.VENDOR_DIRECTORY / "some-crate-1.0.0" / "src" / "lib.rs"
+        vendored.parent.mkdir(parents=True)
+        vendored.write_text(f"// {cw.SPDX_MARKER}: MIT\n", encoding="utf-8")
+        self.assertEqual(self.workspace.check(files=[vendored]), [])
+
     def test_file_listing_without_git_walks_the_tree(self) -> None:
         root = self.workspace.root
         for relative in ("kept.rs", "sub/kept.toml", "target/skipped.rs", ".git/skipped", "sub/target/skipped.rs"):
             (root / relative).parent.mkdir(parents=True, exist_ok=True)
             (root / relative).write_text("x\n", encoding="utf-8")
         listed = {path.relative_to(root).as_posix() for path in cw.repository_files(root)}
-        self.assertEqual(listed, {"kept.rs", "sub/kept.toml"})
+        self.assertEqual(listed, {"kept.rs", "sub/kept.toml", cw.VENDORED_CONFIG_FILE.as_posix()})
 
 
 class UnsafeTest(WorkspaceTestCase):
@@ -633,9 +678,52 @@ class UnsafeTest(WorkspaceTestCase):
                     self.setUp()
                     self.full_graph()
                     config = self.workspace.root / directory / ".cargo" / name
-                    config.parent.mkdir(parents=True)
+                    config.parent.mkdir(parents=True, exist_ok=True)
                     config.write_text('[build]\nrustflags = ["--cap-lints", "allow"]\n', encoding="utf-8")
                     self.assert_single(self.workspace.check(), str(config), "could override the workspace lint levels")
+
+    def test_cargo_configuration_in_the_workspace_fails_whatever_it_holds(self) -> None:
+        for directory in (".", *(f"{parent}/some-crate" for parent in cw.CRATE_DIRECTORIES)):
+            for name in cw.CARGO_CONFIG_NAMES:
+                with self.subTest(directory=directory, name=name):
+                    self.setUp()
+                    self.full_graph()
+                    config = self.workspace.root / directory / ".cargo" / name
+                    config.parent.mkdir(parents=True, exist_ok=True)
+                    config.write_text(VENDORED_CONFIG_TEXT, encoding="utf-8")
+                    self.assert_single(self.workspace.check(), str(config), "could override the workspace lint levels")
+
+    def test_vendored_configuration_of_the_repository_holds_only_the_source_replacement(self) -> None:
+        self.assertEqual(tomllib.loads(VENDORED_CONFIG_TEXT), cw.VENDORED_SOURCE_CONFIG)
+
+    def test_vendored_configuration_missing_fails(self) -> None:
+        self.full_graph()
+        self.workspace.vendored_config.unlink()
+        self.assert_single(self.workspace.check(), "vendor:", "is missing")
+
+    def test_vendored_configuration_with_anything_but_the_source_replacement_fails(self) -> None:
+        cases = {
+            "rustflags added": VENDORED_CONFIG_TEXT + '\n[build]\nrustflags = ["--cap-lints", "allow"]\n',
+            "environment added": VENDORED_CONFIG_TEXT + '\n[env]\nRUSTFLAGS = "--cap-lints allow"\n',
+            "other directory": VENDORED_CONFIG_TEXT.replace(f'"{cw.VENDOR_DIRECTORY}"', '"elsewhere"'),
+            "other replacement": VENDORED_CONFIG_TEXT.replace('replace-with = "vendored-sources"', 'replace-with = "mirror"'),
+            "extra source": VENDORED_CONFIG_TEXT + '\n[source.mirror]\nregistry = "https://example.com/index"\n',
+            "replacement only": '[source.crates-io]\nreplace-with = "vendored-sources"\n',
+        }
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                self.setUp()
+                self.full_graph()
+                self.assertNotEqual(tomllib.loads(text), cw.VENDORED_SOURCE_CONFIG)
+                self.workspace.vendored_config.write_text(text, encoding="utf-8")
+                self.assert_single(
+                    self.workspace.check(), str(self.workspace.vendored_config), "must hold only the replacement"
+                )
+
+    def test_vendored_configuration_that_is_not_toml_fails(self) -> None:
+        self.full_graph()
+        self.workspace.vendored_config.write_text("[source\n", encoding="utf-8")
+        self.assert_single(self.workspace.check(), "is not valid TOML")
 
     def test_cargo_configuration_of_a_spike_passes(self) -> None:
         self.full_graph()
@@ -690,6 +778,29 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("source: vilicus-gateway -> shim (normal dependency) is a path dependency on", violations)
         self.assertIn("source: vilicus-gateway -> vilicus-crypto (normal dependency) is a git dependency", violations)
         self.assertIn("source: vilicus-gateway resolves vilicus-crypto to git+", violations)
+
+    def test_crates_io_patch_to_a_path_package_is_caught_on_real_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            manifest = (
+                '[workspace]\nresolver = "3"\nmembers = ["crates/*"]\n\n'
+                '[patch.crates-io]\nitoa = { path = "third_party/itoa" }\n'
+            )
+            (workspace / "Cargo.toml").write_text(manifest, encoding="utf-8")
+            self.write_crate(workspace / "crates" / "vilicus-types", "vilicus-types", 'itoa = "1"\n')
+            self.write_crate(workspace / "third_party" / "itoa", "itoa")
+            patched = workspace / "third_party" / "itoa" / "Cargo.toml"
+            patched.write_text(patched.read_text(encoding="utf-8").replace('"0.0.0"', '"1.0.99"'), encoding="utf-8")
+            output = subprocess.run(
+                ["cargo", "metadata", "--format-version", "1", "--offline"], cwd=workspace, check=True, capture_output=True
+            ).stdout
+            metadata = json.loads(output)
+            violations = cw.check_sources(metadata) + cw.check_root_manifest(tomllib.loads(manifest))
+
+        self.assertEqual(len(violations), 2, violations)
+        self.assertIn("source: itoa 1.0.99", violations[0])
+        self.assertIn("is a path package that is not a workspace member", violations[0])
+        self.assertIn("the root Cargo.toml has a [patch] table", violations[1])
 
 
 def spine_flowchart() -> tuple[dict[str, str], set[tuple[str, str, bool]]]:

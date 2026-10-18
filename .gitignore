@@ -28,3 +28,6 @@ Desktop.ini
 *.db
 *.db-wal
 *.db-shm
+
+# Vendored crates are written by cargo vendor and committed whole; no pattern above may drop one
+!/vendor/**

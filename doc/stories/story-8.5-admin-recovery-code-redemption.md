@@ -5,7 +5,7 @@ story: 5
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-5, D101, AD-52, D5]
+implements: [FR-5, D101, AD-52, D5, D128]
 ---
 
 # Story 8.5: Admin recovery code redemption
@@ -20,6 +20,7 @@ So that a lost admin passkey or a rename never locks the instance, without the c
 **Given** an existing instance
 **When** root runs `vilicus admin recover` and types the code at the prompt
 **Then** the Core checks it against the stored Argon2id hash and prints a one-time admin enrollment token of 128 random bits, single use, valid 15 minutes
+**And** the Argon2id check runs through the one limiter of Story 4.4 AC6, which D128 names the admin recovery code in, so a burst of redemption attempts waits or is refused as retryable after 4 seconds instead of starting more derivations
 
 **AC2 (FR-5)**
 **Given** a valid admin enrollment token
@@ -48,4 +49,4 @@ So that a lost admin passkey or a rename never locks the instance, without the c
 - `doc/prd.md` FR-5
 - `doc/architecture-spine.md` AD-52
 - `doc/capability-matrix.md` section 1
-- `doc/decisions.md` D5, D101
+- `doc/decisions.md` D5, D101, D128

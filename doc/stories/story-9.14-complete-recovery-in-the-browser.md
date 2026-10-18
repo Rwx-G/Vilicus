@@ -5,7 +5,7 @@ story: 14
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-14, D106, D39, FR-56, FR-110]
+implements: [FR-14, D106, D39, FR-56, FR-110, D121, D135]
 ---
 
 # Story 9.14: Complete recovery in the browser
@@ -24,13 +24,14 @@ So that I get a new passphrase, passkey and recovery secret, and older wrappers 
 **AC2 (FR-14, FR-110)**
 **Given** the token and the recovery secret in the browser
 **When** the member completes the flow
-**Then** the member sets a new strength-checked passphrase, enrolls a passkey, redeems a test notification, and receives a new recovery secret shown once and partially re-typed
+**Then** the member sets a new strength-checked passphrase, enrolls a passkey, confirms a test notification by the receipt check of Story 8.1 AC4 (D135), and receives a new recovery secret shown once and partially re-typed
 **And** the old recovery secret no longer works
 
-**AC3 (FR-14, D106)**
+**AC3 (FR-14, D106, D121)**
 **Given** a completed recovery
 **When** the Core finalizes it
 **Then** the member DEK is rotated, so a wrapper of the old DEK left in an older backup opens no data written after the recovery
+**And** the commitment to the household key and its version is rewritten under a key derived from the new DEK, so the member's next unlock still confirms the household key it opens (D121, Story 4.7 AC7)
 
 **AC4 (FR-14)**
 **Given** the completion screen
@@ -48,4 +49,4 @@ So that I get a new passphrase, passkey and recovery secret, and older wrappers 
 **References:**
 - `doc/prd.md` FR-14, FR-56, FR-110
 - `doc/key-management.md` sections 6 and 8
-- `doc/decisions.md` D39, D106
+- `doc/decisions.md` D39, D106, D121, D135

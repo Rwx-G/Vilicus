@@ -5,7 +5,7 @@ story: 2
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-27, AD-11, D113, I5, I18, FR-107, FR-108, FR-14]
+implements: [FR-27, AD-11, D113, I5, I18, FR-107, FR-108, FR-14, D125]
 ---
 
 # Story 10.2: Capability tokens
@@ -49,16 +49,22 @@ So that a component can never exceed the task, partitions and actions it was giv
 **When** the member is suspended, completes a re-enrollment or completes a recovery
 **Then** every outstanding token acting for that member is revoked at once, and a new token for a suspended member is refused
 
+**AC7 (D125, AD-24)**
+**Given** a token issued to a peer over a verified connection
+**When** the process the Core verified for that connection exits, even while another process still holds the socket (Story 5.3 AC6)
+**Then** the Core closes the connection and revokes every token bound to it at once, and a later call with such a token is refused and audited
+
 **Dependencies:**
 - Story 10.1 (peer handshake and doubles)
 - Story 9.1 (a member to act for)
 - Story 9.10 (suspension)
 - Story 9.12 (re-enrollment)
 - Story 9.14 (recovery completion)
+- Story 5.3 (peer connection watch)
 
 **References:**
 - `doc/prd.md` FR-27
 - `doc/architecture-spine.md` AD-11
-- `doc/decisions.md` D113
+- `doc/decisions.md` D113, D125
 - `doc/ai-safety.md` P3, I5, I18
 - `doc/capability-matrix.md` section 1 (create or revoke a capability token), section 11

@@ -5,7 +5,7 @@ story: 13
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-14, D39, D75, AD-30, FR-56]
+implements: [FR-14, D39, D75, AD-30, FR-56, D135]
 ---
 
 # Story 9.13: Start recovery from the host with a waiting period
@@ -27,11 +27,11 @@ So that I get my partition back while a thief of my secret is slowed down and se
 **When** the waiting period begins
 **Then** it is a durable deadline of 48 hours (PRD assumption) that runs on to a cap of 7 days (PRD assumption) until the member redeems an acknowledgement token, and runs to its cap while an adult has had no working destination for 24 hours
 
-**AC3 (FR-14, FR-56, D75)**
+**AC3 (FR-14, FR-56, D75, D135)**
 **Given** a started recovery
 **When** the alerts are sent
 **Then** the member and every other adult receive a content-free alert on the out-of-browser notification channel and in the primary channel, and the host journal records it
-**And** each alert carries a one-time acknowledgement token of 128 random bits, single use, redeemed at the Core with rate limiting
+**And** each alert has a one-time acknowledgement token of 128 random bits, single use, redeemed at the Core with rate limiting; the token is shown and redeemed only when the member opens the alert in a signed-in Vilicus client on a device they control, never carried in the push payload (D135, Story 8.1 AC3), so a member with no signed-in client cannot redeem it and the wait runs on toward its cap (AC2)
 
 **AC4 (FR-14, D75)**
 **Given** a pending recovery without a redeemed token
@@ -55,4 +55,4 @@ So that I get my partition back while a thief of my secret is slowed down and se
 - `doc/prd.md` FR-14, FR-50, FR-56
 - `doc/key-management.md` section 6
 - `doc/architecture-spine.md` AD-30, AD-32
-- `doc/decisions.md` D39, D75, D105
+- `doc/decisions.md` D39, D75, D105, D135

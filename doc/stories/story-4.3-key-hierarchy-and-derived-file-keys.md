@@ -45,6 +45,9 @@ So that one file key reveals no other file and partition isolation rests on keys
 **When** the Core hands it access
 **Then** it receives an opened, partition-scoped handle, never a key or a path to a key
 
+**Decision tasks:**
+- [ ] Decide how `wrappers.db` is authenticated as a whole (`doc/stories/deferred-work.md`, gate AD36-1): the AD-36 construction authenticates each record, not the set, so deleting a record raises no alert and restoring an older file can bring back a vetoed or suspended member's valid record (D119). Recommended (gate AD36-1, which assigns the design to the keys and storage epics): the candidate recorded with the deferred item, a monotonic counter and a MAC over the record set under an HK-derived key, cross-checked with `core.db`, decided here because this story creates the `wrappers.db` schema. Gives up: every wrapper write also rewrites the set MAC and the counter; deferring again keeps the limit of D119 stated instead.
+
 **Dependencies:**
 - Story 4.1 (crypto suite)
 - Story 3.1 (storage layer and epoch sidecar)
@@ -52,5 +55,6 @@ So that one file key reveals no other file and partition isolation rests on keys
 **References:**
 - `doc/key-management.md` sections 2 and 9
 - `doc/architecture-spine.md` AD-4, AD-5
-- `doc/decisions.md` D3, D4, D9
+- `doc/decisions.md` D3, D4, D9, D119
 - `doc/architecture.md` section 5.2
+- `doc/stories/deferred-work.md`; `doc/qa/gates/1.1-key-prototype-ad36-public-key-authentication.yml` (AD36-1)

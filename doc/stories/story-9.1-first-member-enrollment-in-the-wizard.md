@@ -5,7 +5,7 @@ story: 1
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-7, FR-15, FR-110, FR-56, D105, AD-36, UJ-1]
+implements: [FR-7, FR-15, FR-110, FR-56, D105, AD-36, UJ-1, D121, D135]
 ---
 
 # Story 9.1: First member enrollment in the wizard
@@ -28,16 +28,17 @@ So that my personal partition and the household partition exist from day one and
 **Then** it is shown once as grouped characters with a checksum, and the member must re-type the groups the Core asks for before the enrollment can continue
 **And** a wrong re-typed group blocks completion without revealing the secret again in a log or an API response
 
-**AC3 (FR-7, FR-56, D105)**
+**AC3 (FR-7, FR-56, D105, D135)**
 **Given** the member configures an out-of-browser destination
-**When** the Core sends a test notification carrying a one-time token
-**Then** the enrollment completes only after that token is redeemed at the Core
+**When** the Core sends a test notification, whose push payload carries no token (D135)
+**Then** the enrollment completes only after its receipt is confirmed by the check of Story 8.1 AC4 (open until settled there)
 **And** an enrollment abandoned before redemption leaves no member account, no partition and no wrapper behind
 
 **AC4 (FR-7, AD-36)**
-**Given** the passkey, the confirmed recovery secret and a redeemed test notification
+**Given** the passkey, the confirmed recovery secret and a confirmed test notification
 **When** the enrollment completes
 **Then** the Core has generated the member DEK and key pair (no browser or Gateway supplies them), wrapped the DEK under the passphrase KEK and the recovery KEK, created the household key, wrapped it for this member, and authenticated the member public key by the first-member case of Story 4.7
+**And** the Core has written at once the commitment to the household key and its version under a key derived from the member's DEK, which every later unlock checks (D121, Story 4.7 AC7)
 **And** the member personal partition and the household partition are usable at once
 
 **AC5 (FR-15, UJ-1)**
@@ -56,4 +57,4 @@ So that my personal partition and the household partition exist from day one and
 - `doc/prd.md` FR-7, FR-15, FR-56, FR-110, UJ-1
 - `doc/key-management.md` section 3
 - `doc/architecture-spine.md` AD-36, AD-52
-- `doc/decisions.md` D74, D105
+- `doc/decisions.md` D74, D105, D121, D135

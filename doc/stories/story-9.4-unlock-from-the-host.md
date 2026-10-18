@@ -5,7 +5,7 @@ story: 4
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-57, FR-3, D77]
+implements: [FR-57, FR-3, D77, D121, D128]
 ---
 
 # Story 9.4: Unlock from the host
@@ -32,10 +32,15 @@ So that my passphrase never transits through the Gateway.
 **Then** an audit entry is written, without the passphrase or any key material
 **And** the member sees the window in the member web with its remaining time
 
+**AC4 (D128, D121)**
+**Given** a host unlock
+**When** the Core derives the passphrase KEK
+**Then** the derivation goes through the same Argon2id limiter as a web unlock (Story 4.4 AC6: two at once, arrival order, refused as retryable after 4 seconds, one request per member, backoff after a failed passphrase), and the opened household key is confirmed before use as in Story 9.3 AC9 (D121)
+
 **Dependencies:**
 - Story 9.3 (unlock window)
 
 **References:**
 - `doc/prd.md` FR-3, FR-57
 - `doc/key-management.md` section 4
-- `doc/decisions.md` D77
+- `doc/decisions.md` D77, D121, D128

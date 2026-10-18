@@ -25,7 +25,7 @@ So that an interrupted wizard never leaves the instance without a way to enroll 
 **AC2 (FR-7, UJ-1)**
 **Given** a token printed by `vilicus member enroll-first`
 **When** the person opens the member enrollment page on the instance name with it
-**Then** the enrollment follows Story 9.1 in full (one passkey, strength-checked passphrase, recovery secret re-typed, redeemed test notification, Core-generated keys, household key created)
+**Then** the enrollment follows Story 9.1 in full (one passkey, strength-checked passphrase, recovery secret re-typed, test notification confirmed by the check of Story 8.1 AC4 (D135), Core-generated keys, household key created)
 **And** the token cannot be redeemed a second time or after 15 minutes
 
 **AC3 (FR-7, D101)**
@@ -45,5 +45,5 @@ So that an interrupted wizard never leaves the instance without a way to enroll 
 **References:**
 - `doc/prd.md` FR-3, FR-7, FR-50, UJ-1 edge case
 - `doc/key-management.md` section 3
-- `doc/decisions.md` D101
+- `doc/decisions.md` D101, D135
 - `doc/capability-matrix.md` section 1

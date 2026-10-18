@@ -5,7 +5,7 @@ story: 8
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-53, AD-31, D85, D106]
+implements: [FR-53, AD-31, D85, D106, D120, D128]
 ---
 
 # Story 4.8: Backup key pair from the backup secret
@@ -38,6 +38,12 @@ So that backups run unattended to a public key while only the holder of the secr
 **When** the Core seals it to the backup public key
 **Then** it uses an HPKE public-key wrapper of `doc/key-management.md` section 9, and only the private key re-derived from the backup secret opens it (test with a wrong secret)
 
+**AC5 (D128, D120)**
+**Given** the backup secret
+**When** it is stretched and the key pair derived
+**Then** the Argon2id stretch goes through the one limiter of Story 4.4 AC6, which D128 names the backup secret in, on Core-owned wiped memory
+**And** `DeriveKeyPair` receives at least 32 bytes of input keying material (REVIEW.md U4), and the `info` of every seal to the backup public key binds a value unique to that seal, such as the backup sequence number, so that a repeated ephemeral seed after a restored snapshot cannot repeat an AEAD key and nonce (U3b)
+
 **Dependencies:**
 - Story 4.6 (HPKE suite)
 - Story 4.4 (Argon2id derivation on the blocking pool)
@@ -46,4 +52,5 @@ So that backups run unattended to a public key while only the holder of the secr
 - `doc/prd.md` FR-53
 - `doc/architecture-spine.md` AD-31
 - `doc/key-management.md` section 2 (backup secret, backup key pair) and Backups
-- `doc/decisions.md` D85, D106
+- `doc/decisions.md` D85, D106, D120, D128
+- `spikes/hpke-review/REVIEW.md` section 7 (U3b, U4); `spikes/hpke-review/src/lib.rs` (`derive_backup_keypair`)

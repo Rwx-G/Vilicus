@@ -2,9 +2,9 @@ schema: 1
 story: '1.12'
 story_title: 'E14: egress proxy domain filtering'
 gate: FAIL
-status_reason: 'Every AC check passes, but the spike pass criterion "no bypass of the allowlist" is not met: domain fronting on a shared front end reaches a service off the allowlist, the documented fallback (per-plugin IP ranges) does not close it, and the mitigation (D134) awaits the owner.'
+status_reason: 'Every AC check passes, but the spike pass criterion "no bypass of the allowlist" is not met: domain fronting on a shared front end reaches a service off the allowlist, the documented fallback (per-plugin IP ranges) does not close it, and the mitigation of D134, accepted on 2026-10-18, accepts Host-header fronting as a named residual risk (R54, T67) rather than closing it.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
   command: 'bash e2e/run.sh --keep-going'
@@ -21,7 +21,7 @@ top_issues:
   - id: 'E14-1'
     severity: high
     finding: 'Domain fronting by SNI or Host header carries requests to another tenant of a shared front end; the per-caller SNI check closes the SNI half, Host-header fronting stays open (R54, T67).'
-    suggested_action: 'Owner decides D134 (SNI check, fallback not adopted, Host-header fronting a named risk) and how allowlists prefer dedicated infrastructure; the gate moves to CONCERNS once accepted.'
+    suggested_action: 'D134 Accepted (2026-10-18): Story 5.5 builds the SNI and ECH check, and the allowlist review requires a stated reason for an entry on a front end that does not refuse a Host differing from SNI. The gate stays FAIL against the story criterion; the residual risk is accepted.'
   - id: 'E14-2'
     severity: low
     finding: 'Resolved on 2026-10-17: on a Debian 13 VM (kernel 6.12.111, systemd 257 as PID 1, AppArmor active) the 25 ac3.* checks passed in the sandbox container and the same matrix passed 22 of 22 under the guest systemd with systemd-run.'
@@ -43,7 +43,7 @@ evidence:
     ac_covered: [1, 2, 3]
     ac_gaps:
       - { ac: 1, reason: 'The three clauses pass; the spike criterion "no bypass" fails for shared front ends (finding 2).' }
-      - { ac: 3, reason: 'Direct connections fail on Docker Desktop and on a Debian 13 VM, in the container and under the guest systemd; the fallback was evaluated and not adopted, recorded as D134 Proposed.' }
+      - { ac: 3, reason: 'Direct connections fail on Docker Desktop and on a Debian 13 VM, in the container and under the guest systemd; the fallback was evaluated and not adopted, recorded in D134 (Accepted).' }
 nfr_validation:
   security: { status: FAIL, notes: 'Hostname allowlist bypassable by domain fronting on shared front ends; every other bypass attempt, internal address and rebinding case refused.' }
   performance: { status: PASS, notes: '64 MiB download intact and 50 concurrent tunnels; per-caller connection limits hold.' }

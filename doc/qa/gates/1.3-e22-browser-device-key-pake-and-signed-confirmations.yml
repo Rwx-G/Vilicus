@@ -4,7 +4,7 @@ story_title: 'E22: browser device key, PAKE pairing and signed confirmations'
 gate: CONCERNS
 status_reason: 'AC1 to AC3 pass on Chrome for Testing 155 and 154 and Firefox 158 and 157, headless with certificate validation, but the pass criterion also names Android, which was not run, so E22 is not passed.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
   command: 'bash e2e/run.sh --keep-going'
@@ -20,8 +20,8 @@ top_issues:
     suggested_action: 'Run the manual Android procedure of the story and record each check; apply the matching D107 fallback if a part fails.'
   - id: 'E22-2'
     severity: medium
-    finding: 'opaque-ke 4.0.1 is three majors past its 2021 audit and the browser build has no known audit (D123 Proposed).'
-    suggested_action: 'Owner decides D123; review and cross-test before FR-16 code.'
+    finding: 'opaque-ke 4.0.1 is three majors past its 2021 NCC Group audit (0.5.0), and the browser build had a 7ASecurity review in March 2024 of a version before opaque-ke 4.x. D123 is Accepted (2026-10-18) with conditions.'
+    suggested_action: 'Before FR-16 code: pinned WASM build matched byte for byte, RFC 9807 Appendix C vectors on both sides, a WASM-against-Core cross-test with the fake-record path, Ksf over argon2 0.6 (D123).'
   - id: 'E22-3'
     severity: low
     finding: 'Chrome for Testing has no field trials, and an enrolled browser pins the Core identity key by trust on first use.'

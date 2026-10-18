@@ -173,3 +173,61 @@ jobs:
         run: |
           cargo audit --file spikes/hpke-review/Cargo.lock --json > "$RUNNER_TEMP/hpke-audit.json" || true
           python3 ci/check_audit_report.py spikes/hpke-review/audit-exceptions.toml "$RUNNER_TEMP/hpke-audit.json"
+
+  # Story 2.3 (AD-33): the Debian 13 VM harness of ci/vm/README.md, not yet a required check. It
+  # boots the cloud image of e2e/vm/IMAGE.lock with QEMU and KVM, systemd as PID 1, and runs the
+  # built binary, the smoke unit and a privileged systemd container in the guest. The first step
+  # after the checkout checks nested virtualisation, as root because QEMU opens /dev/kvm as root
+  # in the e2e/vm container. The base image is cached by IMAGE.lock and verified against its
+  # SHA512 on every boot, so a stale or altered cache entry fails the boot.
+  vm-smoke:
+    name: Debian 13 VM smoke test (AD-33)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VM_CPUS: "2"
+      VM_MEMORY_MIB: "4096"
+      VM_DISK_SIZE: 20G
+      # In the workspace rather than runner.temp, which job-level env cannot read, so that the
+      # always() steps have their paths even when the first check fails.
+      VM_IMAGES_DIR: ${{ github.workspace }}/.vm-images
+      VM_RESULTS: ${{ github.workspace }}/vm-results
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check nested virtualisation
+        run: sudo python3 ci/vm_harness.py check-kvm
+      - name: Restore the Debian cloud image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VM_IMAGES_DIR }}
+          key: debian-cloud-image-${{ hashFiles('e2e/vm/IMAGE.lock') }}
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Build the vilicus binary
+        run: cargo build --package vilicus --frozen --config ci/cargo-vendored.toml
+      - name: Boot the Debian 13 VM
+        run: python3 ci/vm_harness.py up
+      - name: Copy the binary into the guest
+        run: python3 ci/vm_harness.py copy target/debug/vilicus
+      # GUEST_COMMAND is one shell string, expanded by the guest's shell, not by this step's.
+      - name: Run the binary in the guest
+        env:
+          GUEST_COMMAND: '~/artefacts/vilicus; status=$?; echo "vilicus exited $status on $(. /etc/os-release && echo "$PRETTY_NAME")"; exit $status'
+        run: python3 ci/vm_harness.py run --log "$VM_RESULTS/vilicus-run.log" -- "$GUEST_COMMAND"
+      - name: Smoke unit and privileged systemd container
+        run: python3 ci/vm_harness.py smoke --out "$VM_RESULTS"
+      - name: Collect the guest facts and console
+        if: always()
+        run: python3 ci/vm_harness.py collect --out "$VM_RESULTS"
+      - name: Upload the VM results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-smoke-results
+          path: ${{ env.VM_RESULTS }}
+          if-no-files-found: error
+      - name: Stop the VM
+        if: always()
+        run: python3 ci/vm_harness.py down

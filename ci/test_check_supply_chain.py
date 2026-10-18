@@ -290,6 +290,24 @@ GATE_JOBS = {
         ),
     ),
 }
+# The Debian 13 VM job of Story 2.3, written out by hand like GATE_JOBS. It is not a merge gate
+# yet, so it may run its result collection and its teardown under `if: always()`, and nothing
+# else: the check of nested virtualisation comes first, right after the checkout (AC1).
+VM_JOB = (
+    "vm-smoke",
+    "Debian 13 VM smoke test (AD-33)",
+    "sudo python3 ci/vm_harness.py check-kvm",
+    (
+        "cargo build --package vilicus --frozen --config ci/cargo-vendored.toml",
+        "python3 ci/vm_harness.py up",
+        "python3 ci/vm_harness.py copy target/debug/vilicus",
+        "python3 ci/vm_harness.py smoke --out \"$VM_RESULTS\"",
+        "python3 ci/vm_harness.py collect --out \"$VM_RESULTS\"",
+        "python3 ci/vm_harness.py down",
+    ),
+)
+VM_ALWAYS_STEPS = ("ci/vm_harness.py collect", "actions/upload-artifact@", "ci/vm_harness.py down")
+PINNED_ACTION = re.compile(r"uses: (\./\S+|[\w.-]+/[\w.-]+(/[\w./-]+)?@[0-9a-f]{40} # v\d+(\.\d+)*)$")
 # Workspace cargo subcommands that compile or fetch crates; each must read the vendored sources.
 # `cargo fmt` reads no dependency, and the cargo-deny, cargo-vet and cargo-audit runs read
 # metadata or the lockfile only.
@@ -382,6 +400,55 @@ class WorkflowAgreementTest(unittest.TestCase):
         for tool, version in uses:
             with self.subTest(tool=tool):
                 self.assertEqual(stack.get(tool), version)
+
+    def test_vm_job_checks_nested_virtualisation_first_and_runs_the_harness(self) -> None:
+        job_id, name, first, commands = VM_JOB
+        self.assertIn(job_id, self.jobs)
+        job = self.jobs[job_id]
+        self.assertIn(f"    name: {name}\n", job)
+        lines = command_lines(job)
+        for command in (first, *commands):
+            with self.subTest(command=command):
+                self.assertIn(command, lines)
+        self.assertTrue(any(line.startswith("python3 ci/vm_harness.py run ") for line in lines))
+        steps = job.split("\n      - ")[1:]
+        self.assertTrue(steps[0].startswith("uses: actions/checkout@"))
+        self.assertIn(first, command_lines(steps[1]))
+
+    def test_vm_job_runs_only_its_collection_and_teardown_under_always(self) -> None:
+        steps = self.jobs[VM_JOB[0]].split("\n      - ")[1:]
+        for step in steps:
+            with self.subTest(step=step.splitlines()[0]):
+                conditions = re.findall(r"(?m)^\s+if: (.*)$", step)
+                if any(marker in step for marker in VM_ALWAYS_STEPS):
+                    self.assertEqual(conditions, ["always()"])
+                else:
+                    self.assertEqual(conditions, [])
+
+    def test_vm_job_caches_the_image_by_its_lock(self) -> None:
+        job = self.jobs[VM_JOB[0]]
+        self.assertIn("key: debian-cloud-image-${{ hashFiles('e2e/vm/IMAGE.lock') }}", job)
+        self.assertIn("path: ${{ env.VM_IMAGES_DIR }}", job)
+        self.assertRegex(job, r"(?m)^      VM_IMAGES_DIR: ")
+
+    def test_every_action_is_local_or_pinned_by_commit_with_its_version(self) -> None:
+        files = [WORKFLOW, *sorted((sc.REPO_ROOT / ".github" / "actions").rglob("action.yml"))]
+        uses = [
+            (path.name, line.strip().removeprefix("- "))
+            for path in files
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip().removeprefix("- ").startswith("uses:")
+        ]
+        self.assertTrue(uses)
+        for path, line in uses:
+            with self.subTest(file=path, line=line):
+                self.assertRegex(line, PINNED_ACTION)
+
+    def test_workflow_reads_the_repository_only(self) -> None:
+        self.assertIn("\npermissions:\n  contents: read\n", self.text)
+        for job_id, job in self.jobs.items():
+            with self.subTest(job=job_id):
+                self.assertNotIn("permissions:", job)
 
     def test_repository_deny_configuration_denies_every_duplicate_and_git_source(self) -> None:
         config = tomllib.loads(sc.DENY_FILE.read_text(encoding="utf-8"))

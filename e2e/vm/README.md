@@ -12,13 +12,17 @@ kernel (6.18), not Debian 13's 6.12, and they never run under a host systemd wit
 and `systemd-coredump`. In the VM, the same spike scripts run their containers on Debian 13's
 kernel, under Debian's Docker Engine, on a host whose PID 1 is systemd 257.
 
-It is a local precursor of Story 2.3 (the CI harness), not that story's deliverable.
+The CI harness of Story 2.3 (`ci/vm_harness.py`, see `ci/vm/README.md`) drives this same VM on
+a GitHub-hosted runner; a change here changes what CI boots.
 
 ## Requirements
 
 - Docker with nested virtualisation: `/dev/kvm` must be passable to a container. On Docker
   Desktop for Windows (WSL2 backend) check with
-  `MSYS_NO_PATHCONV=1 docker run --rm --device /dev/kvm alpine:3.20 ls -l /dev/kvm`.
+  `MSYS_NO_PATHCONV=1 docker run --rm --device /dev/kvm alpine:3.20 ls -l /dev/kvm`. After a
+  Docker Desktop restart the device can be missing until the module is loaded in the engine's
+  VM: `MSYS_NO_PATHCONV=1 docker run --rm --privileged --pid=host alpine:3.20 nsenter -t 1 -m -- modprobe kvm_intel`
+  (`kvm_amd` on AMD).
 - About 8 GiB of free memory and 4 CPUs for the guest, plus disk for its Docker images and
   build caches (the guest disk is sparse, up to 60 GiB).
 - Network access to `cloud.debian.org` and `deb.debian.org` (the guest installs its packages
@@ -53,6 +57,7 @@ bash e2e/vm/vm.sh info                   # kernel, systemd, CPUs, memory, disk, 
 bash e2e/vm/vm.sh sync                   # check out git HEAD in the VM (committed content only)
 bash e2e/vm/vm.sh e2e sandbox egress     # run phases, copy results back
 bash e2e/vm/vm.sh ssh 'coredumpctl list' # any command in the guest
+bash e2e/vm/vm.sh console                # the guest console so far
 bash e2e/vm/vm.sh down                   # remove the VM container and its overlay
 ```
 
@@ -69,6 +74,10 @@ bash e2e/vm/vm.sh down                   # remove the VM container and its overl
 - `down` keeps the verified base image (`vilicus-vm-images`) for the next run and saves the guest
   console to `e2e/vm/state/console.log`.
 - `VM_SSH_PORT` changes the host port if 2222 is taken.
+- `VM_CPUS`, `VM_MEMORY_MIB` and `VM_DISK_SIZE` resize the guest (defaults in `entrypoint.sh`),
+  and `VM_IMAGES_DIR` keeps the verified base image in a host directory instead of the
+  `vilicus-vm-images` volume, which is how CI caches it. The SHA512 check runs on every boot
+  either way.
 
 ## What this approximates, and what it does not
 

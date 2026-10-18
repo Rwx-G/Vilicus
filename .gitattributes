@@ -4,6 +4,8 @@
 *.sh text eol=lf
 Dockerfile* text eol=lf
 *.service text eol=lf
+# Sourced by bash in the e2e/vm container: a CR would end every value it sets
+e2e/vm/IMAGE.lock text eol=lf
 
 # Vendored crates are checked against the checksums cargo vendor records: never convert them
 vendor/** -text

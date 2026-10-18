@@ -33,3 +33,6 @@ vilicus-audit = { path = "crates/vilicus-audit" }
 vilicus-egress = { path = "crates/vilicus-egress" }
 vilicus-ai = { path = "crates/vilicus-ai" }
 vilicus-plugin-sdk = { path = "crates/vilicus-plugin-sdk" }
+# Third-party crates at the versions of the spine's Stack table; each one needs owner approval and
+# passes the supply-chain gates of D28 (ci/check_supply_chain.py, cargo deny, vet and audit).
+serde = { version = "1.0.229", features = ["derive"] }

@@ -18,3 +18,33 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
+
+[[exemptions.proc-macro2]]
+version = "1.0.107"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of serde_derive, listed in ci/build_time_code.toml; cargo vet suggests a delta audit from 1.0.106."
+
+[[exemptions.serde]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Stack table version; cargo vet suggests a delta audit from 1.0.228 (7 files, 18 lines each way)."
+
+[[exemptions.serde_core]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Pulled in by serde 1.0.229; cargo vet suggests a delta audit from 1.0.228 (5 files, 15 lines each way)."
+
+[[exemptions.serde_derive]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. serde's `derive` feature; compile-time only, listed in ci/build_time_code.toml. cargo vet suggests a delta audit from 1.0.228."
+
+[[exemptions.syn]]
+version = "3.0.9"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of serde_derive; no audited base version in the imported sets, so a full review (cargo vet inspect) is outstanding."
+
+[[exemptions.unicode-ident]]
+version = "1.0.27"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of proc-macro2 and syn; cargo vet suggests a delta audit from 1.0.18."

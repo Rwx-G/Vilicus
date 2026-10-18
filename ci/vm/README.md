@@ -37,23 +37,28 @@ The `vm-smoke` job of `.github/workflows/ci.yml` runs on every pull request on a
    `e2e/vm/entrypoint.sh` checks it against the SHA512 of `IMAGE.lock` on every boot, and checks
    that Debian's published `SHA512SUMS` still lists that value, so a stale or altered cache entry
    fails the boot instead of being used.
-3. `cargo build --package vilicus`, then `up` (boot, wait for cloud-init, assert that PID 1 of
-   the guest is systemd), `copy` of the binary into `~/artefacts/`, and `run` of the binary in the
-   guest: `run` streams the command's output into the log, then exits with its status.
-4. `smoke`: the smoke unit, then the privileged systemd container.
+3. `cargo build --package vilicus`, then `up` (boot, wait for cloud-init, assert that the guest
+   is Debian 13 on x86_64 with systemd as PID 1), `copy` of the binary into `~/artefacts/`, and
+   `run` of the binary in the guest: `run` streams the command's output into the log, then exits
+   with its status. A second step runs `run -- 'exit 3'` and fails unless it returns 3.
+4. `smoke`: the smoke unit, then the privileged systemd container. It runs whenever `up`
+   succeeded, even after a failed `run` step, so its journals are still collected.
 5. `collect` (guest facts from `vm.sh info`, and the guest console), the upload of everything
    under `vm-results/` as the `vm-smoke-results` artefact, and `down`, each under `always()`.
 
 ### kernel.core_pattern guard
 
 `run` and `smoke` read `/proc/sys/kernel/core_pattern` in the guest before and after their test
-and fail when it changed. A privileged container that boots systemd shares the guest's
-`/proc/sys`: unless its `systemd-sysctl.service` is masked, Debian's `10-coredump-debian.conf`
-replaces the guest's `systemd-coredump` pipe with `core` until the next boot, and every later
-test runs on the file case (Story 1.6, "Debian 13 VM run"; gates E10-4 and E16-4). Every
-Dockerfile under `ci/vm/` that installs systemd must mask `systemd-sysctl.service`;
-`ci/test_vm_harness.py` fails otherwise. After a failure, `sudo systemctl restart systemd-sysctl`
-in the guest restores the pattern.
+and fail when it changed. They also fail, without running the test, when the pattern is not the
+guest's `systemd-coredump` pipe beforehand. A privileged container that boots systemd shares the
+guest's `/proc/sys`: unless its `systemd-sysctl.service` is masked, Debian's
+`10-coredump-debian.conf` replaces the guest's `systemd-coredump` pipe with `core` until the next
+boot, and every later test runs on the file case (Story 1.6, "Debian 13 VM run"; gates E10-4 and
+E16-4). Every Dockerfile under `ci/vm/` whose container boots an init (its last `ENTRYPOINT` or
+`CMD` runs `/sbin/init` or `/lib/systemd/systemd`, or it declares neither and inherits its base
+image's) must mask `systemd-sysctl.service`; `ci/test_vm_harness.py` fails otherwise. After a
+failure, `bash e2e/vm/vm.sh ssh 'sudo systemctl restart systemd-sysctl'` restores the pattern
+(not through `run`, whose check would refuse the wrong pattern).
 
 ### Results artefact
 

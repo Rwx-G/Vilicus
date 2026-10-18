@@ -291,8 +291,10 @@ GATE_JOBS = {
     ),
 }
 # The Debian 13 VM job of Story 2.3, written out by hand like GATE_JOBS. It is not a merge gate
-# yet, so it may run its result collection and its teardown under `if: always()`, and nothing
-# else: the check of nested virtualisation comes first, right after the checkout (AC1).
+# yet, so it may run its result collection and its teardown under `if: always()`, and the smoke
+# on any booted VM, even after a failed run step, so that the AC3 journals are collected; nothing
+# else is conditional. The check of nested virtualisation comes first, right after the checkout
+# (AC1), and a guest `exit 3` must come back as 3 (AC2).
 VM_JOB = (
     "vm-smoke",
     "Debian 13 VM smoke test (AD-33)",
@@ -301,12 +303,18 @@ VM_JOB = (
         "cargo build --package vilicus --frozen --config ci/cargo-vendored.toml",
         "python3 ci/vm_harness.py up",
         "python3 ci/vm_harness.py copy target/debug/vilicus",
+        "python3 ci/vm_harness.py run -- 'exit 3' || status=$?",
+        'test "$status" -eq 3',
         "python3 ci/vm_harness.py smoke --out \"$VM_RESULTS\"",
         "python3 ci/vm_harness.py collect --out \"$VM_RESULTS\"",
         "python3 ci/vm_harness.py down",
     ),
 )
 VM_ALWAYS_STEPS = ("ci/vm_harness.py collect", "actions/upload-artifact@", "ci/vm_harness.py down")
+VM_SMOKE_STEP = "ci/vm_harness.py smoke"
+VM_SMOKE_CONDITION = "${{ !cancelled() && steps.up.outcome == 'success' }}"
+# Steps that wait on the guest and so carry their own timeout, below the job's.
+VM_TIMED_STEPS = ("ci/vm_harness.py up", "ci/vm_harness.py run ", VM_SMOKE_STEP)
 PINNED_ACTION = re.compile(r"uses: (\./\S+|[\w.-]+/[\w.-]+(/[\w./-]+)?@[0-9a-f]{40} # v\d+(\.\d+)*)$")
 # Workspace cargo subcommands that compile or fetch crates; each must read the vendored sources.
 # `cargo fmt` reads no dependency, and the cargo-deny, cargo-vet and cargo-audit runs read
@@ -422,8 +430,22 @@ class WorkflowAgreementTest(unittest.TestCase):
                 conditions = re.findall(r"(?m)^\s+if: (.*)$", step)
                 if any(marker in step for marker in VM_ALWAYS_STEPS):
                     self.assertEqual(conditions, ["always()"])
+                elif VM_SMOKE_STEP in step:
+                    self.assertEqual(conditions, [VM_SMOKE_CONDITION])
                 else:
                     self.assertEqual(conditions, [])
+
+    def test_vm_job_smoke_condition_names_the_boot_step_and_guest_steps_time_out(self) -> None:
+        steps = self.jobs[VM_JOB[0]].split("\n      - ")[1:]
+        boot = [step for step in steps if "run: python3 ci/vm_harness.py up\n" in step + "\n"]
+        self.assertEqual(len(boot), 1)
+        self.assertRegex(boot[0], r"(?m)^\s+id: up$")
+        for marker in VM_TIMED_STEPS:
+            matching = [step for step in steps if marker in step]
+            self.assertTrue(matching, marker)
+            for step in matching:
+                with self.subTest(step=step.splitlines()[0]):
+                    self.assertRegex(step, r"(?m)^\s+timeout-minutes: \d+$")
 
     def test_vm_job_caches_the_image_by_its_lock(self) -> None:
         job = self.jobs[VM_JOB[0]]

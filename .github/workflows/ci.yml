@@ -208,15 +208,30 @@ jobs:
       - name: Build the vilicus binary
         run: cargo build --package vilicus --frozen --config ci/cargo-vendored.toml
       - name: Boot the Debian 13 VM
+        id: up
+        timeout-minutes: 20
         run: python3 ci/vm_harness.py up
       - name: Copy the binary into the guest
         run: python3 ci/vm_harness.py copy target/debug/vilicus
       # GUEST_COMMAND is one shell string, expanded by the guest's shell, not by this step's.
       - name: Run the binary in the guest
+        timeout-minutes: 10
         env:
           GUEST_COMMAND: '~/artefacts/vilicus; status=$?; echo "vilicus exited $status on $(. /etc/os-release && echo "$PRETTY_NAME")"; exit $status'
         run: python3 ci/vm_harness.py run --log "$VM_RESULTS/vilicus-run.log" -- "$GUEST_COMMAND"
+      # AC2: a guest command's exit status must reach the job unchanged.
+      - name: Check that the guest exit status reaches the job
+        timeout-minutes: 5
+        run: |
+          status=0
+          python3 ci/vm_harness.py run -- 'exit 3' || status=$?
+          echo "run -- 'exit 3' returned ${status}"
+          test "$status" -eq 3
+      # Runs after a failed run step too, so the AC3 journals are still collected, but only on a
+      # booted VM.
       - name: Smoke unit and privileged systemd container
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        timeout-minutes: 15
         run: python3 ci/vm_harness.py smoke --out "$VM_RESULTS"
       - name: Collect the guest facts and console
         if: always()

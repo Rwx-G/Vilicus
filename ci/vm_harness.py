@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import os
 import shlex
 import shutil
@@ -61,6 +62,15 @@ KVM_GET_API_VERSION = 0xAE00
 KVM_CREATE_VM = 0xAE01
 KVM_API_VERSION = 12
 VIRTUALISATION_FLAGS = {"vmx": "Intel VT-x", "svm": "AMD-V"}
+
+# The guest e2e/vm/IMAGE.lock pins: Debian 13 on amd64, with systemd-coredump installed by
+# cloud-init, so its kernel.core_pattern is a pipe to systemd-coredump. A guest on anything else
+# already lost that pipe, and a test would run on the file case (gate E16-4).
+GUEST_VERSION_ID = "13"
+GUEST_MACHINE = "x86_64"
+GUEST_CORE_PATTERN_PREFIX = "|/usr/lib/systemd/systemd-coredump"
+# ssh exits 255 when it fails itself, which a guest command can also return.
+SSH_FAILURE = 255
 
 
 class MissingCapability(Exception):
@@ -114,6 +124,11 @@ def check_kvm(device: Path = KVM_DEVICE, cpuinfo: Path = CPUINFO, ioctl: Callabl
     try:
         fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
     except PermissionError as error:
+        if error.errno == errno.EPERM:
+            raise MissingCapability(
+                f"KVM access: opening {device} was denied by policy (EPERM), not by its file mode: a device "
+                "cgroup or container rule blocks it; pass it to the container with --device /dev/kvm"
+            ) from error
         raise MissingCapability(
             f"KVM access: {device} exists but uid {os.geteuid()} cannot open it read-write ({error.strerror}); "
             "run the check as the user that starts QEMU (root, through Docker)"
@@ -143,9 +158,17 @@ def check_kvm(device: Path = KVM_DEVICE, cpuinfo: Path = CPUINFO, ioctl: Callabl
 
 
 def guarded(read_core_pattern: Callable[[], str], test: Callable[[], int], report: Callable[[str], None] = print) -> int:
-    """Runs `test` between two reads of kernel.core_pattern; a change fails the result."""
+    """Runs `test` between two reads of kernel.core_pattern; a change fails the result, and a guest
+    that is not on the systemd-coredump pipe beforehand fails it without running the test."""
     before = read_core_pattern()
     report(f"INFO core_pattern before: {before}")
+    if not before.startswith(GUEST_CORE_PATTERN_PREFIX):
+        report(
+            f"FAIL core_pattern_expected: kernel.core_pattern is {before!r} before the test, not the "
+            f"{GUEST_CORE_PATTERN_PREFIX} pipe of the Debian 13 guest; an earlier test changed it (gate E16-4), "
+            "so this one is not run. Restore with: bash e2e/vm/vm.sh ssh 'sudo systemctl restart systemd-sysctl'"
+        )
+        return 1
     status = test()
     after = read_core_pattern()
     report(f"INFO core_pattern after:  {after}")
@@ -154,7 +177,7 @@ def guarded(read_core_pattern: Callable[[], str], test: Callable[[], int], repor
             f"FAIL core_pattern_unchanged: the test changed kernel.core_pattern from {before!r} to {after!r}. "
             "A privileged container that boots systemd without systemd-sysctl.service masked applies its "
             "sysctl.d to the guest (gates E10-4, E16-4); any later test would run on the wrong pattern. "
-            "Restore with: sudo systemctl restart systemd-sysctl"
+            "Restore with: bash e2e/vm/vm.sh ssh 'sudo systemctl restart systemd-sysctl'"
         )
         return status or 1
     report("PASS core_pattern_unchanged")
@@ -182,7 +205,11 @@ class Guest:
 
     def run(self, command: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
-            vm_command("ssh", command), input=stdin, capture_output=True, check=False
+            vm_command("ssh", command),
+            input=stdin,
+            stdin=subprocess.DEVNULL if stdin is None else None,
+            capture_output=True,
+            check=False,
         )
         return subprocess.CompletedProcess(
             result.args,
@@ -200,7 +227,7 @@ class Guest:
     def stream(self, command: str, log: Path | None) -> int:
         sink = log.open("w", encoding="utf-8", newline="\n") if log else contextlib.nullcontext()
         with sink as file, subprocess.Popen(
-            vm_command("ssh", command), stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            vm_command("ssh", command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         ) as process:
             assert process.stdout is not None
             for raw in process.stdout:
@@ -217,14 +244,27 @@ class Guest:
             if not path.exists():
                 raise HarnessError(f"{path} does not exist")
         target = shlex.quote(destination)
+        # Unbuffered, so that closing the pipe after the remote side stopped reading flushes nothing.
         with subprocess.Popen(
-            vm_command("ssh", f"mkdir -p {target} && tar -x --no-same-owner -C {target}"), stdin=subprocess.PIPE
+            vm_command("ssh", f"mkdir -p {target} && tar -x --no-same-owner -C {target}"),
+            stdin=subprocess.PIPE,
+            bufsize=0,
         ) as process:
             assert process.stdin is not None
-            with tarfile.open(fileobj=process.stdin, mode="w|") as archive:
-                for path in paths:
-                    archive.add(path, arcname=path.name, filter=_anonymous)
-            process.stdin.close()
+            try:
+                with tarfile.open(fileobj=process.stdin, mode="w|") as archive:
+                    for path in paths:
+                        archive.add(path, arcname=path.name, filter=_anonymous)
+                process.stdin.close()
+            except OSError as error:
+                # The remote side exited before reading everything (EPIPE; EINVAL on Windows for
+                # the writes after the first), and its status says why. With a status of 0 the
+                # error is ours, such as an unreadable artefact.
+                status = process.wait()
+                if status == 0:
+                    raise
+                print(f"INFO the guest stopped reading the archive ({error.strerror}) and exited {status}", file=sys.stderr)
+                return status
             return process.wait()
 
     def core_pattern(self) -> str:
@@ -261,10 +301,19 @@ def cmd_up(guest: Guest) -> int:
     status = subprocess.run(vm_command("up"), check=False).returncode
     if status != 0:
         return status
+    return check_guest(guest)
+
+
+def check_guest(guest: Guest) -> int:
+    """The guest is the pinned one: Debian 13 on x86_64, with systemd as PID 1."""
     checks = Checks()
     pid1 = guest.output("cat /proc/1/comm")
     state = guest.run("systemctl is-system-running").stdout.strip()
     checks.check("guest_pid1_is_systemd", pid1 == "systemd", f"PID 1 is {pid1}, system state {state}")
+    version = guest.output('. /etc/os-release && echo "$VERSION_ID"')
+    checks.check("guest_is_debian_13", version == GUEST_VERSION_ID, f"VERSION_ID={version}")
+    machine = guest.output("uname -m")
+    checks.check("guest_is_amd64", machine == GUEST_MACHINE, f"uname -m is {machine}")
     facts = guest.output('. /etc/os-release && echo "$PRETTY_NAME"; uname -r; systemctl --version | head -n 1')
     print(f"INFO guest: {', '.join(facts.splitlines())}")
     return checks.status
@@ -356,6 +405,11 @@ def cmd_run(guest: Guest, command: list[str], log: Path | None) -> int:
     def test() -> int:
         status = guest.stream(line, log)
         print(f"INFO guest command exited {status}: {line}")
+        if status == SSH_FAILURE:
+            print(
+                f"INFO status {SSH_FAILURE} is also what ssh returns when it fails itself (no connection, "
+                "key refused, VM gone): if the lines above show no guest output, the command may not have run"
+            )
         return status
 
     return guarded(guest.core_pattern, test)

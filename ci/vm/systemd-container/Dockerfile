@@ -5,7 +5,7 @@
 # the build.
 #
 # systemd-sysctl.service is masked, and ci/test_vm_harness.py fails any Dockerfile under ci/vm/
-# that installs systemd without that mask: the container is privileged, so /proc/sys is the
+# whose container boots an init without that mask: the container is privileged, so /proc/sys is the
 # guest's, and Debian's 10-coredump-debian.conf would replace the guest's systemd-coredump pipe
 # in kernel.core_pattern with "core" until the next boot (Story 1.6, "Debian 13 VM run"; gates
 # E10-4 and E16-4). The harness also compares core_pattern before and after the run.

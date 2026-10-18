@@ -256,7 +256,7 @@ cmd_down() {
   fi
   if docker volume inspect "$RUN_VOLUME" >/dev/null 2>&1; then
     docker volume rm "$RUN_VOLUME" >/dev/null
-    log "overlay volume $RUN_VOLUME removed; base image cache $IMAGES_VOLUME kept"
+    log "overlay volume $RUN_VOLUME removed; base image kept in ${VM_IMAGES_DIR:-volume $IMAGES_VOLUME}"
   fi
 }
 

@@ -18,7 +18,7 @@ It is not a collaboration suite and not a product for companies. It is the missi
 
 *Vilicus* was the steward of a Roman estate (the *villa*): the manager who ran the work, the stores and the accounts on behalf of the owner. Same job, for a modern household.
 
-> **Status: design phase, no code yet.** This repository holds the vision, the architecture and security documents, the [product requirements](doc/prd.md) and the [architecture spine](doc/architecture-spine.md). Everything listed below is a goal, not a shipped feature. See the [Roadmap](#roadmap). Design notes live in [`doc/`](doc/README.md).
+> **Status: design phase, no product code yet.** This repository holds the vision, the architecture and security documents, the [product requirements](doc/prd.md), the [architecture spine](doc/architecture-spine.md), the [V0.1 stories](doc/backlog.md), and the V0.1 spikes ([`spikes/`](spikes/)) that tested the riskiest parts of the design before any product code, with a replayable test harness ([`e2e/`](e2e/README.md)) and its [report](doc/qa/epic-1-report.md). Everything listed below is a goal, not a shipped feature. See the [Roadmap](#roadmap). Design notes live in [`doc/`](doc/README.md).
 
 ## Key Features (planned)
 
@@ -126,7 +126,7 @@ The order follows the [product requirements](doc/prd.md), section 6. The split a
 | Milestone | Scope | Status |
 |-----------|-------|--------|
 | Design | Vision, architecture, threat model, key management, AI safety, capability matrix, decisions, research notes, product requirements, architecture spine | Done, kept up to date |
-| V0.1 | The Core: Debian package, members and keys, recovery, device pairing, partitions and taint, module platform, action pipeline, audit log, plumbing for plugins, AI processes and channels proven by test doubles | Planned |
+| V0.1 | The Core: Debian package, members and keys, recovery, device pairing, partitions and taint, module platform, action pipeline, audit log, plumbing for plugins, AI processes and channels proven by test doubles | In progress: spikes run in containers and a Debian 13 VM; runs on the reference host and real devices pending |
 | Next | Home automation module, at parity with an existing home automation setup | Planned |
 | Next | Meals and groceries, first model connectors, read-only conversation, scheduled tasks with opt-in delegation | Planned |
 | Next | Store connector (a prepared cart you validate on the store's site) | Planned |
@@ -161,7 +161,7 @@ Store connectors will rely on unofficial interfaces. Retailers' terms of use gen
 
 ## Documentation
 
-Design documents live in [`doc/`](doc/README.md), with an index, a reading order and a glossary: [architecture](doc/architecture.md), [threat model](doc/threat-model.md), [key management](doc/key-management.md), [AI safety](doc/ai-safety.md), [capability matrix](doc/capability-matrix.md), [decisions](doc/decisions.md) and [research notes](doc/research-notes.md). Planning: [product requirements](doc/prd.md) and [architecture spine](doc/architecture-spine.md).
+Design documents live in [`doc/`](doc/README.md), with an index, a reading order and a glossary: [architecture](doc/architecture.md), [threat model](doc/threat-model.md), [key management](doc/key-management.md), [AI safety](doc/ai-safety.md), [capability matrix](doc/capability-matrix.md), [decisions](doc/decisions.md) and [research notes](doc/research-notes.md). Planning: [product requirements](doc/prd.md), [architecture spine](doc/architecture-spine.md), [backlog](doc/backlog.md) with its [stories](doc/stories/), and the [QA report](doc/qa/epic-1-report.md) of the spikes.
 
 ## License
 

@@ -5,7 +5,7 @@ story: 5
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-8, FR-3, AD-36, D34, D74, FR-56, UJ-2]
+implements: [FR-8, FR-3, AD-36, D34, D74, FR-56, UJ-2, D121]
 ---
 
 # Story 9.5: Add an adult from the CLI
@@ -29,9 +29,10 @@ So that the new adult enrolls with a personal partition of their own from the fi
 
 **AC3 (FR-8, D74)**
 **Given** a valid enrollment token
-**When** the new adult opens the enrollment page and enrolls a passkey, a strength-checked passphrase, a re-typed recovery secret and a destination confirmed by a redeemed test notification
+**When** the new adult opens the enrollment page and enrolls a passkey, a strength-checked passphrase, a re-typed recovery secret and a destination confirmed by the test notification check of Story 8.1 AC4 (D135)
 **Then** the Core generates the new member DEK and key pair, MACs the new public key under the authentication key, and the new personal partition is usable at once
 **And** no browser or Gateway input can replace the public key that the Core generated
+**And** before discarding the enrollment key, the Core derives the confirmation key `K_conf` from it and stores it wrapped under a key derived from the new member's DEK, so the new member can later confirm the household key it first receives (D121, Story 4.7 AC7)
 
 **AC4 (FR-8, FR-56)**
 **Given** a completed enrollment of a new adult
@@ -52,4 +53,4 @@ So that the new adult enrolls with a personal partition of their own from the fi
 - `doc/prd.md` FR-8, FR-3, UJ-2
 - `doc/key-management.md` sections 3 and 5
 - `doc/architecture-spine.md` AD-36
-- `doc/decisions.md` D34, D74
+- `doc/decisions.md` D34, D74, D121, D135

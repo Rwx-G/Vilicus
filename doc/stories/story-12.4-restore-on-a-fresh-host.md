@@ -5,7 +5,7 @@ story: 4
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-53, FR-3, AD-31, AD-34, D52, D106]
+implements: [FR-53, FR-3, AD-31, AD-34, D52, D106, D120]
 ---
 
 # Story 12.4: Restore on a fresh host
@@ -16,10 +16,11 @@ So that the household gets its data back after losing the host, without an old b
 
 **Acceptance Criteria:**
 
-**AC1 (FR-53, AD-31)**
+**AC1 (FR-53, AD-31, D120)**
 **Given** a fresh Debian 13 host with the package installed, services stopped and an empty data directory
 **When** root runs `vilicus restore` and types the backup secret at the prompt
 **Then** the manifest MAC, hashes and completeness are checked before anything is written
+**And** no key unwrapped from the archive with the backup private key is used before the manifest is verified against the sequence number and hash held by the remote sink (AD-31), as HPKE usage rule U10 requires, since HPKE base mode authenticates no sender (D120, `spikes/hpke-review/REVIEW.md` section 7)
 
 **AC2 (FR-53, D106)**
 **Given** a manifest whose MAC fails, or whose sequence number is older than the latest one recorded by the remote sink
@@ -56,4 +57,4 @@ So that the household gets its data back after losing the host, without an old b
 - `doc/prd.md` FR-53, FR-54
 - `doc/architecture-spine.md` AD-31, AD-34
 - `doc/architecture.md` sections 17, 18
-- `doc/decisions.md` D52, D106
+- `doc/decisions.md` D52, D106, D120

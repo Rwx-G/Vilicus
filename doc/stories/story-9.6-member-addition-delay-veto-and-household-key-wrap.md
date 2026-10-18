@@ -5,7 +5,7 @@ story: 6
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-8, D34, D88, AD-30, AD-36, FR-56, UJ-2]
+implements: [FR-8, D34, D88, AD-30, AD-36, FR-56, UJ-2, D119, D121]
 ---
 
 # Story 9.6: Member addition delay, veto and household key wrap
@@ -43,15 +43,24 @@ So that nobody, including someone with shell access or a write to the data direc
 **When** the wrap is attempted
 **Then** the key is refused, no household key wrapper is written, and every adult is alerted
 
+**AC6 (D121, D119)**
+**Given** the wrap of AC4
+**When** the Core writes the household key wrapper
+**Then** it writes next to it, after unwrapping the enrollment key with the household key, the confirmation tag `HMAC(K_conf, "vilicus/v1/hk/confirm/" || member_id || hk_version || C(HK))` that the new member's first unlock verifies (Story 4.7 AC7)
+**And** an enrollment key wrap made under another household key version is refused as stale, not reported as tampering (D119).
+
 **Decision tasks:**
 - [x] Settled by FR-50: the only adult cancels a pending addition in the member web with a step-up bound to the cancellation (D88).
+
+The FR-8 wrap code also waits on the owner's approval of `spikes/hpke-review/REVIEW.md` (Story 4.6, decision task; D120).
 
 **Dependencies:**
 - Story 9.5 (pending addition)
 - Story 9.3 (unlock, which triggers the wrap)
+- Story 4.7 (confirmation of the household key)
 
 **References:**
 - `doc/prd.md` FR-8, FR-50, FR-56, UJ-2
 - `doc/key-management.md` section 5
 - `doc/architecture-spine.md` AD-30, AD-36
-- `doc/decisions.md` D34, D74, D88
+- `doc/decisions.md` D34, D74, D88, D119, D120, D121

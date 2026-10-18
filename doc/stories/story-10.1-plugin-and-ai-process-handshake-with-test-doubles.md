@@ -5,7 +5,7 @@ story: 1
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-25, FR-109, AD-12, AD-24, D19, D102, I24]
+implements: [FR-25, FR-109, AD-12, AD-24, D19, D102, I24, D125]
 ---
 
 # Story 10.1: Plugin and AI process handshake with test doubles
@@ -34,10 +34,10 @@ So that the internal app interfaces of V0.1 are proven by executables that run l
 **Then** it speaks MCP (JSON-RPC 2.0) through `rmcp`, behind a framing layer that rejects a message above its maximum size before any parsing
 **And** tool arguments are validated as closed types, unknown fields rejected
 
-**AC4 (AD-24)**
+**AC4 (AD-24, D125)**
 **Given** a process running under a unit other than the one a peer socket expects
 **When** it connects to that socket
-**Then** the Core identifies it by the unit name read from the cgroup of its pidfd and refuses the connection
+**Then** the Core identifies it by the peer identity method of Story 5.3 AC2 (its pid listed in `cgroup.procs` of the expected unit's cgroup, then its pidfd still alive, D125) and refuses the connection
 **And** the refusal is audited
 
 **AC5 (I24)**
@@ -54,5 +54,5 @@ So that the internal app interfaces of V0.1 are proven by executables that run l
 **References:**
 - `doc/prd.md` FR-25, FR-109
 - `doc/architecture-spine.md` AD-12, AD-24, AD-55
-- `doc/decisions.md` D19, D102
+- `doc/decisions.md` D19, D102, D125
 - `doc/ai-safety.md` section 3, I24

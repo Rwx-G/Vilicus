@@ -5,7 +5,7 @@ story: 7
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-15, FR-17, AD-21, D35, D90, E22]
+implements: [FR-15, FR-17, AD-21, D35, D90, E22, D122]
 ---
 
 # Story 7.7: Device key signed requests and session hardening
@@ -21,11 +21,12 @@ So that a stolen session cookie alone is useless.
 **When** it registers with the Core
 **Then** it holds a non-extractable ECDSA P-256 key created with WebCrypto, whose public key the Core registers and alone verifies
 
-**AC2 (AD-21)**
+**AC2 (AD-21, D122)**
 **Given** a paired browser with a web session
 **When** it sends a request
-**Then** it signs SHA-256 of `vilicus/v1/req` concatenated with the session id, a counter that strictly increases per session, the method, the path and SHA-256 of the raw body
-**And** the Core verifies the signature and the counter and checks that the CBOR request equals its own decoding of the raw body, refusing any mismatch or replayed counter
+**Then** it signs, with ECDSA P-256 and SHA-256 (WebCrypto `sign`, a 64-byte `r || s` signature), SHA-256 of the byte string fixed by D122: `vilicus/v1/req` (14 bytes), the 16-byte session id, the counter as 8 bytes big-endian, the length of the method as 4 bytes big-endian and the method, the length of the path with its query as 4 bytes big-endian and the path with its query, and SHA-256 of the raw body; the public key is the 65-byte uncompressed point of `exportKey('raw')`
+**And** the Core verifies the signature (`ECDSA_P256_SHA256_FIXED`) and accepts a counter only above the last accepted one, a refused request not advancing it, and checks that the CBOR request equals its own decoding of the raw body, refusing any mismatch or replayed counter
+**And** the client sends the signed requests of a session one at a time, in counter order, because two requests in flight can arrive out of order and the later counter then refuses the earlier one (tests as `ac1.concurrent_signed_requests_serialized` and its out-of-order control in `spikes/browser-device-key/`)
 
 **AC3 (FR-17, D90)**
 **Given** a web session
@@ -44,7 +45,7 @@ So that a stolen session cookie alone is useless.
 **Then** it is treated as unpaired
 
 **AC6 (E22)**
-**Given** E22 took its first fallback
+**Given** E22 took its first fallback (its desktop part passed without one, D122; Android is still to run, gate E22-1)
 **When** a session stays active
 **Then** it is re-proven by a passkey assertion every 15 minutes of activity, and the member is told so
 
@@ -54,13 +55,27 @@ So that a stolen session cookie alone is useless.
 **Then** a new session starts only after a passkey assertion
 **And** the device key alone never re-opens a session
 
+**AC8 (D122, AD-21)**
+**Given** a device public key to register, at enrollment or at pairing
+**When** the Core registers it
+**Then** it requires a proof of possession, an ECDSA signature by that key over `vilicus/v1/device-pop`, a length-prefixed context (the enrollment token or the pairing binding message) and the key, and refuses a registration whose proof is missing, zero or made by another key
+**And** a session opened by the passkey login of AC7 is bound to the device key by a signature over `vilicus/v1/session`, the device id and a single-use Core nonce valid 60 seconds, refused when expired or presented for another device.
+
+**AC9 (D122)**
+**Given** the Core's session state
+**When** the Core restarts
+**Then** sessions, which live in the Core's memory, do not survive it, and the browser opens a new one as AC7 and AC8 state
+**And** every lifetime (session challenges, nonces) is checked on a monotonic clock, and the Core never uses a signature as an identifier or a deduplication key, because ECDSA signatures are malleable (WebCrypto does not normalize `s` and aws-lc-rs accepts both forms); replay protection rests on the counter and single-use nonces.
+
 **Dependencies:**
 - Story 7.6 (passkey login)
-- Story 1.3 (E22 result)
+- Story 1.3 (E22 result; D122)
 
 **References:**
 - `doc/prd.md` FR-15, FR-17
 - `doc/architecture-spine.md` AD-21
 - `doc/architecture.md` section 6
-- `doc/decisions.md` D35, D90, D107
+- `doc/decisions.md` D35, D90, D107, D122
 - `doc/research-notes.md` E22
+- `spikes/browser-device-key/` (`src/device.rs`, `src/core.rs`, `web/static/common.js`, `tests/core_flows.rs`)
+- `doc/qa/gates/1.3-e22-browser-device-key-pake-and-signed-confirmations.yml` (E22-1)

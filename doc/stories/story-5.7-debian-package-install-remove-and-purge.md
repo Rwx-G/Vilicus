@@ -5,7 +5,7 @@ story: 7
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-1, FR-54, AD-22, AD-25, D96]
+implements: [FR-1, FR-54, AD-22, AD-25, D96, D131]
 ---
 
 # Story 5.7: Debian package install, remove and purge
@@ -45,6 +45,11 @@ So that a clean Debian 13 host runs the Core and its services under unprivileged
 **When** its contents are listed
 **Then** `vilicus-testbed`, the reference module and every test double are absent, and the package targets amd64 (arm64 later, PRD assumption)
 
+**AC6 (D131)**
+**Given** the static users the package creates
+**When** the Core's user is created
+**Then** it runs nothing but the Core: no login shell, and no other unit, timer or job of the package runs under it, because a process of the same user that opened the Core's memory before the Core hardened itself keeps access (Story 1.10, `preopened-descriptor-survives-hardening`)
+
 **Dependencies:**
 - Story 5.4 (units)
 - Story 5.5 (egress proxy)
@@ -54,4 +59,4 @@ So that a clean Debian 13 host runs the Core and its services under unprivileged
 - `doc/prd.md` FR-1, FR-54, FR-109
 - `doc/architecture-spine.md` AD-22, AD-25, AD-34
 - `doc/key-management.md` section 2 (instance key, audit key)
-- `doc/decisions.md` D96
+- `doc/decisions.md` D96, D131

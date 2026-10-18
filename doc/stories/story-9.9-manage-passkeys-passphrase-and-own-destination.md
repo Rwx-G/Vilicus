@@ -5,7 +5,7 @@ story: 9
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-10, FR-56, D71, D33, D106, FR-50]
+implements: [FR-10, FR-56, D71, D33, D106, FR-50, D135, D121]
 ---
 
 # Story 9.9: Manage passkeys, passphrase and own destination
@@ -26,7 +26,7 @@ So that I keep control of my authenticators and my alerts without opening a time
 **Given** an unlocked member
 **When** the member changes the passphrase with a step-up
 **Then** the passphrase KEK wrapper is replaced, the new passphrase passes the strength check, and the old passphrase no longer unlocks
-**And** a change declared as a suspected exposure offers a DEK rotation
+**And** a change declared as a suspected exposure offers a DEK rotation, which rewrites the member's DEK-keyed household key commitment in the same transaction as the new DEK wrapper, so the next unlock still verifies the opened household key (D121)
 
 **AC3 (FR-10, FR-56)**
 **Given** a passkey added or removed or a passphrase changed
@@ -38,14 +38,14 @@ So that I keep control of my authenticators and my alerts without opening a time
 **When** a TOTP code is offered in place of the step-up
 **Then** it is refused
 
-**AC5 (FR-56, FR-50)**
+**AC5 (FR-56, FR-50, D135)**
 **Given** a member changing their own out-of-browser destination
 **When** the member submits the new destination
-**Then** a step-up bound to that change is required, then a test notification token sent to the new destination must be redeemed before it replaces the old one
+**Then** a step-up bound to that change is required, then a test notification sent to the new destination must be confirmed by the receipt check of Story 8.1 AC4 before it replaces the old one (the push payload carries no token, D135)
 **And** the old destination receives an alert that the destination changed
 
 **Decision tasks:**
-- [ ] Confirm the FR-50 level for changing one's own destination. Recommended: step-up then test notification token, as FR-50 states, because the destination is where recovery and veto alerts go. Gives up: a member must have a working passkey to fix a broken destination, which recovery covers.
+- [ ] Confirm the FR-50 level for changing one's own destination. Recommended: step-up then a confirmed test notification (Story 8.1 AC4), as FR-50 states, because the destination is where recovery and veto alerts go. Gives up: a member must have a working passkey to fix a broken destination, which recovery covers.
 
 **Dependencies:**
 - Story 9.3 (unlock, for the passphrase change)
@@ -56,4 +56,4 @@ So that I keep control of my authenticators and my alerts without opening a time
 - `doc/prd.md` FR-10, FR-50, FR-56
 - `doc/key-management.md` section 3
 - `doc/capability-matrix.md` section 1
-- `doc/decisions.md` D33, D71, D106
+- `doc/decisions.md` D33, D71, D106, D124, D135

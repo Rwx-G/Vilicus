@@ -5,7 +5,7 @@ story: 2
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-53, FR-3, AD-31, AD-25, D85, D106, D95, D113]
+implements: [FR-53, FR-3, AD-31, AD-25, D85, D106, D95, D113, D126, D136]
 ---
 
 # Story 12.2: Unattended backup assembly and upload
@@ -49,6 +49,12 @@ So that the household always has a recent complete off-host copy without anyone 
 **Then** the instance admin receives an alert
 **And** every backup run, successful or failed, writes an audit entry and appears in `vilicus status`
 
+**AC7 (D136, AD-31, D126)**
+**Given** the checkpoint and pause of AC1
+**When** the Core prepares the files for copying
+**Then** it pauses one file at a time, each writer paused only while its own file is checkpointed and copied, and only for files of at most 32 MiB (measured copy 32.3 ms plus 0.80 ms per MiB, checkpoint up to 2.01 ms per MiB of WAL, Story 1.15 "AD-31 pause against file size"); a larger file, like the home partition's, is copied with SQLite's online backup API in bounded steps (64 pages per step in the spike) with queued jobs run between steps
+**And** a pause's checkpoint uses a short busy timeout (20 ms in the spike) and is retried, so no writer waits on a reader, and the writer stays in service during the retries; copies are file copies or online backups on the Core maintenance path, never `VACUUM INTO` or `ATTACH` (Story 3.1 AC9).
+
 **Decision tasks:**
 - [ ] Decide the S3-compatible client (approved by D106). Recommended: `rusty-s3` (request signing only, no bundled HTTP stack, so uploads reuse the workspace HTTP client through the egress proxy), pinned in the Stack. Gives up: a full SDK's retry and multipart helpers.
 - [x] Settled by FR-50 and D113: the backup schedule is set in `vilicus.toml` (root); the `doc/capability-matrix.md` row is aligned.
@@ -62,4 +68,5 @@ So that the household always has a recent complete off-host copy without anyone 
 - `doc/prd.md` FR-53, FR-50, section 12
 - `doc/architecture-spine.md` AD-25, AD-31
 - `doc/architecture.md` section 18
-- `doc/decisions.md` D85, D95, D106, D113
+- `doc/decisions.md` D85, D95, D106, D113, D126, D136
+- `spikes/core-execution/` (backup loop, `pause-bound`)

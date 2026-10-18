@@ -5,7 +5,7 @@ story: 12
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-108, D77, D105, FR-3, FR-56]
+implements: [FR-108, D77, D105, FR-3, FR-56, D135]
 ---
 
 # Story 9.12: Passkey re-enrollment
@@ -27,10 +27,10 @@ So that I regain access without the waiting period of a recovery.
 **When** the member opens it in a browser and types their passphrase
 **Then** the member enrolls a new passkey and that browser becomes a paired device
 
-**AC3 (FR-108, D105)**
+**AC3 (FR-108, D105, D135)**
 **Given** the new passkey
 **When** the member tries to complete the re-enrollment
-**Then** it completes only after the member redeems the token of a test notification sent to their out-of-browser destination
+**Then** it completes only after a test notification sent to their out-of-browser destination is confirmed by the receipt check of Story 8.1 AC4 (the push payload carries no token, D135)
 
 **AC4 (FR-108)**
 **Given** the completion screen
@@ -54,4 +54,4 @@ So that I regain access without the waiting period of a recovery.
 - `doc/prd.md` FR-3, FR-56, FR-108
 - `doc/key-management.md` section 3
 - `doc/capability-matrix.md` section 1
-- `doc/decisions.md` D77, D105
+- `doc/decisions.md` D77, D105, D135

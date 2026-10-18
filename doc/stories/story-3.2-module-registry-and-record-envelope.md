@@ -5,7 +5,7 @@ story: 2
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-18, FR-22, FR-58, FR-68, AD-6, AD-9, I8, I36, D98, D103, D104, I6, AD-5]
+implements: [FR-18, FR-22, FR-58, FR-68, AD-6, AD-9, I8, I36, D98, D103, D104, I6, AD-5, D127]
 ---
 
 # Story 3.2: Module registry and record envelope
@@ -50,6 +50,12 @@ So that every record the Core stores carries provenance, typed fields and its da
 **When** the crate graph check runs
 **Then** a module crate that depends on another module's storage or table types fails the build
 
+**AC7 (D127, D132)**
+**Given** a module that needs full-text search
+**When** the registry loads its FTS5 table declaration
+**Then** it is refused unless its arguments are on the allowlist: a built-in tokenizer among `unicode61`, `ascii`, `porter` and `trigram`, and `content=` empty or naming a table of the same module
+**And** it is refused unless the table's migration sets its `secure-delete` option to 1 (D132); the `fts5()` SQL function stays denied (Story 3.1).
+
 **Dependencies:**
 - Story 3.1 (storage layer)
 - Story 2.4 (data type set, envelope types)
@@ -58,4 +64,4 @@ So that every record the Core stores carries provenance, typed fields and its da
 - `doc/prd.md` FR-18, FR-22, FR-58, FR-68
 - `doc/architecture-spine.md` AD-6, AD-9
 - `doc/ai-safety.md` I8, I36
-- `doc/decisions.md` D98, D103, D104
+- `doc/decisions.md` D98, D103, D104, D127, D132

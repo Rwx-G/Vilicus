@@ -5,7 +5,7 @@ story: 1
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [AD-18, AD-4, D28, FR-13, NFR-7]
+implements: [AD-18, AD-4, D28, FR-13, NFR-7, D120, D123, D129, D131]
 ---
 
 # Story 4.1: Crypto suite and versioned wrappers
@@ -44,6 +44,18 @@ So that every key the Core holds is wrapped with audited primitives and stays in
 **When** it describes the suite
 **Then** it names aws-lc-rs as the source of AES-GCM and HKDF and states the version 1 identifiers, and claims nothing about the transport beyond D27
 
+**AC6 (D28, D120, D123, D129)**
+**Given** the primitive source list of AC1
+**When** the dependency check runs
+**Then** it lists aws-lc-rs, `hpke` 0.13.0 with the primitive crates it depends on (D120), `argon2` 0.6.0 and `blake2` without the `parallel` feature (D129), and `opaque-ke` 4.0.1 (D123), each with its recorded exception to D28
+**And** the crate documentation states that inside HPKE the `hpke` crate brings its own primitive crates, and never calls `hpke`, `argon2` or `opaque-ke` audited at its pinned version.
+
+**AC7 (D131, AD-4)**
+**Given** an AEAD or HKDF operation with a key held by the crate
+**When** it runs
+**Then** the aws-lc-rs objects (`LessSafeKey`, `Prk`) are built from the key slot for that one operation and dropped before it returns, because a live object keeps the key, the HKDF input and the GHASH key on the unlocked heap (Story 1.10, `*-asis-key-object-on-unlocked-heap`)
+**And** key bytes are never held in heap memory the Core does not wipe or lock.
+
 **Dependencies:**
 - Story 2.1 (workspace and crate graph check)
 - Story 2.2 (supply-chain gates that vet aws-lc-rs)
@@ -51,5 +63,5 @@ So that every key the Core holds is wrapped with audited primitives and stays in
 **References:**
 - `doc/architecture-spine.md` AD-4, AD-18
 - `doc/key-management.md` sections 2, 9, 10
-- `doc/decisions.md` D28
+- `doc/decisions.md` D28, D120, D123, D129, D131
 - `doc/prd.md` FR-13

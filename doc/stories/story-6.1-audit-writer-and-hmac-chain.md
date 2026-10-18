@@ -5,7 +5,7 @@ story: 1
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-31, AD-17, D22, D114, DC-69]
+implements: [FR-31, AD-17, D22, D114, DC-69, D125]
 ---
 
 # Story 6.1: Audit writer and HMAC chain
@@ -19,7 +19,7 @@ So that no other component of Vilicus can rewrite what happened without the chan
 **AC1 (AD-17, D22)**
 **Given** the audit writer unit
 **When** it runs
-**Then** it is a separate process under its own static user, listening on `audit/append.sock` for the Core only (checked by `SO_PEERPIDFD`) and on `audit/admin/admin.sock` for root only (uid 0 by `SO_PEERCRED`)
+**Then** it is a separate process under its own static user, listening on `audit/append.sock` for the Core only (the Core identified by its unit with the method of Story 5.3 AC2, D125: `SO_PEERPIDFD` at accept, pid listed in the Core unit's `cgroup.procs`, a failed `SO_PEERPIDFD` refused, the connection closed when the verified process exits) and on `audit/admin/admin.sock` for root only (uid 0 by `SO_PEERCRED`)
 **And** a plugin, an AI process or the Gateway that connects to either socket is refused (test)
 
 **AC2 (FR-31, D114, DC-69)**

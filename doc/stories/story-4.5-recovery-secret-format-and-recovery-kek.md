@@ -5,7 +5,7 @@ story: 5
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-14, FR-7, FR-110, D6, D39]
+implements: [FR-14, FR-7, FR-110, D6, D39, D128, D131]
 ---
 
 # Story 4.5: Recovery secret format and recovery KEK
@@ -44,10 +44,15 @@ So that I can regain my partition when I lose my passkeys and my passphrase.
 **When** the new wrapper is written
 **Then** the previous recovery wrapper is removed in the same transaction, so the old secret no longer unwraps anything
 
+**AC6 (D128, D131)**
+**Given** a recovery KEK derivation that passed the checksum of AC2
+**When** Argon2id runs
+**Then** it goes through the one Argon2id limiter of Story 4.4 AC6, since D128 puts every Argon2id derivation of the Core behind it, and runs on Core-owned memory wiped after use under the key-operation guard (Story 4.4 AC7)
+
 **Dependencies:**
 - Story 4.4 (Argon2id KEK derivation)
 
 **References:**
 - `doc/prd.md` FR-7, FR-14, FR-110
 - `doc/key-management.md` sections 2, 3 and 6
-- `doc/decisions.md` D6, D39
+- `doc/decisions.md` D6, D39, D128, D131

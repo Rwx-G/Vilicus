@@ -5,7 +5,7 @@ story: 3
 status: draft
 author: Rwx-G
 created: 2026-10-16
-implements: [FR-109, UJ-1, UJ-2, UJ-3, SM-3]
+implements: [FR-109, UJ-1, UJ-2, UJ-3, SM-3, E24, D138]
 ---
 
 # Story 14.3: Automated user journeys in the VM
@@ -44,10 +44,17 @@ So that every release proves the installable Core works end to end for a househo
 **When** any journey fails
 **Then** the release is blocked
 
+**AC6 (E24, D138, AD-33)**
+**Given** the bootstrap order of D76, which the virtual-authenticator journey of AC1 cannot show, because Chrome's CDP virtual authenticator lets a ceremony run on a page with a certificate error that Chrome otherwise refuses (Story 1.4, finding 2)
+**When** the negative test of the bootstrap order runs
+**Then** it attempts the ceremony over the temporary certificate from a browser profile without a virtual authenticator and finds it refused, by IP address and by `localhost`
+**And** it asserts the server-side refusal of a `localhost` origin and of an IP origin by the relying party (Story 7.6 AC9), whatever the browser did, since on `localhost` both Chrome and Firefox run the ceremony.
+
 **Dependencies:**
 - Story 14.2 (surface conformance)
 
 **References:**
 - `doc/prd.md` section 2.3 (UJ-1, UJ-2, UJ-3), FR-109, section 6.1, SM-3
 - `doc/architecture-spine.md` AD-33
-- `doc/decisions.md` D102
+- `doc/decisions.md` D76, D102, D138
+- `doc/stories/story-1.4-e24-passkeys-and-pwa-with-each-naming-option.md` (AC2 result, findings 2 and 5)

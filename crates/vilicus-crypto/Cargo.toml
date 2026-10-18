@@ -1,0 +1,22 @@
+[package]
+name = "vilicus-crypto"
+description = "Vilicus key types, wrappers and key derivation, private to the Core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Not inherited from the workspace: unsafe code is allowed in this crate, denied at crate level
+# and allowed per block with a `// SAFETY:` comment (D140; the crate list is in ci/crate_graph.toml).
+# Every other workspace lint is repeated here at its workspace level; ci/check_workspace.py checks it.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[dependencies]
+vilicus-types.workspace = true

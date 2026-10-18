@@ -1,0 +1,5 @@
+[toolchain]
+# doc/architecture-spine.md, Stack. Cargo.toml's workspace rust-version follows this channel.
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

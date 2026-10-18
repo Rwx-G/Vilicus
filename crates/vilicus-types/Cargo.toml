@@ -10,3 +10,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+# serde with `derive` (and its default `std`): the closed vocabularies cross every socket and the
+# client API by their names, and `deny_unknown_fields` is a derive attribute (spine AD-12).
+[dependencies]
+serde.workspace = true

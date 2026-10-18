@@ -7,3 +7,10 @@
 # change as the dependency that brings the package, which needs owner approval (spine,
 # Consistency Conventions, Dependencies).
 [allowed]
+# serde 1.0.229 with `derive`, for vilicus-types (Story 2.4): the closed vocabularies cross every
+# socket and the client API by name, and `deny_unknown_fields` is a derive attribute.
+serde = "build script runs `rustc --version`, prints cfg flags for older compilers and writes a private re-export module to OUT_DIR; no network, no file outside OUT_DIR"
+serde_core = "build script runs `rustc --version`, prints cfg flags for older compilers and target atomics and writes a private module to OUT_DIR; no network, no file outside OUT_DIR"
+serde_derive = "procedural macro behind serde's `derive` feature: expands #[derive(Serialize, Deserialize)] and #[serde(...)] attributes into impls at compile time"
+proc-macro2 = "dependency of serde_derive; build script runs `rustc --version` and compiles a probe file into OUT_DIR to detect proc_macro_span support, then prints cfg flags"
+quote = "dependency of serde_derive; build script runs `rustc --version` and prints one cfg flag for compilers before 1.78"

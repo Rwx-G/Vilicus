@@ -2,7 +2,7 @@
 title: 'Cargo workspace and crate graph check'
 epic: 2
 story: 1
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [AD-3, AD-33, D1, D29, D140]

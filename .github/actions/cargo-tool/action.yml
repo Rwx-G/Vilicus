@@ -1,0 +1,47 @@
+name: Install a cargo tool
+description: >-
+  Builds one cargo subcommand from its crates.io source with `cargo install --locked` at an exact
+  version, with the toolchain channel of rust-toolchain.toml, and caches the binary by tool,
+  version, channel and runner OS. The build runs outside the repository, so the vendored-source
+  replacement of ci/cargo-vendored.toml never applies to the tool's own dependencies.
+inputs:
+  tool:
+    description: Crate name of the tool, for example cargo-deny.
+    required: true
+  version:
+    description: Exact version of the tool, as doc/architecture-spine.md (Stack) pins it.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Locate the install root
+      id: locate
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        echo "root=${HOME}/.cargo-tools/${TOOL}-${VERSION}" >> "$GITHUB_OUTPUT"
+        channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+        echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+    - name: Restore the cached build
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.locate.outputs.root }}
+        key: cargo-tool-${{ runner.os }}-${{ inputs.tool }}-${{ inputs.version }}-rust-${{ steps.locate.outputs.channel }}
+    - name: Build the tool
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        VERSION: ${{ inputs.version }}
+        ROOT: ${{ steps.locate.outputs.root }}
+        RUSTUP_TOOLCHAIN: ${{ steps.locate.outputs.channel }}
+      working-directory: ${{ runner.temp }}
+      run: cargo install --locked --root "$ROOT" "${TOOL}@${VERSION}"
+    - name: Put the tool on the PATH
+      shell: bash
+      env:
+        ROOT: ${{ steps.locate.outputs.root }}
+      run: echo "${ROOT}/bin" >> "$GITHUB_PATH"

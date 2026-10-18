@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+  workflow_dispatch:
+  # Weekly, so that an advisory published after a merge fails a run without waiting for a change.
+  schedule:
+    - cron: "17 4 * * 1"
 
 permissions:
   contents: read
@@ -16,7 +21,9 @@ env:
   CARGO_TERM_COLOR: always
 
 # Each merge gate of doc/architecture-spine.md AD-33 is its own job, so a gate is added as a job
-# without touching the others. Every job installs the toolchain rust-toolchain.toml names.
+# without touching the others. Every job installs the toolchain rust-toolchain.toml names. Cargo
+# tools come from .github/actions/cargo-tool at the versions of the spine's Stack table, which
+# ci/test_check_supply_chain.py compares with the `with:` blocks below.
 jobs:
   workspace-policy:
     name: Crate graph, manifests and unsafe code (AD-3, D29)
@@ -28,12 +35,16 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup toolchain install
-      - name: Test the workspace checks
+      - name: Test the workspace and supply-chain checks
         run: python3 -m unittest discover -s ci -v
       - name: Run the workspace checks
         run: python3 ci/check_workspace.py
+      - name: Check build scripts, procedural macros and duplicate exceptions (D28)
+        run: python3 ci/check_supply_chain.py
+      - name: Check vendor/ against Cargo.lock (D28)
+        run: python3 ci/check_supply_chain.py --vendor
 
-  # Clippy enforces the `// SAFETY:` comment D140 requires on each unsafe block (AC5).
+  # Clippy enforces the `// SAFETY:` comment D140 requires on each unsafe block (Story 2.1 AC5).
   lint:
     name: Format and lint
     runs-on: ubuntu-24.04
@@ -47,8 +58,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --frozen --config ci/cargo-vendored.toml -- -D warnings
 
+  # --frozen is --locked without the network, and ci/cargo-vendored.toml replaces crates.io by
+  # vendor/: third-party crates can only come from there.
   build-and-test:
     name: Build and test
     runs-on: ubuntu-24.04
@@ -60,6 +73,103 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install
       - name: Build
-        run: cargo build --workspace --locked
+        run: cargo build --workspace --frozen --config ci/cargo-vendored.toml
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --frozen --config ci/cargo-vendored.toml
+
+  deny:
+    name: Licences, duplicates, advisories and sources (cargo deny)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-deny
+          version: 0.20.2
+      - name: cargo deny
+        run: cargo deny --locked check
+
+  # --locked uses supply-chain/imports.lock and fetches no new audit.
+  vet:
+    name: Audited dependencies (cargo vet)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-vet
+          version: 0.10.2
+      - name: cargo vet
+        run: cargo vet --locked
+
+  audit:
+    name: Security advisories (cargo audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-audit
+          version: 0.22.2
+      - name: cargo audit
+        run: cargo audit --deny warnings
+
+  # D61, D120: the RFC 9180 vector, the cross-test and the other checks of the HPKE spike, plus
+  # an advisory gate on its lockfile (gate HPKE-3). The job always runs and ci/must_run.py filters
+  # paths inside it: a workflow-level `paths` filter would leave a required check pending on every
+  # other pull request. Without a change under the watched paths, the steps are skipped and the
+  # job passes; on schedule and workflow_dispatch they always run.
+  hpke-review:
+    name: HPKE spike vectors and cross-test (D61, D120)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Detect a change under the watched paths
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          watched=(spikes/hpke-review .github/workflows/ci.yml .github/actions/cargo-tool ci/must_run.py ci/check_audit_report.py)
+          run="$(python3 ci/must_run.py --event "$EVENT" --base "$BASE" "${watched[@]}")"
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          echo "run the HPKE spike: ${run}"
+      - name: Run the HPKE spike
+        if: steps.changes.outputs.run == 'true'
+        run: bash spikes/hpke-review/run.sh
+      - name: Install the pinned toolchain
+        if: steps.changes.outputs.run == 'true'
+        run: rustup toolchain install
+      - if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-audit
+          version: 0.22.2
+      # `cargo audit --deny warnings` with reasoned exceptions: cargo-audit cannot except a single
+      # yanked crate, so its JSON report is judged by ci/check_audit_report.py, which fails on every
+      # vulnerability and on every warning not listed in spikes/hpke-review/audit-exceptions.toml.
+      # A crashed cargo-audit leaves no JSON, which fails the check.
+      - name: Advisories on the spike lockfile
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          cargo audit --file spikes/hpke-review/Cargo.lock --json > "$RUNNER_TEMP/hpke-audit.json" || true
+          python3 ci/check_audit_report.py spikes/hpke-review/audit-exceptions.toml "$RUNNER_TEMP/hpke-audit.json"

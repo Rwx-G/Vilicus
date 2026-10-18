@@ -1,0 +1,15 @@
+# D28: the workspace builds read third-party crates from vendor/, as `cargo vendor --locked`
+# writes it from Cargo.lock, never from the network. CI passes this file to every workspace cargo
+# command that builds, tests, lints or vendors, as `--config ci/cargo-vendored.toml`; locally, run
+# them the same way. It is not a root .cargo/config.toml, which cargo would also apply to every
+# spike under spikes/. Cargo resolves `directory` against the parent of this file's directory,
+# the repository root, whatever the working directory.
+#
+# ci/check_workspace.py refuses this file if it holds anything else, since any other key could
+# override the workspace lint levels, and ci/check_supply_chain.py --vendor fails when vendor/
+# and Cargo.lock disagree.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

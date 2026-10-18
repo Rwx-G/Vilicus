@@ -1,0 +1,9 @@
+# D28: the packages allowed to run code at build time, through a build script (build.rs) or as a
+# procedural macro. ci/check_supply_chain.py fails naming any package of the dependency tree,
+# workspace members included, that has such a target and is not listed here, and any entry that
+# no such package matches.
+#
+# An entry is `<package name> = "<why its build-time code is accepted>"`. It is added in the same
+# change as the dependency that brings the package, which needs owner approval (spine,
+# Consistency Conventions, Dependencies).
+[allowed]

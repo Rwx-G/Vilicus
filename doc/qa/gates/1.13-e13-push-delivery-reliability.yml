@@ -4,7 +4,7 @@ story_title: 'E13: push delivery reliability'
 gate: CONCERNS
 status_reason: 'The sender, collector, verdict rules and content-free payloads pass on a simulated network, but no E13 measurement exists: the criterion needs each household phone for 7 days on both servers, which has not started, and E13 gates V0.1.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 updated_reason: 'Android emulator run added; gate unchanged: it is a simulation and the household phones were not measured.'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
@@ -29,12 +29,12 @@ top_issues:
     suggested_action: 'Run the 7-day measurement with spikes/push-delivery/RUNBOOK.md on each household phone and both server kinds.'
   - id: 'E13-2'
     severity: medium
-    finding: 'A push server stores the alert body, so a token in the payload is readable by its operator; and the design does not say how phones reach a self-hosted server off the household network (D135 Proposed).'
-    suggested_action: 'Owner decides D135 before Story 8.1.'
+    finding: 'A push server stores the alert body, so a token in the payload is readable by its operator. Settled on 2026-10-18 by D135: no token in the payload, a published endpoint with per-phone read-only tokens or the WireGuard tunnel off the household network.'
+    suggested_action: 'Story 8.1 implements D135; E13 measures both reachability paths on mobile data; settle how the test notification proves receipt (research-notes section 4).'
   - id: 'E13-4'
     severity: low
     finding: 'Emulator run: Doze, standby buckets and reboots did not delay the ntfy app (its foreground service keeps the network; forced buckets revert to active), outages delay by their length and lose nothing, a force-stopped app receives nothing until reopened; the app also logs and stores the message body on the device.'
-    suggested_action: 'Real run: record whether a phone vendor force-stops the app; owner reads story 1.13 proposed update 6 with D135.'
+    suggested_action: 'Real run: record whether a phone vendor force-stops the app; story 1.13 proposed update 6 is covered by D135 (Accepted).'
   - id: 'E13-3'
     severity: medium
     finding: 'A run made only at home would overstate delivery; the acknowledgement path through an automation app is part of the measured delay.'

@@ -4,7 +4,7 @@ story_title: 'Key prototype: AD-36 public-key authentication'
 gate: PASS
 status_reason: 'Every I/O matrix case passes in the Debian 13 container (44 tests, fmt and clippy clean), no key bytes appear in output, and D119 records the construction; the criterion asks for nothing this environment could not run.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
   command: 'bash e2e/run.sh --keep-going'
@@ -20,8 +20,8 @@ top_issues:
     suggested_action: 'Keep the deferred-work entry; design a monotonic counter and a MAC over the record set in the keys and storage epics.'
   - id: 'AD36-2'
     severity: medium
-    finding: 'HPKE base mode authenticates no sender, so a disk writer can seal a chosen HK to a member at first receipt (D121 Proposed, R55, T68).'
-    suggested_action: 'Owner decides D121, including the first-receipt anchor, before FR-8 code.'
+    finding: 'HPKE base mode authenticates no sender, so a disk writer could seal a chosen HK to a member at first receipt; D121 (Accepted 2026-10-18) closes it with a confirmation key wrapped under the new member DEK; a new HK version after a rotation stays open (R55, T68).'
+    suggested_action: 'FR-8 code implements D121; settle the rotation case before FR-9 code.'
   - id: 'AD36-3'
     severity: low
     finding: 'spikes/ad36-key-prototype/.cargo/ is redundant and was the one uncommitted path of the run.'

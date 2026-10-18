@@ -4,7 +4,7 @@ story_title: 'E10: sandbox profile and peer identity'
 gate: PASS
 status_reason: 'On a Debian 13 VM (kernel 6.12.111, systemd 257 as PID 1, AppArmor active) checks.sh passed all 131 checks under the host systemd and the phase passed 146, the same outcomes as the container run, with the late pidfd refused (EINVAL) on 6.12; the only missing evidence was the Debian 13 host, so D125 can be accepted by the owner.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 run:
   commit: '5130fe96fc018337c5e359df305af4fca8642649'
   command: 'E2E_TIMEOUT_SCALE=2 bash e2e/vm/vm.sh e2e sandbox locked-memory egress argon2id core-execution; then checks.sh as root on the guest (story 1.6 manual procedure)'
@@ -19,7 +19,7 @@ top_issues:
   - id: 'E10-1'
     severity: low
     finding: 'Resolved on 2026-10-17: run on a Debian 13 VM (kernel 6.12.111+deb13-cloud-amd64, AppArmor active); LATE_PIDFD late_pidfd=refused(EINVAL), reuse still refused with reason=peer-exited. The VM is the cloud kernel flavour of the 6.12 line, not the generic flavour a physical host runs.'
-    suggested_action: 'Owner sets D125 to Accepted; rerun checks.sh on the reference host once it exists.'
+    suggested_action: 'D125 Accepted on 2026-10-18; rerun checks.sh on the reference host once it exists.'
   - id: 'E10-2'
     severity: medium
     finding: 'AD-24 as written (unit from the cgroup of the pidfd) does not work under ProtectProc=invisible; the method changed to cgroup.procs membership then pidfd liveness.'

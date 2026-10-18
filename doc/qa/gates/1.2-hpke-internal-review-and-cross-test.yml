@@ -4,7 +4,7 @@ story_title: 'HPKE internal review and cross-test'
 gate: CONCERNS
 status_reason: 'Vectors, the 10 000-case two-way cross-test against two hpke-rs providers and the error-path checks pass in the pinned Debian 13 image, but the D107 done state requires them in CI, which does not exist yet, and the review dispositions await the owner.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
   command: 'bash e2e/run.sh --keep-going'
@@ -20,8 +20,8 @@ top_issues:
     suggested_action: 'Add the job with the first CI story (spine AD-33), triggered on changes under spikes/hpke-review/, and link its first green run.'
   - id: 'HPKE-2'
     severity: medium
-    finding: 'REVIEW.md findings are closed or accepted by the author; they become final only when the owner approves them (F12 leads to D121).'
-    suggested_action: 'Owner approves spikes/hpke-review/REVIEW.md before FR-8 code.'
+    finding: 'REVIEW.md findings are closed or accepted by the author; they become final only when the owner approves them. F12 is settled: D121 (Accepted 2026-10-18) confirms the first HK receipt with a confirmation key wrapped under the new member DEK; HK rotation stays open (R55).'
+    suggested_action: 'Owner approves spikes/hpke-review/REVIEW.md before FR-8 code; FR-8 code implements D121.'
   - id: 'HPKE-3'
     severity: low
     finding: 'cargo audit ran on the host only, not in the pinned container.'

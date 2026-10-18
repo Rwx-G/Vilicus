@@ -4,7 +4,7 @@ story_title: 'E24: passkeys and PWA with each naming option'
 gate: CONCERNS
 status_reason: 'The three FR-65 options pass registration, login and Chrome installability on desktop Linux Chrome 155 and 154 and Firefox 158 and 157 with virtual authenticators, and AC2 holds, but Android, Safari, real authenticators and a real public CA were not run, and the two-passkey Firefox case is open.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
   command: 'bash e2e/run.sh --keep-going'
@@ -24,8 +24,8 @@ top_issues:
     suggested_action: 'Test Firefox with a real authenticator and a user with two passkeys.'
   - id: 'E24-3'
     severity: medium
-    finding: 'D137 (overlay addresses and FR-6) and D138 (temporary certificate names IP addresses only) await the owner.'
-    suggested_action: 'Owner decides both before Story 8.3.'
+    finding: 'Settled on 2026-10-18: D137 (100.64.0.0/10 private only on a named overlay interface, DC-78) and D138 (IP-only temporary certificate and a server-side RP ID and origin check, DC-79) are Accepted.'
+    suggested_action: 'Story 8.3 implements both; the AD-33 negative test asserts the server-side refusal of a localhost origin.'
   - id: 'E24-4'
     severity: low
     finding: 'Both test CAs are user-added roots, so public trust and Certificate Transparency are not exercised; installability on Firefox is not measured.'

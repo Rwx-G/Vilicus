@@ -473,6 +473,8 @@ and "Not run here" in each story, which carries the manual procedure.
 
 ## 10. Proposed decision records that need the owner
 
+Settled on 2026-10-18; outcomes in section 17.
+
 | Record | One line | Waits on |
 |---|---|---|
 | D121 | Commit to HK and its version under a DEK-derived key and refuse a different HK at later unlocks; how the first receipt of HK is confirmed stays open | Owner decision before FR-8 code |
@@ -722,3 +724,21 @@ It is labelled `criterion=simulation` and is **not an E13 result**.
 - Not covered: carrier networks, radio power states, vendor battery management, idleness reached
   naturally, 7 days. Gate 1.13 stays CONCERNS; gates after this run are unchanged (5 PASS,
   11 CONCERNS, 1 FAIL).
+
+## 17. Decisions settled (2026-10-18)
+
+The owner delegated the eleven Proposed records to the best technical choice after online research; all are now Accepted in `doc/decisions.md`, with their sources in `doc/research-notes.md` section 1.2.
+
+| Record | Outcome |
+|---|---|
+| D121 | First receipt of HK closed: a confirmation key derived from the enrollment key, wrapped under the new member's DEK, authenticates the first HK; a DEK-keyed commitment covers every later unlock. HK rotation stays open (R55, T68 narrowed to it) |
+| D123 | OPAQUE kept, under a D28 exception: `opaque-ke` `=4.0.1`, WASM built from pinned source and matched byte for byte, RFC 9807 vectors, a WASM-against-Core cross-test, `Ksf` over the Core's `argon2` 0.6, external review before V1 |
+| D125 | Peer identity by `cgroup.procs` then pidfd, accepted after the Debian 13 VM rerun; a failed `SO_PEERPIDFD` refuses, kernel 6.5 or later required, `NoExecPaths=/` and `ExecPaths=/usr` in the template, `io_uring` denied on every unit |
+| D127 | `fts5` virtual tables only, in migrations, under `SQLITE_DBCONFIG_DEFENSIVE` (amends D126), with an argument allowlist and `secure-delete` on |
+| D128, D129, D136 | `argon2` 0.6.0 without `parallel` (no `rayon`), lanes in order on one blocking-pool thread, a FIFO limiter of two derivations, memory at most limit x m <= 1 GiB; m picked on the reference host from {256, 384, 512} MiB; D28 exception with a cross-test over p in {1, 2, 4, 8} and OpenSSL as a second oracle |
+| D134 | SNI check and ECH refusal as built; Host-header fronting accepted as the named risk R54 and T67; front ends that do not refuse a mismatched Host need a stated reason in the allowlist review. Gate 1.12 stays FAIL against its own criterion, with the residual risk accepted |
+| D135 | No token in the push payload; the server keeps alerts for offline phones; off-network reachability by D60's tunnel or a published endpoint with per-phone read-only tokens (the V0.1 path); iOS needs an upstream server, which sees timing (D118 amended) |
+| D137 | 100.64.0.0/10 private only on one overlay interface the operator names, with the Gateway socket bound to it (DC-78) |
+| D138 | IP-only temporary certificate, destroyed after setup; the relying party accepts only the instance name and its origin, so `localhost` and IP ceremonies are refused server side (DC-79) |
+
+New open questions: how a new HK version is confirmed after a rotation (before FR-9 code), and how the enrollment test notification proves receipt without a token in the payload (before Story 8.1). Gate verdicts are unchanged; their top issues now cite the accepted records.

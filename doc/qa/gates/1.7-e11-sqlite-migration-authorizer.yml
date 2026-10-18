@@ -4,7 +4,7 @@ story_title: 'E11: SQLite migration authorizer'
 gate: PASS
 status_reason: 'Every hostile statement is refused in migrations and on read and write connections with nothing written, controls show each would run without the authorizer, and the criterion (all forbidden statements rejected) depends on the SQLCipher build, not on the host.'
 reviewer: 'Claude (autonomous run) with independent review agents'
-updated: '2026-10-17'
+updated: '2026-10-18'
 run:
   commit: '6665c6b798591d42df3e9f3f323ed770303f74cf'
   command: 'bash e2e/run.sh --keep-going'
@@ -20,8 +20,8 @@ top_issues:
     suggested_action: 'Story 3.1 applies the compile-out procedure and a test that the C API is off (D126).'
   - id: 'E11-2'
     severity: medium
-    finding: 'The migration policy refuses every virtual table, so no module can create its FTS5 index (D127 Proposed).'
-    suggested_action: 'Owner decides D127; E15 checks writes to FTS5 shadow tables.'
+    finding: 'The migration policy refused every virtual table, so no module could create its FTS5 index; D127 (Accepted 2026-10-18) allows fts5 only, under SQLITE_DBCONFIG_DEFENSIVE, with an argument allowlist.'
+    suggested_action: 'Rerun the E11 suite with SQLITE_DBCONFIG_DEFENSIVE on; E15 tests that DML on each shadow table is refused and integrity-check passes after a migration.'
   - id: 'E11-3'
     severity: low
     finding: 'The story file records no review triage, so the review findings for this spike cannot be cited.'

@@ -160,7 +160,7 @@ A TPM with PCR binding is recommended, and required, with unified kernel images,
 
 | Key | Trigger | Procedure |
 |-----|---------|-----------|
-| Passphrase | User request, suspected exposure | New Argon2id wrapper, old one deleted; older backups keep the old wrapper, so a change declared as a suspected exposure offers a DEK rotation (D106) |
+| Passphrase | User request, suspected exposure | New Argon2id wrapper, old one deleted; older backups keep the old wrapper, so a change declared as a suspected exposure offers a DEK rotation (D106); any DEK rotation rewrites the DEK-keyed commitment to HK of section 2 in the same transaction (D121) |
 | Passkey | New authenticator, lost authenticator, instance rename | V0.1: register or remove the credential with a step-up, no wrapper involved; after a rename or a restore, or when every passkey is lost, re-enroll with an enrollment token from `vilicus member reenroll` and the member's own passphrase (see D51, D77, section 3). With PRF unlock: add wrapper (unlocked session), delete wrapper of a lost one |
 | Recovery secret | After use, or on request | Generate new, show once, delete old wrapper |
 | Member DEK | Completed recovery; suspected key exposure | Generate new DEK, rekey every member database file, re-wrap the member key pair and inbox key pair, and re-issue or revoke every delegation of that member when delegations exist; heavy, offered as a maintenance task |

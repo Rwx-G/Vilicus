@@ -38,15 +38,14 @@ const BYTES_PER_ITEM: u64 = 256;
 /// round-trip re-encoding (Story 2.5) and the check's own re-encoding.
 const MESSAGE_COPIES: u64 = 4;
 
-/// Resident memory of a fuzzing process before the decode of the input it runs, in MiB: the
+/// Resident memory of a fuzzing process besides the decode of the input it runs, in MiB: the
 /// libFuzzer and AddressSanitizer runtimes, the corpus, and the freed memory a long run keeps
-/// mapped. Story 2.7 measured at most 233 MiB in 10-minute runs of the control targets, whose
-/// decode budget adds 60 under the sanitizer, and 106 at the start of a run (Result).
+/// mapped, which Story 2.7 measured on 10-minute runs of every target (Result).
 const RUNTIME_MIB: u64 = 256;
 
-/// How much more memory a decoded message takes under AddressSanitizer than without it, rounded
-/// up: red zones around every allocation and the shadow memory. Story 2.7 measured the worst
-/// message of each socket kind at 1.9 (control) and 1.3 (data) times its decode budget (Result).
+/// How much more memory a decoded message may take under AddressSanitizer than its decode
+/// budget, rounded up from Story 2.7's measure of the worst message of each socket kind (Result):
+/// red zones around every allocation and the shadow memory.
 const SANITIZER_FACTOR: u64 = 3;
 
 const MIB: u64 = 1 << 20;
@@ -116,8 +115,8 @@ impl Target {
     }
 
     /// The single allocation that fails the run, in MiB: twice the frame maximum, plus one. A
-    /// buffer a decode needs holds one message, with the slack of a growing buffer: `dcbor`'s
-    /// re-encoding of a 16 MiB byte string reserves 20 MiB (Story 2.7, Result). A larger one is
+    /// buffer a decode needs holds one message, with the slack of a growing buffer: decoding a
+    /// 16 MiB byte string makes one 20 MiB allocation (Story 2.7, Result). A larger one is
     /// reserved from what an input declares, or is a vector of items amplifying past the frame:
     /// the decoded array of Story 2.5's review, before the item bound, reserved 8 bytes per item,
     /// 128 MiB for a data frame.

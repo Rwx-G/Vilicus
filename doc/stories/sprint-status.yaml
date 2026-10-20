@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-16-2026 18:30
-last_updated: 10-20-2026 12:00
+last_updated: 10-20-2026 22:00
 project: Vilicus
 project_key: NOKEY
 tracking_system: file-system
@@ -62,7 +62,7 @@ development_status:
   2-4-shared-vocabulary-in-vilicus-types: done
   2-5-wire-framing-and-canonical-encoding-in-vilicus-proto: done
   2-6-vilicus-testbed-binary-and-testing-tree: done
-  2-7-coverage-guided-fuzzing-of-vilicus-proto: ready-for-dev
+  2-7-coverage-guided-fuzzing-of-vilicus-proto: review
   epic-2-retrospective: optional
 
   epic-3: backlog

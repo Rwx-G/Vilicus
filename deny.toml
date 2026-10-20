@@ -52,7 +52,13 @@ allow = [
 confidence-threshold = 0.9
 # The list is a policy, not a record of what the tree uses today.
 unused-allowed-license = "allow"
-exceptions = []
+# An exception allows a licence for one crate only, never for the tree.
+exceptions = [
+    # libfuzzer-sys bundles LLVM's libFuzzer sources under the University of Illinois/NCSA Open
+    # Source License, which the ASF lists in Category A (read on 2026-10-20). Story 2.7: the
+    # fuzzing runtime of vilicus-fuzz, approved by the owner, never in a release artefact.
+    { crate = "libfuzzer-sys@0.4.13", allow = ["NCSA"] },
+]
 
 [licenses.private]
 # Workspace crates are checked too: they declare Apache-2.0 (D29).

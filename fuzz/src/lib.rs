@@ -213,6 +213,21 @@ pub const TARGETS: &[Target] = &[
     },
 ];
 
+/// The public functions of `vilicus-proto` that take bytes or a reader without decoding them,
+/// each with the reason. `tests/coverage.rs` and `ci/check_fuzz_coverage.py` accept no other
+/// byte-taking function without a target, and refuse an entry here that takes no bytes.
+pub const NOT_DECODERS: &[(&str, &str)] = &[
+    ("frame::write_frame", "writes the message bytes it is given"),
+    (
+        "canonical::from_stored",
+        "wraps stored bytes without decoding them",
+    ),
+    (
+        "canonical::matches_hash",
+        "hashes the stored bytes as they are",
+    ),
+];
+
 const FRAME_DECODERS: &[&str] = &[
     "frame::read_frame",
     "frame::read_message",

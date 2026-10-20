@@ -3,7 +3,9 @@
 //! Without arguments, prints one JSON object per target and line: its name, the shape of its
 //! input, its longest input and its memory limits, derived from its socket kind in
 //! `vilicus-proto`. With `seeds <directory>`, writes the seed corpus of every target into
-//! `<directory>/<target>/`, from the committed vectors and failing inputs.
+//! `<directory>/<target>/`, from the committed vectors and failing inputs. With `decoders`,
+//! prints one JSON object: the decoders each target declares and the byte-taking functions that
+//! decode nothing, with their reasons, for `ci/check_fuzz_coverage.py`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -35,9 +37,41 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        [mode] if mode == "decoders" => {
+            let targets: Vec<String> = vilicus_fuzz::TARGETS
+                .iter()
+                .map(|target| {
+                    format!(
+                        "{}: {}",
+                        json_string(target.name),
+                        json_list(target.decoders)
+                    )
+                })
+                .collect();
+            let reasons: Vec<String> = vilicus_fuzz::NOT_DECODERS
+                .iter()
+                .map(|(name, reason)| format!("{}: {}", json_string(name), json_string(reason)))
+                .collect();
+            println!(
+                r#"{{"targets": {{{}}}, "not_decoders": {{{}}}}}"#,
+                targets.join(", "),
+                reasons.join(", ")
+            );
+            ExitCode::SUCCESS
+        }
         _ => {
-            eprintln!("usage: fuzz-plan [seeds <directory>]");
+            eprintln!("usage: fuzz-plan [seeds <directory> | decoders]");
             ExitCode::FAILURE
         }
     }
+}
+
+/// A JSON string, backslashes and quotes escaped: names and reasons hold no control character.
+fn json_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn json_list(items: &[&str]) -> String {
+    let items: Vec<String> = items.iter().map(|item| json_string(item)).collect();
+    format!("[{}]", items.join(", "))
 }

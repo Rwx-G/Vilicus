@@ -10,8 +10,8 @@
 # these edges, except that a `private` node accepts only its direct dependents (D140). A
 # `dev_only` node is reached from a node with an edge to it, or through a dev-dependency from a
 # node that already reaches everything the dev-only node depends on, and never sits in the
-# normal or build closure of a `shipped` node. A `required` node is a crate of Story 2.1 AC1:
-# the check fails when no workspace crate matches it.
+# normal or build closure of a `shipped` node. A `required` node is a crate of Story 2.1 AC1 or
+# Story 2.6 AC1: the check fails when no workspace crate matches it.
 
 [node.types]
 required = true
@@ -83,13 +83,18 @@ crates = ["vilicus"]
 depends_on = ["core", "mods", "gw", "aud", "egr", "ai"]
 shipped = true
 
+# The test doubles are named vilicus-double-<role>, so that a double stays dev-only, like the
+# reference module, wherever its directory is.
 [node.testing]
+required = true
 crates = ["vilicus-mod-reference"]
 paths = ["testing"]
+pattern = "vilicus-double-*"
 depends_on = ["core"]
 dev_only = true
 
 [node.testbed]
+required = true
 crates = ["vilicus-testbed"]
 depends_on = ["core", "testing"]
 
@@ -101,4 +106,4 @@ depends_on = ["core", "testing"]
 # crate to `allowed` needs a decision record first (D140).
 [unsafe_code]
 allowed = ["vilicus-crypto", "vilicus-storage", "vilicus-core", "vilicus-gateway"]
-forbid_attribute = ["vilicus-mod-*", "vilicus-plugin-*"]
+forbid_attribute = ["vilicus-mod-*", "vilicus-plugin-*", "vilicus-double-*"]

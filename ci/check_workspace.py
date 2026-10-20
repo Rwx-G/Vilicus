@@ -3,7 +3,12 @@
 
 - Crate graph (doc/architecture-spine.md AD-3, D140): every edge between workspace crates must be
   allowed by ci/crate_graph.toml, every required node has a crate, and no dev-only crate may sit
-  in the normal or build closure of a shipped crate.
+  in the normal or build closure of a shipped crate. A crate that matches a node by its directory
+  only (a crate under testing/ that is neither listed nor named vilicus-double-*) fails.
+- Shipped sources (FR-109, D102): no crate in the normal or build closure of a shipped crate
+  compiles a file outside its package directory, through a target's source path, a `#[path]`
+  module, an `include!`, `include_str!` or `include_bytes!` (a computed path fails too) or a
+  symbolic link.
 - Dependency sources: a workspace crate takes no path dependency outside the workspace members,
   no git dependency, and no Vilicus-named package other than the workspace member of that name;
   the tree holds no path package other than the members, and the root manifest has no `[patch]`
@@ -16,8 +21,8 @@
 - Unsafe code (D140, Consistency Conventions): the workspace forbids unsafe code and every crate
   inherits its lints, except the crates ci/crate_graph.toml allows, which repeat those lints with
   unsafe code denied and undocumented unsafe blocks denied, and never allow unsafe code for a
-  whole module; module and plugin crates also carry the forbid attribute in each crate root; no
-  Cargo configuration file can change lint levels for the workspace.
+  whole module; module, plugin and test double crates also carry the forbid attribute in each
+  crate root; no Cargo configuration file can change lint levels for the workspace.
 - Vendored sources (D28): ci/cargo-vendored.toml, the configuration CI passes to every workspace
   build with `--config`, exists and holds nothing but the replacement of crates.io by vendor/.
 
@@ -80,6 +85,11 @@ LINE_COMMENT = re.compile(r"//[^\n]*")
 INNER_ATTRIBUTE = re.compile(r"#!\[(.*?)\]", re.DOTALL)
 FORBID_LINTS = re.compile(r"^\s*forbid\s*\(([^)]*)\)\s*$", re.DOTALL)
 ALLOW_OR_EXPECT_LINTS = re.compile(r"\b(?:allow|expect)\s*\(([^)]*)\)")
+# `path = "..."` inside an attribute (`cfg_attr` included), and the `include!` family with its
+# argument when that is a single string literal; group 2 is None for a computed path.
+STRING_LITERAL = r'"(?:[^"\\]|\\.)*"'
+PATH_ATTRIBUTE = re.compile(rf"#!?\[[^\]]*\bpath\s*=\s*({STRING_LITERAL})")
+INCLUDE_MACRO = re.compile(rf"\b(include|include_str|include_bytes)\s*!\s*[(\[{{]\s*(?:({STRING_LITERAL})\s*[)\]}}])?")
 
 
 @dataclass(frozen=True)
@@ -176,6 +186,8 @@ class Crate:
     rust_version: str | None
     publish: list[str] | None
     roots: tuple[Path, ...]
+    # The source file of every target, tests, examples and build script included.
+    targets: tuple[Path, ...]
     dependencies: tuple[Dependency, ...]
 
 
@@ -210,6 +222,7 @@ def load_workspace(metadata: dict) -> list[Crate]:
                     for target in package["targets"]
                     if ROOT_TARGET_KINDS.intersection(target["kind"])
                 ),
+                targets=tuple(Path(target["src_path"]) for target in package["targets"]),
                 dependencies=tuple(
                     Dependency(name=member_dirs[Path(dep["path"])], kind=dep["kind"] or "normal")
                     for dep in package["dependencies"]
@@ -286,6 +299,12 @@ def check_graph(graph: Graph, crates: list[Crate]) -> list[str]:
             )
         else:
             nodes[crate.name] = node
+            if crate.name not in node.crates and not (node.pattern and fnmatch.fnmatchcase(crate.name, node.pattern)):
+                expected = f" or name it {node.pattern}" if node.pattern else ""
+                violations.append(
+                    f"graph: crate {crate.name} ({crate.directory}) matches node {node.id} by its directory only; "
+                    f"list it in {GRAPH_FILE.name}{expected}, so that the checks keyed on names cover it"
+                )
 
     present = {node.id for node in nodes.values()}
     for node in graph.nodes.values():
@@ -315,7 +334,7 @@ def check_graph(graph: Graph, crates: list[Crate]) -> list[str]:
         node = nodes.get(crate.name)
         if node is None or not node.shipped:
             continue
-        for reached, path in _linked_closure(crate, by_name):
+        for reached, path in linked_closure(crate, by_name):
             reached_node = nodes.get(reached)
             if reached_node is not None and reached_node.dev_only:
                 violations.append(
@@ -325,11 +344,64 @@ def check_graph(graph: Graph, crates: list[Crate]) -> list[str]:
     return violations
 
 
+def shipped_closure(graph: Graph, crates: list[Crate]) -> list[Crate]:
+    """Every shipped crate and every workspace crate it links through normal and build edges."""
+    by_name = {crate.name: crate for crate in crates}
+    closure: dict[str, Crate] = {}
+    for crate in crates:
+        node = graph.classify(crate.name, crate.directory)
+        if node is not None and node.shipped:
+            closure[crate.name] = crate
+            closure.update((name, by_name[name]) for name, _ in linked_closure(crate, by_name))
+    return list(closure.values())
+
+
+def _outside(path: Path, directory: Path) -> bool:
+    return not path.resolve().is_relative_to(directory.resolve())
+
+
+def _literal_path(literal: str) -> str:
+    """The text of a Rust string literal holding a path (quotes and escaped backslashes undone)."""
+    return literal[1:-1].replace("\\\\", "\\")
+
+
+def check_shipped_sources(graph: Graph, crates: list[Crate]) -> list[str]:
+    """A crate in the shipped closure compiles only files of its own directory: no target source,
+    `#[path]` module, `include!`-family file or symbolic link outside it, so that it cannot
+    compile testing/ code that the dependency graph keeps out (FR-109, D102). A computed
+    `include!` path cannot be resolved here, so it fails too."""
+    violations = []
+    for crate in shipped_closure(graph, crates):
+        directory = crate.manifest_path.parent
+        for source in crate.targets:
+            if _outside(source, directory):
+                violations.append(f"shipped: a target of {crate.name} compiles {source}, outside its package {directory}")
+        for current, subdirectories, names in os.walk(directory):
+            subdirectories[:] = [name for name in subdirectories if name not in WALK_SKIPPED_DIRECTORIES]
+            for name in [*subdirectories, *names]:
+                path = Path(current) / name
+                if path.is_symlink() and _outside(path, directory):
+                    violations.append(f"shipped: {path} of {crate.name} links to {path.resolve()}, outside its package")
+                if not name.endswith(".rs") or not path.is_file():
+                    continue
+                code = LINE_COMMENT.sub("", BLOCK_COMMENT.sub(" ", path.read_text(encoding="utf-8", errors="replace")))
+                for match in PATH_ATTRIBUTE.finditer(code):
+                    if _outside(path.parent / _literal_path(match.group(1)), directory):
+                        violations.append(f"shipped: {path} of {crate.name} takes a module from {match.group(1)}, outside its package")
+                for match in INCLUDE_MACRO.finditer(code):
+                    macro, literal = match.groups()
+                    if literal is None:
+                        violations.append(f"shipped: {path} of {crate.name} calls {macro}! with a computed path")
+                    elif _outside(path.parent / _literal_path(literal), directory):
+                        violations.append(f"shipped: {path} of {crate.name} calls {macro}!({literal}), outside its package")
+    return violations
+
+
 def _dependents(graph: Graph, target: Node) -> list[str]:
     return sorted(node.id for node in graph.nodes.values() if target.id in node.depends_on)
 
 
-def _linked_closure(root: Crate, by_name: dict[str, Crate]) -> list[tuple[str, list[str]]]:
+def linked_closure(root: Crate, by_name: dict[str, Crate]) -> list[tuple[str, list[str]]]:
     """Workspace crates reached from `root` through normal and build edges, with one path each."""
     reached: list[tuple[str, list[str]]] = []
     seen = {root.name}
@@ -492,6 +564,7 @@ def run_checks(
         *check_sources(metadata),
         *check_root_manifest(root_manifest),
         *check_graph(Graph.from_config(config), crates),
+        *check_shipped_sources(Graph.from_config(config), crates),
         *check_manifests(crates, workspace_root, toolchain_channel, files),
         *check_unsafe(config, root_manifest, crates),
         *check_cargo_config(workspace_root),

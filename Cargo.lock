@@ -110,6 +110,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "vilicus-double-ai"
+version = "0.0.0"
+
+[[package]]
+name = "vilicus-double-channel"
+version = "0.0.0"
+
+[[package]]
+name = "vilicus-double-model-connector"
+version = "0.0.0"
+
+[[package]]
+name = "vilicus-double-plugin"
+version = "0.0.0"
+
+[[package]]
 name = "vilicus-egress"
 version = "0.0.0"
 dependencies = [
@@ -121,6 +137,13 @@ name = "vilicus-gateway"
 version = "0.0.0"
 dependencies = [
  "vilicus-proto",
+]
+
+[[package]]
+name = "vilicus-mod-reference"
+version = "0.0.0"
+dependencies = [
+ "vilicus-module-api",
 ]
 
 [[package]]
@@ -149,6 +172,14 @@ name = "vilicus-storage"
 version = "0.0.0"
 dependencies = [
  "vilicus-types",
+]
+
+[[package]]
+name = "vilicus-testbed"
+version = "0.0.0"
+dependencies = [
+ "vilicus-core",
+ "vilicus-mod-reference",
 ]
 
 [[package]]

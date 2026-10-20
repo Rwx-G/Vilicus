@@ -18,6 +18,7 @@ from pathlib import Path
 
 import check_supply_chain as sc
 import check_workspace as cw
+import fuzz as fz
 import release_gates as rg
 
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
@@ -322,6 +323,18 @@ VM_JOB = (
         "python3 ci/vm_harness.py down",
     ),
 )
+# The fuzz job of Story 2.7, written out by hand like GATE_JOBS: its check name, the dated nightly
+# it alone installs, and its run of ci/fuzz.py. The upload of the failing inputs is the only step
+# that runs once the job has failed, and nothing in the job is allowed to fail.
+FUZZ_JOB = (
+    "fuzz",
+    "Coverage-guided fuzzing of vilicus-proto (D130)",
+    (
+        'rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal',
+        'python3 ci/fuzz.py --toolchain "$FUZZ_TOOLCHAIN" --seconds "$FUZZ_SECONDS" --out "$FUZZ_OUT"',
+    ),
+)
+FUZZ_BUDGET = re.compile(r"FUZZ_SECONDS: \$\{\{ github\.event_name == 'schedule' && '(\d+)' \|\| '(\d+)' \}\}")
 VM_ALWAYS_STEPS = ("ci/vm_harness.py collect", "actions/upload-artifact@", "ci/vm_harness.py down")
 VM_BOOTED_STEPS = ("ci/vm_harness.py smoke", "ci/release_gates.py run ")
 VM_BOOTED_CONDITION = "${{ !cancelled() && steps.up.outcome == 'success' }}"
@@ -397,12 +410,55 @@ class WorkflowAgreementTest(unittest.TestCase):
                 self.assertIn(flag, command)
 
     def test_scripts_pass_the_vendored_configuration_to_cargo(self) -> None:
-        for function in (sc.cargo_metadata, sc.check_vendor, cw.cargo_metadata, rg.cargo_build_commands):
+        for function in (
+            sc.cargo_metadata,
+            sc.check_vendor,
+            cw.cargo_metadata,
+            rg.cargo_build_commands,
+            fz.plan_command,
+            fz.build_command,
+        ):
             with self.subTest(function=f"{function.__module__}.{function.__name__}"):
                 source = inspect.getsource(function)
                 self.assertIn('"--config"', source)
                 self.assertRegex(source, r"VENDORED_CONFIG_FILE")
         self.assertEqual(sc.VENDORED_CONFIG_FILE, cw.VENDORED_CONFIG_FILE.as_posix())
+
+    def test_fuzz_job_runs_every_target_on_a_nightly_pinned_by_date(self) -> None:
+        job_id, name, commands = FUZZ_JOB
+        self.assertIn(job_id, self.jobs)
+        job = self.jobs[job_id]
+        self.assertIn(f"    name: {name}\n", job)
+        lines = command_lines(job)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIn(command, lines)
+        toolchain = re.search(r"(?m)^      FUZZ_TOOLCHAIN: (\S+)$", job)
+        self.assertIsNotNone(toolchain)
+        self.assertRegex(toolchain.group(1), fz.DATED_NIGHTLY)
+        # The nightly is the fuzz job's alone: rust-toolchain.toml stays on stable, and no other
+        # job names the nightly.
+        channel = tomllib.loads((sc.REPO_ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"]
+        self.assertNotIn("nightly", channel)
+        others = "".join(text for other, text in self.jobs.items() if other != job_id)
+        self.assertNotRegex(others, r"nightly-\d|\+nightly|FUZZ_TOOLCHAIN")
+
+    def test_fuzz_job_budget_is_short_on_changes_and_longer_on_the_schedule(self) -> None:
+        budget = FUZZ_BUDGET.search(self.jobs[FUZZ_JOB[0]])
+        self.assertIsNotNone(budget)
+        scheduled, otherwise = (int(seconds) for seconds in budget.groups())
+        self.assertGreater(otherwise, 0)
+        self.assertGreater(scheduled, otherwise)
+
+    def test_fuzz_job_runs_only_its_upload_after_a_failure(self) -> None:
+        steps = self.jobs[FUZZ_JOB[0]].split("\n      - ")[1:]
+        for step in steps:
+            with self.subTest(step=step.splitlines()[0]):
+                conditions = re.findall(r"(?m)^\s+if: (.*)$", step)
+                if "actions/upload-artifact@" in step:
+                    self.assertEqual(conditions, ["failure()"])
+                else:
+                    self.assertEqual(conditions, [])
 
     def test_triggers_include_the_merge_queue_and_the_weekly_run(self) -> None:
         triggers = self.text.split("\non:\n", 1)[1].split("\n\n", 1)[0]

@@ -389,6 +389,90 @@ class PrivateAndShippedTest(WorkspaceTestCase):
                         self.assertTrue(any(f"{target.id} is private to" in v for v in violations))
 
 
+class PathOnlyTest(WorkspaceTestCase):
+    """A crate under a node's directory must also be named by that node, so name-keyed checks see it."""
+
+    def test_crate_matching_a_node_by_directory_only_fails(self) -> None:
+        for node in GRAPH.nodes.values():
+            for path in node.paths:
+                with self.subTest(node=node.id):
+                    self.setUp()
+                    self.full_graph()
+                    self.workspace.add("stray-crate", f"{path}/stray-crate")
+                    self.assert_single(self.workspace.check(), "stray-crate", "by its directory only")
+
+    def test_listed_or_patterned_crate_under_the_directory_passes(self) -> None:
+        for node in GRAPH.nodes.values():
+            for path in node.paths:
+                with self.subTest(node=node.id):
+                    self.setUp()
+                    self.full_graph()
+                    self.assertTrue(node.crates or node.pattern)
+                    if node.pattern:
+                        name = node.pattern.replace("*", "other")
+                        self.workspace.add(name, f"{path}/{name}")
+                    self.assertEqual(self.workspace.check(), [])
+
+
+class ShippedSourcesTest(WorkspaceTestCase):
+    """FR-109: no crate in the shipped closure compiles a file outside its own package."""
+
+    OUTSIDE = '"../../../testing/vilicus-testbed/src/main.rs"'
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.names = self.full_graph()
+        self.shipped = next(self.names[node.id] for node in GRAPH.nodes.values() if node.shipped)
+        # A crate the shipped crate links, and one outside its closure.
+        self.linked = self.names["core"]
+        self.unlinked = next(self.names[node.id] for node in GRAPH.nodes.values() if node.id == "testbed")
+
+    def write(self, crate: str, relative: str, source: str) -> None:
+        path = Path(self.workspace.packages[crate]["manifest_path"]).parent / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+
+    def test_target_compiled_from_outside_the_package_fails(self) -> None:
+        outside = self.workspace.root / "testing" / "vilicus-testbed" / "src" / "main.rs"
+        self.workspace.packages[self.shipped]["targets"].append({"kind": ["bin"], "src_path": str(outside)})
+        self.assert_single(self.workspace.check(), f"a target of {self.shipped} compiles {outside}")
+
+    def test_path_module_or_include_outside_the_package_fails(self) -> None:
+        sources = {
+            "path attribute": f"#[path = {self.OUTSIDE}]\nmod x;\n",
+            "path in cfg_attr": f"#[cfg_attr(unix, path = {self.OUTSIDE})]\nmod x;\n",
+            "absolute path": '#[path = "/etc/x.rs"]\nmod x;\n',
+            "include": f"include!({self.OUTSIDE});\n",
+            "include_str": f"const X: &str = include_str!({self.OUTSIDE});\n",
+            "include_bytes": f"const X: &[u8] = include_bytes![{self.OUTSIDE}];\n",
+            "computed include": 'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testing/x.rs"));\n',
+        }
+        for crate in (self.shipped, self.linked):
+            for label, source in sources.items():
+                with self.subTest(crate=crate, case=label):
+                    self.setUp()
+                    self.write(crate, "src/extra.rs", source)
+                    self.assert_single(self.workspace.check(), f"extra.rs of {crate}")
+
+    def test_paths_inside_the_package_comments_and_unlinked_crates_pass(self) -> None:
+        self.write(
+            self.shipped,
+            "src/extra.rs",
+            '#[path = "other.rs"]\nmod other;\nconst X: &str = include_str!("../data/x.txt");\n'
+            f"// #[path = {self.OUTSIDE}]\n/* include!({self.OUTSIDE}); */\n",
+        )
+        self.write(self.unlinked, "src/extra.rs", f"#[path = {self.OUTSIDE}]\nmod x;\n")
+        self.assertEqual(self.workspace.check(), [])
+
+    def test_symbolic_link_out_of_the_package_fails(self) -> None:
+        link = Path(self.workspace.packages[self.shipped]["manifest_path"]).parent / "src" / "linked"
+        try:
+            link.symlink_to(self.workspace.root / "testing", target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"cannot create a symbolic link here: {error}")
+        self.assert_single(self.workspace.check(), f"{link} of {self.shipped} links to")
+
+
 class SourceTest(WorkspaceTestCase):
     """Dependencies that would carry workspace code in without passing through the graph."""
 

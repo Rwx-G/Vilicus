@@ -2,7 +2,7 @@
 title: 'Shared vocabulary in vilicus-types'
 epic: 2
 story: 4
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-68, AD-6, AD-8, AD-48, D103, D113, FR-27, FR-12]

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import check_supply_chain as sc
 import check_workspace as cw
+import release_gates as rg
 
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 WORKFLOW = sc.REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -261,6 +262,8 @@ GATE_JOBS = {
             "python3 ci/check_workspace.py",
             "python3 ci/check_supply_chain.py",
             "python3 ci/check_supply_chain.py --vendor",
+            "python3 ci/check_packaging.py",
+            "python3 ci/release_gates.py check",
         ),
     ),
     "lint": (
@@ -292,29 +295,31 @@ GATE_JOBS = {
 }
 # The Debian 13 VM job of Story 2.3, written out by hand like GATE_JOBS. It is not a merge gate
 # yet, so it may run its result collection and its teardown under `if: always()`, and the smoke
-# on any booted VM, even after a failed run step, so that the AC3 journals are collected; nothing
-# else is conditional. The check of nested virtualisation comes first, right after the checkout
-# (AC1), and a guest `exit 3` must come back as 3 (AC2).
+# and the release gates of Story 2.6 on any booted VM, even after a failed run step, so that the
+# AC3 journals and the gate logs are collected; nothing else is conditional. The check of nested
+# virtualisation comes first, right after the checkout (AC1), and a guest `exit 3` must come back
+# as 3 (AC2).
 VM_JOB = (
     "vm-smoke",
     "Debian 13 VM smoke test (AD-33)",
     "sudo python3 ci/vm_harness.py check-kvm",
     (
-        "cargo build --package vilicus --frozen --config ci/cargo-vendored.toml",
+        "python3 ci/release_gates.py build",
         "python3 ci/vm_harness.py up",
         "python3 ci/vm_harness.py copy target/debug/vilicus",
         "python3 ci/vm_harness.py run -- 'exit 3' || status=$?",
         'test "$status" -eq 3',
         "python3 ci/vm_harness.py smoke --out \"$VM_RESULTS\"",
+        "python3 ci/release_gates.py run --out \"$VM_RESULTS/release-gates\"",
         "python3 ci/vm_harness.py collect --out \"$VM_RESULTS\"",
         "python3 ci/vm_harness.py down",
     ),
 )
 VM_ALWAYS_STEPS = ("ci/vm_harness.py collect", "actions/upload-artifact@", "ci/vm_harness.py down")
-VM_SMOKE_STEP = "ci/vm_harness.py smoke"
-VM_SMOKE_CONDITION = "${{ !cancelled() && steps.up.outcome == 'success' }}"
+VM_BOOTED_STEPS = ("ci/vm_harness.py smoke", "ci/release_gates.py run ")
+VM_BOOTED_CONDITION = "${{ !cancelled() && steps.up.outcome == 'success' }}"
 # Steps that wait on the guest and so carry their own timeout, below the job's.
-VM_TIMED_STEPS = ("ci/vm_harness.py up", "ci/vm_harness.py run ", VM_SMOKE_STEP)
+VM_TIMED_STEPS = ("ci/vm_harness.py up", "ci/vm_harness.py run ", *VM_BOOTED_STEPS)
 PINNED_ACTION = re.compile(r"uses: (\./\S+|[\w.-]+/[\w.-]+(/[\w./-]+)?@[0-9a-f]{40} # v\d+(\.\d+)*)$")
 # Workspace cargo subcommands that compile or fetch crates; each must read the vendored sources.
 # `cargo fmt` reads no dependency, and the cargo-deny, cargo-vet and cargo-audit runs read
@@ -385,7 +390,7 @@ class WorkflowAgreementTest(unittest.TestCase):
                 self.assertIn(flag, command)
 
     def test_scripts_pass_the_vendored_configuration_to_cargo(self) -> None:
-        for function in (sc.cargo_metadata, sc.check_vendor, cw.cargo_metadata):
+        for function in (sc.cargo_metadata, sc.check_vendor, cw.cargo_metadata, rg.cargo_build_commands):
             with self.subTest(function=f"{function.__module__}.{function.__name__}"):
                 source = inspect.getsource(function)
                 self.assertIn('"--config"', source)
@@ -430,8 +435,8 @@ class WorkflowAgreementTest(unittest.TestCase):
                 conditions = re.findall(r"(?m)^\s+if: (.*)$", step)
                 if any(marker in step for marker in VM_ALWAYS_STEPS):
                     self.assertEqual(conditions, ["always()"])
-                elif VM_SMOKE_STEP in step:
-                    self.assertEqual(conditions, [VM_SMOKE_CONDITION])
+                elif any(marker in step for marker in VM_BOOTED_STEPS):
+                    self.assertEqual(conditions, [VM_BOOTED_CONDITION])
                 else:
                     self.assertEqual(conditions, [])
 

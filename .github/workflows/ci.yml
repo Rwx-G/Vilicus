@@ -43,6 +43,10 @@ jobs:
         run: python3 ci/check_supply_chain.py
       - name: Check vendor/ against Cargo.lock (D28)
         run: python3 ci/check_supply_chain.py --vendor
+      - name: Check that no release artefact carries test code (FR-109, D102)
+        run: python3 ci/check_packaging.py
+      - name: Check that every release gate carries a target tag (FR-109)
+        run: python3 ci/release_gates.py check
 
   # Clippy enforces the `// SAFETY:` comment D140 requires on each unsafe block (Story 2.1 AC5).
   lint:
@@ -176,7 +180,8 @@ jobs:
 
   # Story 2.3 (AD-33): the Debian 13 VM harness of ci/vm/README.md, not yet a required check. It
   # boots the cloud image of e2e/vm/IMAGE.lock with QEMU and KVM, systemd as PID 1, and runs the
-  # built binary, the smoke unit and a privileged systemd container in the guest. The first step
+  # built binary, the smoke unit, a privileged systemd container and the release gates of Story
+  # 2.6 in the guest. The first step
   # after the checkout checks nested virtualisation, as root because QEMU opens /dev/kvm as root
   # in the e2e/vm container. The base image is cached by IMAGE.lock and verified against its
   # SHA512 on every boot, so a stale or altered cache entry fails the boot.
@@ -205,8 +210,10 @@ jobs:
           key: debian-cloud-image-${{ hashFiles('e2e/vm/IMAGE.lock') }}
       - name: Install the pinned toolchain
         run: rustup toolchain install
-      - name: Build the vilicus binary
-        run: cargo build --package vilicus --frozen --config ci/cargo-vendored.toml
+      # One build per artefact of ci/release_gates.py, the shipped vilicus first, then the testbed
+      # (vilicus-testbed and the test doubles), so that they never share a build.
+      - name: Build the package and testbed artefacts
+        run: python3 ci/release_gates.py build
       - name: Boot the Debian 13 VM
         id: up
         timeout-minutes: 20
@@ -233,6 +240,12 @@ jobs:
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}
         timeout-minutes: 15
         run: python3 ci/vm_harness.py smoke --out "$VM_RESULTS"
+      # FR-109: each release gate of ci/release_gates.toml against the artefact its tag names,
+      # package gates before the testbed artefact reaches the guest.
+      - name: Release gates against the package and testbed artefacts (FR-109)
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        timeout-minutes: 15
+        run: python3 ci/release_gates.py run --out "$VM_RESULTS/release-gates"
       - name: Collect the guest facts and console
         if: always()
         run: python3 ci/vm_harness.py collect --out "$VM_RESULTS"

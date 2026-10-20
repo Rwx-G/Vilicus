@@ -22,6 +22,8 @@ cloud-init installing Docker Engine and `systemd-coredump` from the Debian archi
 - `ci/vm/systemd-container/Dockerfile`: a privileged container that boots systemd as PID 1
   inside the guest, the way the E10 and E14 spikes do. `smoke` boots it and asserts that its
   PID 1 is systemd and that `systemd-sysctl.service` is masked.
+- `ci/release_gates.py` and `ci/release_gates.toml`: the release gates of FR-109 and their
+  declarations (Story 2.6), run in this VM; see "Release gates" below.
 
 ## In CI
 
@@ -37,13 +39,15 @@ The `vm-smoke` job of `.github/workflows/ci.yml` runs on every pull request on a
    `e2e/vm/entrypoint.sh` checks it against the SHA512 of `IMAGE.lock` on every boot, and checks
    that Debian's published `SHA512SUMS` still lists that value, so a stale or altered cache entry
    fails the boot instead of being used.
-3. `cargo build --package vilicus`, then `up` (boot, wait for cloud-init, assert that the guest
-   is Debian 13 on x86_64 with systemd as PID 1), `copy` of the binary into `~/artefacts/`, and
-   `run` of the binary in the guest: `run` streams the command's output into the log, then exits
-   with its status. A second step runs `run -- 'exit 3'` and fails unless it returns 3.
+3. `ci/release_gates.py build` (one cargo build for the shipped `vilicus`, then one for the
+   testbed artefact), then `up` (boot, wait for cloud-init, assert that the guest is Debian 13
+   on x86_64 with systemd as PID 1), `copy` of the binary into `~/artefacts/`, and `run` of the
+   binary in the guest: `run` streams the command's output into the log, then exits with its
+   status. A second step runs `run -- 'exit 3'` and fails unless it returns 3.
 4. `smoke`: the smoke unit, then the privileged systemd container. It runs whenever `up`
    succeeded, even after a failed `run` step, so its journals are still collected.
-5. `collect` (guest facts from `vm.sh info`, and the guest console), the upload of everything
+5. `ci/release_gates.py run`, on any booted VM like the smoke (see Release gates below).
+6. `collect` (guest facts from `vm.sh info`, and the guest console), the upload of everything
    under `vm-results/` as the `vm-smoke-results` artefact, and `down`, each under `always()`.
 
 ### kernel.core_pattern guard
@@ -63,8 +67,30 @@ failure, `bash e2e/vm/vm.sh ssh 'sudo systemctl restart systemd-sysctl'` restore
 ### Results artefact
 
 `vm-smoke-results` holds `vilicus-run.log`, `smoke-unit-journal.txt`, `smoke-unit-status.txt`,
-`systemd-container-journal.txt`, `vm-info.txt` and `console.log`. The job log holds the `PASS`
-and `FAIL` lines.
+`systemd-container-journal.txt`, `vm-info.txt`, `console.log` and one log per release gate under
+`release-gates/`. The job log holds the `PASS` and `FAIL` lines.
+
+## Release gates
+
+Each gate of `ci/release_gates.toml` carries a target tag (FR-109, D102): `testbed` for a gate
+that needs a module or a test double, `package` for every other gate. The file's header says how
+a gate is declared. `ci/release_gates.py check`, in the `workspace-policy` job, fails on a gate
+without a tag, with another tag or with an unknown key, and `run` refuses the same declarations
+before it touches the guest.
+
+`run` empties `~/release-gates/` in the guest, then for each target, package first: it copies the
+target's artefact into `~/release-gates/<target>/` and runs each of its gates from there,
+under GNU `timeout` (the gate's `timeout`, a default otherwise; a timed-out gate fails and the
+next gates still run), between two reads of `kernel.core_pattern`, writing `<gate>.log` under
+its `--out` directory. The
+package artefact is the executables of `ci/release_artefacts.toml`; the testbed artefact is every
+executable of a never-packaged crate (`vilicus-testbed` and the test doubles). The testbed
+artefact reaches the guest only after the last package gate. Until the Debian package exists
+(Story 5.7), the package artefact is the cargo-built executable, not the `.deb`.
+
+Locally, after `up`: `python3 ci/release_gates.py build` (or a build in the pinned Rust image,
+then `--artefact-dir` pointing at its output) and
+`python3 ci/release_gates.py run --out vm-results/release-gates`.
 
 ## Locally
 

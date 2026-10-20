@@ -1,0 +1,16 @@
+[package]
+name = "vilicus-testbed"
+description = "Vilicus testbed: the never-packaged executable release gates needing a module or a test double run against"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vilicus-core.workspace = true
+vilicus-mod-reference.workspace = true

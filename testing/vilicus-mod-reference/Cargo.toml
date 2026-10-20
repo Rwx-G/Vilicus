@@ -1,0 +1,15 @@
+[package]
+name = "vilicus-mod-reference"
+description = "Vilicus reference module: exercises the module contract in tests, never packaged"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vilicus-module-api.workspace = true

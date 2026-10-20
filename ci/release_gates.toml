@@ -1,0 +1,30 @@
+# The release gates of doc/prd.md FR-109, declared for ci/release_gates.py, which runs them in the
+# Debian 13 VM of ci/vm/README.md.
+#
+# Each [gate.<name>] is one gate, named in lower case with digits and hyphens:
+#   target   the artefact the gate runs against: `testbed` for a gate that needs a module or a
+#            test double (vilicus-testbed and the test doubles, never packaged), `package` for
+#            every other gate (the shipped artefacts of ci/release_artefacts.toml)
+#   checks   what the gate establishes, one sentence
+#   command  one shell string, run by bash in the guest from the directory that holds its
+#            target's artefact; the gate passes on status 0
+#   timeout  optional, whole seconds the command may run (DEFAULT_GATE_TIMEOUT of
+#            ci/release_gates.py otherwise); a gate that runs longer fails, and later gates run
+#
+# A gate without a target, with another target or with any other key fails the runner before any
+# gate runs. Package gates run before the testbed artefact is copied into the guest.
+
+[gate.package-executables-start]
+target = "package"
+checks = "every shipped executable starts on Debian 13 and exits 0"
+command = 'for executable in ./*; do "$executable" || exit 1; echo "$executable exited 0"; done'
+
+[gate.package-sees-no-testbed-artefact]
+target = "package"
+checks = "package gates run in a guest that holds no testbed artefact"
+command = 'test ! -e ../testbed'
+
+[gate.testbed-executables-start]
+target = "testbed"
+checks = "vilicus-testbed and every test double start on Debian 13 and exit 0, each as its own executable"
+command = 'for executable in ./*; do "$executable" || exit 1; echo "$executable exited 0"; done'

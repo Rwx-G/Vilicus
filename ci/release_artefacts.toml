@@ -1,0 +1,20 @@
+# The release artefacts of doc/prd.md FR-109 and D102, read by ci/check_packaging.py and
+# ci/release_gates.py.
+#
+# `never_packaged` names the nodes of ci/crate_graph.toml whose crates never reach a release
+# artefact: the testing/ tree (the reference module and the test doubles) and vilicus-testbed.
+# ci/test_check_packaging.py fails unless they are the nodes the AD-3 flowchart labels "dev only"
+# or "never packaged". The executables those crates build make up the testbed artefact, which
+# the `testbed` release gates of ci/release_gates.toml run against.
+never_packaged = ["testing", "testbed"]
+
+# Each [artefact.<name>] is a file a release ships that cargo builds: the bin target `binary` of
+# the workspace package `package`. The `package` release gates run against these files, and
+# ci/check_packaging.py fails when one of them is built from, or links, a never-packaged crate.
+#
+# There is no Debian package yet (Epic 5, Story 5.7), so the shipped artefact is the `vilicus`
+# executable. When the package exists, its cargo-deb assets must name exactly these binaries, and
+# its file listing goes through `ci/check_packaging.py --contents`.
+[artefact.vilicus]
+package = "vilicus"
+binary = "vilicus"

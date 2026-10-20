@@ -1,0 +1,24 @@
+[package]
+name = "vilicus-fuzz"
+description = "Coverage-guided fuzz targets of vilicus-proto and their stable regression replay; never a dependency of another crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vilicus-types.workspace = true
+vilicus-proto.workspace = true
+dcbor.workspace = true
+libfuzzer-sys = { workspace = true, optional = true }
+
+# `libfuzzer` links the libFuzzer runtime into each target of src/bin/, which then fuzzes; only
+# the `fuzz` job of .github/workflows/ci.yml enables it, through ci/fuzz.py, on the nightly
+# toolchain that job pins. Without it, each target replays the files it is given, on stable.
+[features]
+libfuzzer = ["dep:libfuzzer-sys"]

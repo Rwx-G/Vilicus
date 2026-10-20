@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "testing/*"]
+members = ["crates/*", "testing/*", "fuzz"]
 # Each spike is a standalone package with its own lockfile and never joins the workspace.
 exclude = ["spikes"]
 
@@ -48,3 +48,7 @@ unicode-normalization = { version = "=0.1.25", default-features = false }
 # vilicus-crypto (AD-3).
 serde_json = "=1.0.154"
 aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys"] }
+# The libFuzzer runtime of the fuzz targets in fuzz/ (Story 2.7, owner approval), behind that crate's
+# optional `libfuzzer` feature, which only the nightly `fuzz` job enables: the stable builds never
+# compile it, and Cargo.lock, vendor/ and the supply-chain gates still cover it.
+libfuzzer-sys = "=0.4.13"

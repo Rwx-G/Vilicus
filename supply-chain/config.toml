@@ -19,10 +19,19 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
+[policy.vilicus-fuzz]
+criteria = "safe-to-run"
+notes = "Story 2.7: the fuzz targets of vilicus-proto, run in the fuzz job and replayed in build-and-test. Never in a release artefact, and no crate depends on it (ci/crate_graph.toml, [isolated.fuzz]), so its dependencies need to be safe to run, not to deploy."
+
 [[exemptions.android_system_properties]]
 version = "0.1.6"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by iana-time-zone. cargo vet suggests `cargo vet diff android_system_properties 0.1.5 0.1.6` (3 files changed, 38 insertions(+), 10 deletions(-))."
+
+[[exemptions.arbitrary]]
+version = "1.5.0"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.7), exempted at this exact version only. Fuzzing tree of vilicus-fuzz (owner approval), never in a release artefact; required by libfuzzer-sys. cargo vet suggests `cargo vet diff arbitrary 1.4.2 1.5.0` (12 files changed, 101 insertions(+), 94 deletions(-))."
 
 [[exemptions.autocfg]]
 version = "1.5.1"
@@ -118,6 +127,11 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 version = "0.2.191"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cc, getrandom, jobserver, and 1 other. cargo vet suggests `cargo vet inspect libc 0.2.191` (135905 lines)."
+
+[[exemptions.libfuzzer-sys]]
+version = "0.4.13"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.7), exempted at this exact version only. Fuzzing tree of vilicus-fuzz (owner approval), never in a release artefact; its build script compiles the bundled libFuzzer C++ sources with cc; required by vilicus-fuzz. cargo vet suggests `cargo vet diff libfuzzer-sys 0.4.7 0.4.13` (39 files changed, 728 insertions(+), 657 deletions(-))."
 
 [[exemptions.log]]
 version = "0.4.34"

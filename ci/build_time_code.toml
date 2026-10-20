@@ -39,3 +39,6 @@ serde_json = "dev-dependency of vilicus-proto, reads and writes the E19 vector f
 zmij = "dependency of serde_json; build script runs `rustc --version` and prints cfg flags; no network, no file written"
 aws-lc-rs = "dev-dependency of vilicus-proto, SHA-256 of the E19 vector files (spine Stack, the version rustls 0.23.46 pulls); build script reads its features and target and prints cfg flags; no network, no file written"
 aws-lc-sys = "dependency of aws-lc-rs; build script compiles the bundled AWS-LC C and assembly sources with cc into OUT_DIR and links them, with pregenerated bindings (no bindgen) and no cmake on Linux. It would link a system AWS-LC instead if one is found or AWS_LC_SYS_SYSTEM_DIR is set; none is in the pinned rust:1.99-trixie image (Story 2.5); no network"
+# The fuzzing runtime of vilicus-fuzz (Story 2.7, owner approval), behind its `libfuzzer` feature,
+# which only the nightly `fuzz` job enables. Never in a release artefact.
+libfuzzer-sys = "fuzzing runtime of vilicus-fuzz; with its default `link_libfuzzer` feature, the build script compiles the bundled libFuzzer C++ sources (libfuzzer/*.cpp) with cc as C++17 into OUT_DIR and links them statically, or links the library CUSTOM_LIBFUZZER_PATH names when set (the fuzz job never sets it); no network"

@@ -7,7 +7,9 @@
   only (a crate under testing/ that is neither listed nor named vilicus-double-*) fails. A crate
   of an `[isolated.*]` table of ci/crate_graph.toml (the fuzz targets, Story 2.7) is outside the
   graph: no workspace crate may depend on it by any kind of edge, and it may depend only on what
-  its table's nodes reach.
+  its table's nodes reach. The table's `exclusive_dependencies` (the fuzzing crates) are reached
+  by its crates alone: any other workspace crate that depends on one, directly by any kind of
+  dependency or through registry crates, fails.
 - Shipped sources (FR-109, D102): no crate in the normal or build closure of a shipped crate
   compiles a file outside its package directory, through a target's source path, a `#[path]`
   module, an `include!`, `include_str!` or `include_bytes!` (a computed path fails too) or a
@@ -116,6 +118,7 @@ class Isolated:
     crates: tuple[str, ...]
     paths: tuple[str, ...]
     depends_on: tuple[str, ...]
+    exclusive_dependencies: tuple[str, ...] = ()
 
 
 class Graph:
@@ -153,6 +156,7 @@ class Graph:
                 crates=tuple(table.get("crates", ())),
                 paths=tuple(PurePosixPath(p).as_posix() for p in table.get("paths", ())),
                 depends_on=tuple(table.get("depends_on", ())),
+                exclusive_dependencies=tuple(table.get("exclusive_dependencies", ())),
             )
             for table_id, table in config.get("isolated", {}).items()
         }
@@ -625,6 +629,49 @@ def check_vendored_config(workspace_root: Path) -> list[str]:
     return []
 
 
+def check_exclusive_dependencies(graph: Graph, metadata: dict) -> list[str]:
+    """A package an isolated table keeps for its crates is reached by no other workspace crate:
+    not as a dependency of any kind it declares, nor through the registry packages it resolves
+    (another member's own tree is that member's to answer for)."""
+    owners = {name: table for table in graph.isolated.values() for name in table.exclusive_dependencies}
+    if not owners:
+        return []
+    members = _members(metadata)
+    member_ids = {package["id"] for package in members}
+    packages = _packages_by_id(metadata)
+    resolved = {node["id"]: [dep["pkg"] for dep in node["deps"]] for node in (metadata.get("resolve") or {}).get("nodes", [])}
+    violations = []
+    for package in members:
+        allowed = {name for name, table in owners.items() if package["name"] in table.crates}
+        direct = set()
+        for dep in package["dependencies"]:
+            if dep["name"] in owners and dep["name"] not in allowed:
+                direct.add(dep["name"])
+                violations.append(
+                    f"isolated: {package['name']} -> {dep['name']} ({dep['kind'] or 'normal'} dependency); only "
+                    f"{', '.join(owners[dep['name']].crates)} of [isolated.{owners[dep['name']].id}] may depend on it"
+                )
+        seen: set[str] = set()
+        queue = deque((dep, [package["name"]]) for dep in resolved.get(package["id"], []) if dep not in member_ids)
+        while queue:
+            package_id, path = queue.popleft()
+            if package_id in seen or package_id not in packages:
+                continue
+            seen.add(package_id)
+            name = packages[package_id]["name"]
+            if name in owners and name not in allowed and name not in direct:
+                violations.append(
+                    f"isolated: {package['name']} reaches {name} ({' -> '.join([*path, name])}); only "
+                    f"{', '.join(owners[name].crates)} of [isolated.{owners[name].id}] may depend on it"
+                )
+            queue.extend((dep, [*path, name]) for dep in resolved.get(package_id, []) if dep not in member_ids)
+    return violations
+
+
+def _packages_by_id(metadata: dict) -> dict[str, dict]:
+    return {package["id"]: package for package in metadata["packages"]}
+
+
 def run_checks(
     metadata: dict, config: dict, root_manifest: dict, toolchain_channel: str, files: Iterable[Path]
 ) -> list[str]:
@@ -635,6 +682,7 @@ def run_checks(
         *check_root_manifest(root_manifest),
         *check_graph(Graph.from_config(config), crates),
         *check_shipped_sources(Graph.from_config(config), crates),
+        *check_exclusive_dependencies(Graph.from_config(config), metadata),
         *check_manifests(crates, workspace_root, toolchain_channel, files),
         *check_unsafe(config, root_manifest, crates),
         *check_cargo_config(workspace_root),

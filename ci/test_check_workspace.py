@@ -513,6 +513,63 @@ class IsolatedTest(WorkspaceTestCase):
                     cw.Graph.from_config(config)
 
 
+class ExclusiveDependencyTest(WorkspaceTestCase):
+    """Story 2.7: the fuzzing crates are dependencies of the fuzz crate alone."""
+
+    REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
+
+    def table(self) -> cw.Isolated:
+        tables = [table for table in GRAPH.isolated.values() if table.exclusive_dependencies]
+        self.assertTrue(tables)
+        return tables[0]
+
+    def depend_on_registry(self, source: str, name: str, kind: str) -> None:
+        self.workspace.declare(source, {"name": name, "kind": None if kind == "normal" else kind, "source": self.REGISTRY})
+        self.workspace.resolve_outside(source, name, f"{self.REGISTRY}#{name}@1.0.0")
+
+    def test_the_owning_crate_may_depend_on_its_exclusive_packages(self) -> None:
+        table = self.table()
+        names = self.full_graph()
+        self.workspace.add(table.crates[0], table.paths[0])
+        self.workspace.depend(table.crates[0], names[table.depends_on[0]])
+        for name in table.exclusive_dependencies:
+            self.depend_on_registry(table.crates[0], name, "normal")
+        self.assertEqual(self.workspace.check(), [])
+
+    def test_any_other_crate_depending_on_one_fails_for_every_kind(self) -> None:
+        table = self.table()
+        for name in table.exclusive_dependencies:
+            for node in GRAPH.nodes.values():
+                for kind in ("normal", "build", "dev"):
+                    with self.subTest(package=name, node=node.id, kind=kind):
+                        self.setUp()
+                        names = self.full_graph()
+                        self.depend_on_registry(names[node.id], name, kind)
+                        self.assert_single(
+                            self.workspace.check(),
+                            f"isolated: {names[node.id]} -> {name} ({kind} dependency); only {table.crates[0]}",
+                        )
+
+    def test_reaching_one_through_a_registry_crate_fails(self) -> None:
+        table = self.table()
+        names = self.full_graph()
+        source = names["core"]
+        helper = f"{self.REGISTRY}#fuzz-helper@1.0.0"
+        exclusive = f"{self.REGISTRY}#{table.exclusive_dependencies[0]}@1.0.0"
+        self.depend_on_registry(source, "fuzz-helper", "normal")
+        metadata = self.workspace.metadata()
+        metadata["packages"].append({"id": exclusive, "name": table.exclusive_dependencies[0], "version": "1.0.0"})
+        metadata["resolve"]["nodes"].append({"id": helper, "deps": [{"pkg": exclusive}]})
+        violations = cw.check_exclusive_dependencies(GRAPH, metadata)
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn(f"isolated: {source} reaches {table.exclusive_dependencies[0]} ({source} -> fuzz-helper -> ", violations[0])
+
+    def test_the_repository_keeps_the_fuzzing_crates_for_the_fuzz_targets(self) -> None:
+        # Written out on purpose: the packages of Story 2.7 and the crate that alone may use them.
+        table = GRAPH.classify_isolated("vilicus-fuzz", "fuzz")
+        self.assertEqual(set(table.exclusive_dependencies), {"libfuzzer-sys", "arbitrary"})
+
+
 class ShippedSourcesTest(WorkspaceTestCase):
     """FR-109: no crate in the shipped closure compiles a file outside its own package."""
 

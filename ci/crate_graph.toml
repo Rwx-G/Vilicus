@@ -102,13 +102,17 @@ depends_on = ["core", "testing"]
 # (normal, build or dev). An `[isolated.<id>]` table matches crates by exact name (`crates`) or
 # manifest directory (`paths`), tried before the nodes, and `depends_on` lists the nodes its
 # crates may depend on, with what those nodes reach, except a `private` node it does not list. It
-# is not a node: nothing reaches it, and the AD-3 flowchart does not show it.
+# is not a node: nothing reaches it, and the AD-3 flowchart does not show it. The packages in
+# `exclusive_dependencies` are reached by the table's crates alone: no other workspace crate may
+# depend on one, by any kind of dependency, directly or through registry crates.
 #
 # Story 2.7, AC5: the fuzz targets of vilicus-proto, never a dependency of a shipped crate.
 [isolated.fuzz]
 crates = ["vilicus-fuzz"]
 paths = ["fuzz"]
 depends_on = ["proto"]
+# The fuzzing runtime and its dependency (owner approval, Story 2.7), never in a shipped crate.
+exclusive_dependencies = ["libfuzzer-sys", "arbitrary"]
 
 # D140 and the spine's Consistency Conventions, Unsafe code. The crates in `allowed` are the
 # only ones where unsafe code may appear: each denies unsafe_code at crate level and denies

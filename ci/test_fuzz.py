@@ -16,16 +16,17 @@ from unittest import mock
 import check_workspace as cw
 import fuzz as fz
 
-PLAN = fz.Plan(name="frame_data", input="frames", max_len=16777220, malloc_limit_mb=128, rss_limit_mb=512)
+# Limits no real plan has, so that a test cannot pass by matching the real numbers by chance.
+PLAN = fz.Plan(name="frame_data", input="frames", max_len=1111, malloc_limit_mb=7, rss_limit_mb=99)
 NIGHTLY = "nightly-2026-10-01"
 
 
 class CommandTest(unittest.TestCase):
     def test_plan_lines_are_read_into_plans(self) -> None:
         output = (
-            '{"name": "frame_data", "input": "frames", "max_len": 16777220, "malloc_limit_mb": 128, "rss_limit_mb": 512}\n'
+            '{"name": "frame_data", "input": "frames", "max_len": 1111, "malloc_limit_mb": 7, "rss_limit_mb": 99}\n'
             "\n"
-            '{"name": "profile", "input": "message", "max_len": 1048580, "malloc_limit_mb": 20, "rss_limit_mb": 188}\n'
+            '{"name": "profile", "input": "message", "max_len": 2222, "malloc_limit_mb": 3, "rss_limit_mb": 44}\n'
         )
         plans = fz.parse_plan(output)
         self.assertEqual([plan.name for plan in plans], ["frame_data", "profile"])
@@ -64,10 +65,11 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(command[0], str(fz.binary("frame_data")))
         for argument in (
             "-max_total_time=60",
-            "-max_len=16777220",
-            "-rss_limit_mb=512",
-            "-malloc_limit_mb=128",
+            "-max_len=1111",
+            "-rss_limit_mb=99",
+            "-malloc_limit_mb=7",
             f"-timeout={fz.TIMEOUT_SECONDS}",
+            "-detect_leaks=1",
             "-artifact_prefix=/out/artifacts/frame_data/",
         ):
             with self.subTest(argument=argument):
@@ -108,7 +110,10 @@ class ReportTest(unittest.TestCase):
         with mock.patch.object(fz.subprocess, "run", side_effect=minimize) as run:
             lines = "\n".join(fz.report_findings(PLAN, self.artifacts, {}))
         self.assertEqual(run.call_count, 1)
-        self.assertIn("-minimize_crash=1", run.call_args.args[0])
+        minimize = run.call_args.args[0]
+        for argument in ("-minimize_crash=1", f"-max_total_time={fz.MINIMIZE_SECONDS}", "-detect_leaks=1", "-malloc_limit_mb=7"):
+            with self.subTest(argument=argument):
+                self.assertIn(argument, minimize)
         self.assertIn("failing input crash-1", lines)
         self.assertIn("minimized minimized-crash-1: 1 bytes", lines)
         self.assertIn("commit minimized-crash-1 as crates/vilicus-proto/tests/data/fuzz/frame_data/", lines)

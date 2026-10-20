@@ -50,8 +50,14 @@ DATED_NIGHTLY = re.compile(r"^nightly-\d{4}-\d{2}-\d{2}$")
 # A decode of the largest data frame takes well under a second; an input that takes this long
 # loops.
 TIMEOUT_SECONDS = 60
-# Minimization runs this many attempts at most, which stays within a minute per input.
+# Minimization stops at this many attempts or after this many seconds, whichever comes first,
+# so that the job's timeout covers it (WorkflowAgreementTest adds it to the fuzzing budget).
 MINIMIZE_RUNS = 20_000
+MINIMIZE_SECONDS = 120
+# libFuzzer installs its allocation hooks, which enforce -malloc_limit_mb, only when it detects
+# leaks (FuzzerLoop.cpp, Fuzzer::Fuzzer): its default is on, and the flag keeps the allocation
+# limit from depending on that default. Leak reports themselves stay off (ASAN_OPTIONS).
+DETECT_LEAKS = "-detect_leaks=1"
 # The files libFuzzer writes for a failing input; it also keeps slow inputs, which are not failures.
 FINDING_PREFIXES = ("crash-", "oom-", "timeout-", "leak-")
 MINIMIZED_PREFIXES = ("crash-", "timeout-")
@@ -146,6 +152,7 @@ def fuzz_command(plan: Plan, seconds: int, corpus: Path, artifacts: Path) -> lis
         f"-rss_limit_mb={plan.rss_limit_mb}",
         f"-malloc_limit_mb={plan.malloc_limit_mb}",
         f"-timeout={TIMEOUT_SECONDS}",
+        DETECT_LEAKS,
         f"-artifact_prefix={artifacts}/",
         "-print_final_stats=1",
         str(corpus),
@@ -157,10 +164,12 @@ def minimize_command(plan: Plan, artifact: Path, minimized: Path) -> list[str]:
         str(binary(plan.name)),
         "-minimize_crash=1",
         f"-runs={MINIMIZE_RUNS}",
+        f"-max_total_time={MINIMIZE_SECONDS}",
         f"-max_len={plan.max_len}",
         f"-rss_limit_mb={plan.rss_limit_mb}",
         f"-malloc_limit_mb={plan.malloc_limit_mb}",
         f"-timeout={TIMEOUT_SECONDS}",
+        DETECT_LEAKS,
         f"-exact_artifact_path={minimized}",
         str(artifact),
     ]

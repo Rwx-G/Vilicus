@@ -159,14 +159,19 @@ jobs:
           persist-credentials: false
       - name: Install the pinned nightly
         run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+      # AC1 from the compiler's view of the public API (rustdoc JSON, nightly only), after the
+      # source scan of fuzz/tests/coverage.rs that build-and-test runs on stable.
+      - name: Check that every public decoder has a fuzz target
+        run: python3 ci/check_fuzz_coverage.py --toolchain "$FUZZ_TOOLCHAIN"
       # 60 seconds per target on pull requests, pushes, the merge queue and manual runs; 20
       # minutes per target on the weekly schedule.
       - name: Fuzz every target
         env:
           FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1200' || '60' }}
         run: python3 ci/fuzz.py --toolchain "$FUZZ_TOOLCHAIN" --seconds "$FUZZ_SECONDS" --out "$FUZZ_OUT"
+      # Also on a cancelled run, a job timeout included, so that a finding is never lost.
       - name: Upload the failing inputs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-findings

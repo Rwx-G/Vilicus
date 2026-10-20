@@ -46,6 +46,7 @@ Maintainers build, check and test every crate under the gates that block a merge
 4. [Story 2.4: Shared vocabulary in vilicus-types](stories/story-2.4-shared-vocabulary-in-vilicus-types.md)
 5. [Story 2.5: Wire framing and canonical encoding in vilicus-proto](stories/story-2.5-wire-framing-and-canonical-encoding-in-vilicus-proto.md)
 6. [Story 2.6: vilicus-testbed binary and testing tree](stories/story-2.6-vilicus-testbed-binary-and-testing-tree.md)
+7. [Story 2.7: Coverage-guided fuzzing of vilicus-proto](stories/story-2.7-coverage-guided-fuzzing-of-vilicus-proto.md)
 
 ### Epic 3: Encrypted storage and the module platform
 
@@ -323,7 +324,7 @@ Every V0.1 functional requirement and every V0.1 release-gate invariant maps to 
 | E14 | [1.12](stories/story-1.12-e14-egress-proxy-domain-filtering.md), [5.5](stories/story-5.5-egress-proxy-with-per-caller-allowlists.md) |
 | E16 | [1.10](stories/story-1.10-e16-locked-memory-and-zeroization.md), [4.2](stories/story-4.2-locked-memory-and-key-hygiene.md), [13.5](stories/story-13.5-operator-documentation.md) |
 | E17 | [1.11](stories/story-1.11-e17-secure-delete-and-wal-behaviour.md), [3.6](stories/story-3.6-core-journal-tables-and-caller-idempotency.md) |
-| E19 | [1.9](stories/story-1.9-e19-canonical-cbor-in-rust-and-typescript.md), [2.5](stories/story-2.5-wire-framing-and-canonical-encoding-in-vilicus-proto.md) |
+| E19 | [1.9](stories/story-1.9-e19-canonical-cbor-in-rust-and-typescript.md), [2.5](stories/story-2.5-wire-framing-and-canonical-encoding-in-vilicus-proto.md), [2.7](stories/story-2.7-coverage-guided-fuzzing-of-vilicus-proto.md) |
 | E22 | [1.3](stories/story-1.3-e22-browser-device-key-pake-and-signed-confirmations.md), [7.7](stories/story-7.7-device-key-signed-requests-and-session-hardening.md), [9.7](stories/story-9.7-pair-further-browsers.md), [10.6](stories/story-10.6-elevated-tier-1-queue-and-light-confirmation.md) |
 | E24 | [1.4](stories/story-1.4-e24-passkeys-and-pwa-with-each-naming-option.md), [7.6](stories/story-7.6-passkey-authentication-and-action-bound-step-up.md), [8.3](stories/story-8.3-instance-name-and-certificate-setup.md), [13.5](stories/story-13.5-operator-documentation.md) |
 | E26 | [1.14](stories/story-1.14-e26-separate-origin-by-port-for-external-content.md), [7.5](stories/story-7.5-external-content-on-a-separate-origin.md) |

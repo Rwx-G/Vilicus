@@ -331,9 +331,17 @@ FUZZ_JOB = (
     "Coverage-guided fuzzing of vilicus-proto (D130)",
     (
         'rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal',
+        'python3 ci/check_fuzz_coverage.py --toolchain "$FUZZ_TOOLCHAIN"',
         'python3 ci/fuzz.py --toolchain "$FUZZ_TOOLCHAIN" --seconds "$FUZZ_SECONDS" --out "$FUZZ_OUT"',
     ),
 )
+FUZZ_UPLOAD_CONDITION = "failure() || cancelled()"
+# What the fuzz job's timeout must hold besides fuzzing and minimization: the nightly install, the
+# rustdoc and plan builds, and the build of every target with AddressSanitizer.
+FUZZ_BUILD_MARGIN_MINUTES = 20
+# Only the fuzz job may compile the fuzzing runtime: no other job enables every feature or the
+# `libfuzzer` feature of vilicus-fuzz.
+FUZZING_FEATURE = re.compile(r"--all-features|--features[ =]\S*libfuzzer|-F *\S*libfuzzer")
 FUZZ_BUDGET = re.compile(r"FUZZ_SECONDS: \$\{\{ github\.event_name == 'schedule' && '(\d+)' \|\| '(\d+)' \}\}")
 VM_ALWAYS_STEPS = ("ci/vm_harness.py collect", "actions/upload-artifact@", "ci/vm_harness.py down")
 VM_BOOTED_STEPS = ("ci/vm_harness.py smoke", "ci/release_gates.py run ")
@@ -456,9 +464,30 @@ class WorkflowAgreementTest(unittest.TestCase):
             with self.subTest(step=step.splitlines()[0]):
                 conditions = re.findall(r"(?m)^\s+if: (.*)$", step)
                 if "actions/upload-artifact@" in step:
-                    self.assertEqual(conditions, ["failure()"])
+                    self.assertEqual(conditions, [FUZZ_UPLOAD_CONDITION])
                 else:
                     self.assertEqual(conditions, [])
+
+    def test_fuzz_job_timeout_holds_the_scheduled_budget_of_every_target(self) -> None:
+        job = self.jobs[FUZZ_JOB[0]]
+        timeout = re.search(r"(?m)^    timeout-minutes: (\d+)$", job)
+        self.assertIsNotNone(timeout)
+        scheduled = int(FUZZ_BUDGET.search(job).group(1))
+        targets = [path.stem for path in (sc.REPO_ROOT / "fuzz" / "src" / "bin").glob("*.rs") if path.stem != fz.PLAN_BINARY]
+        self.assertTrue(targets)
+        needed = len(targets) * (scheduled + fz.MINIMIZE_SECONDS) / 60 + FUZZ_BUILD_MARGIN_MINUTES
+        self.assertGreaterEqual(int(timeout.group(1)), needed)
+
+    def test_no_job_but_the_fuzz_job_builds_the_fuzzing_runtime(self) -> None:
+        for job_id, job in self.jobs.items():
+            if job_id == FUZZ_JOB[0]:
+                continue
+            for line in command_lines(job):
+                with self.subTest(job=job_id, line=line):
+                    self.assertNotRegex(line, FUZZING_FEATURE)
+        self.assertRegex("cargo build --all-features", FUZZING_FEATURE)
+        self.assertRegex("cargo test -p vilicus-fuzz --features libfuzzer", FUZZING_FEATURE)
+        self.assertRegex("cargo build -F vilicus-fuzz/libfuzzer", FUZZING_FEATURE)
 
     def test_triggers_include_the_merge_queue_and_the_weekly_run(self) -> None:
         triggers = self.text.split("\non:\n", 1)[1].split("\n\n", 1)[0]

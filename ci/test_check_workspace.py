@@ -414,6 +414,105 @@ class PathOnlyTest(WorkspaceTestCase):
                     self.assertEqual(self.workspace.check(), [])
 
 
+class IsolatedTest(WorkspaceTestCase):
+    """Story 2.7, AC5: an isolated crate (the fuzz targets) is a dependency of no crate, and
+    depends only on what the nodes of its table reach."""
+
+    def tables(self) -> list[cw.Isolated]:
+        tables = list(GRAPH.isolated.values())
+        self.assertTrue(tables)
+        return tables
+
+    def add_isolated(self, table: cw.Isolated, names: dict[str, str]) -> str:
+        """The table's crate, at its directory, with an edge to each node it lists."""
+        name = table.crates[0]
+        self.workspace.add(name, table.paths[0] if table.paths else f"crates/{name}")
+        for node_id in table.depends_on:
+            self.workspace.depend(name, names[node_id])
+        return name
+
+    def test_isolated_crates_with_their_edges_pass(self) -> None:
+        names = self.full_graph()
+        for table in self.tables():
+            self.add_isolated(table, names)
+        self.assertEqual(self.workspace.check(), [])
+
+    def test_no_crate_may_depend_on_an_isolated_crate_by_any_kind_of_edge(self) -> None:
+        for table in self.tables():
+            for node in GRAPH.nodes.values():
+                for kind in ("normal", "build", "dev"):
+                    with self.subTest(table=table.id, node=node.id, kind=kind):
+                        self.setUp()
+                        names = self.full_graph()
+                        isolated = self.add_isolated(table, names)
+                        self.workspace.depend(names[node.id], isolated, kind)
+                        self.assert_single(
+                            self.workspace.check(),
+                            f"forbidden edge {names[node.id]} -> {isolated} ({kind} dependency",
+                            f"[isolated.{table.id}]: no crate may depend on it",
+                        )
+
+    def test_the_repository_isolates_the_fuzz_targets_from_every_crate(self) -> None:
+        # Written out on purpose: the crate of Story 2.7 and the crates that must never link it.
+        table = GRAPH.classify_isolated("vilicus-fuzz", "fuzz")
+        self.assertIsNotNone(table)
+        for source in ("vilicus", "vilicus-core", "vilicus-proto", "vilicus-gateway", "vilicus-testbed"):
+            for kind in ("normal", "build", "dev"):
+                with self.subTest(source=source, kind=kind):
+                    self.setUp()
+                    names = self.full_graph()
+                    self.add_isolated(table, names)
+                    self.workspace.depend(source, "vilicus-fuzz", kind)
+                    self.assert_single(self.workspace.check(), f"forbidden edge {source} -> vilicus-fuzz ")
+
+    def test_an_isolated_crate_depends_only_on_what_its_nodes_reach(self) -> None:
+        for table in self.tables():
+            reached = set(table.depends_on).union(*(GRAPH.reachable(node_id) for node_id in table.depends_on))
+            for node in GRAPH.nodes.values():
+                with self.subTest(table=table.id, node=node.id):
+                    self.setUp()
+                    names = self.full_graph()
+                    isolated = self.add_isolated(table, names)
+                    self.workspace.depend(isolated, names[node.id])
+                    violations = self.workspace.check()
+                    if node.id in reached and not (node.private and node.id not in table.depends_on):
+                        self.assertEqual(violations, [])
+                    else:
+                        self.assert_single(violations, f"forbidden edge {isolated} -> {names[node.id]} ")
+
+    def test_a_crate_under_an_isolated_directory_must_be_listed(self) -> None:
+        for table in self.tables():
+            for path in table.paths:
+                with self.subTest(table=table.id, path=path):
+                    self.setUp()
+                    self.full_graph()
+                    self.workspace.add("stray-crate", f"{path}/stray-crate")
+                    self.assert_single(self.workspace.check(), "stray-crate", f"[isolated.{table.id}] by its directory only")
+
+    def test_an_isolated_crate_stays_isolated_under_a_node_directory(self) -> None:
+        for table in self.tables():
+            for node in GRAPH.nodes.values():
+                for path in node.paths:
+                    with self.subTest(table=table.id, path=path):
+                        self.setUp()
+                        names = self.full_graph()
+                        name = table.crates[0]
+                        self.workspace.add(name, f"{path}/{name}")
+                        self.workspace.depend(names["testbed"], name, "dev")
+                        self.assert_single(self.workspace.check(), f"forbidden edge {names['testbed']} -> {name} ")
+
+    def test_an_isolated_table_must_name_known_nodes_and_its_own_id(self) -> None:
+        for label, isolated in {
+            "unknown node": {"stray": {"crates": ["stray"], "depends_on": ["no-such-node"]}},
+            "id of a node": {"proto": {"crates": ["stray"], "depends_on": ["types"]}},
+        }.items():
+            with self.subTest(case=label):
+                config = copy.deepcopy(CONFIG)
+                config["isolated"] = isolated
+                with self.assertRaises(ValueError):
+                    cw.Graph.from_config(config)
+
+
 class ShippedSourcesTest(WorkspaceTestCase):
     """FR-109: no crate in the shipped closure compiles a file outside its own package."""
 

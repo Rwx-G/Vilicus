@@ -98,6 +98,18 @@ required = true
 crates = ["vilicus-testbed"]
 depends_on = ["core", "testing"]
 
+# Crates outside the AD-3 graph, which no workspace crate may depend on by any kind of edge
+# (normal, build or dev). An `[isolated.<id>]` table matches crates by exact name (`crates`) or
+# manifest directory (`paths`), tried before the nodes, and `depends_on` lists the nodes its
+# crates may depend on, with what those nodes reach, except a `private` node it does not list. It
+# is not a node: nothing reaches it, and the AD-3 flowchart does not show it.
+#
+# Story 2.7, AC5: the fuzz targets of vilicus-proto, never a dependency of a shipped crate.
+[isolated.fuzz]
+crates = ["vilicus-fuzz"]
+paths = ["fuzz"]
+depends_on = ["proto"]
+
 # D140 and the spine's Consistency Conventions, Unsafe code. The crates in `allowed` are the
 # only ones where unsafe code may appear: each denies unsafe_code at crate level and denies
 # clippy's undocumented_unsafe_blocks, instead of inheriting [workspace.lints]. Every other

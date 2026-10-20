@@ -4,7 +4,10 @@
 - Crate graph (doc/architecture-spine.md AD-3, D140): every edge between workspace crates must be
   allowed by ci/crate_graph.toml, every required node has a crate, and no dev-only crate may sit
   in the normal or build closure of a shipped crate. A crate that matches a node by its directory
-  only (a crate under testing/ that is neither listed nor named vilicus-double-*) fails.
+  only (a crate under testing/ that is neither listed nor named vilicus-double-*) fails. A crate
+  of an `[isolated.*]` table of ci/crate_graph.toml (the fuzz targets, Story 2.7) is outside the
+  graph: no workspace crate may depend on it by any kind of edge, and it may depend only on what
+  its table's nodes reach.
 - Shipped sources (FR-109, D102): no crate in the normal or build closure of a shipped crate
   compiles a file outside its package directory, through a target's source path, a `#[path]`
   module, an `include!`, `include_str!` or `include_bytes!` (a computed path fails too) or a
@@ -63,7 +66,7 @@ FORBID_ATTRIBUTE = "#![forbid(unsafe_code)]"
 VILICUS_NAMES = ("vilicus", "vilicus-*")
 # Directories whose manifests must all be workspace members, and where no Cargo configuration
 # file may sit (with the repository root). Spikes keep their own configuration.
-CRATE_DIRECTORIES = ("crates", "testing")
+CRATE_DIRECTORIES = ("crates", "testing", "fuzz")
 CARGO_CONFIG_NAMES = ("config", "config.toml")
 # Third-party sources as `cargo vendor` writes them (D28); they keep their own headers.
 VENDOR_DIRECTORY = "vendor"
@@ -105,15 +108,29 @@ class Node:
     required: bool
 
 
-class Graph:
-    """The AD-3 graph as ci/crate_graph.toml encodes it."""
+@dataclass(frozen=True)
+class Isolated:
+    """Crates outside the AD-3 graph that no crate may depend on."""
 
-    def __init__(self, nodes: dict[str, Node]) -> None:
-        for node in nodes.values():
-            for target in node.depends_on:
+    id: str
+    crates: tuple[str, ...]
+    paths: tuple[str, ...]
+    depends_on: tuple[str, ...]
+
+
+class Graph:
+    """The AD-3 graph as ci/crate_graph.toml encodes it, and the isolated crates beside it."""
+
+    def __init__(self, nodes: dict[str, Node], isolated: dict[str, Isolated] | None = None) -> None:
+        isolated = isolated or {}
+        for source in [*nodes.values(), *isolated.values()]:
+            for target in source.depends_on:
                 if target not in nodes:
-                    raise ValueError(f"node {node.id} depends on unknown node {target}")
+                    raise ValueError(f"node {source.id} depends on unknown node {target}")
+        for table_id in isolated.keys() & nodes.keys():
+            raise ValueError(f"[isolated.{table_id}] has the id of a node")
         self.nodes = nodes
+        self.isolated = isolated
 
     @classmethod
     def from_config(cls, config: dict) -> Graph:
@@ -130,7 +147,35 @@ class Graph:
                 shipped=table.get("shipped", False),
                 required=table.get("required", False),
             )
-        return cls(nodes)
+        isolated = {
+            table_id: Isolated(
+                id=table_id,
+                crates=tuple(table.get("crates", ())),
+                paths=tuple(PurePosixPath(p).as_posix() for p in table.get("paths", ())),
+                depends_on=tuple(table.get("depends_on", ())),
+            )
+            for table_id, table in config.get("isolated", {}).items()
+        }
+        return cls(nodes, isolated)
+
+    def classify_isolated(self, crate_name: str, crate_dir: str) -> Isolated | None:
+        """Exact name first, then manifest directory; tried before the nodes, so that neither a
+        node's directory nor its name pattern claims an isolated crate."""
+        for table in self.isolated.values():
+            if crate_name in table.crates:
+                return table
+        directory = PurePosixPath(crate_dir)
+        for table in self.isolated.values():
+            if any(directory.is_relative_to(path) for path in table.paths):
+                return table
+        return None
+
+    def isolated_allows(self, source: Isolated, target: Node) -> bool:
+        """An isolated crate may depend on the nodes it lists and on what they reach, except a
+        private node it does not list."""
+        if target.private and target.id not in source.depends_on:
+            return False
+        return target.id in source.depends_on or any(target.id in self.reachable(node) for node in source.depends_on)
 
     def classify(self, crate_name: str, crate_dir: str) -> Node | None:
         """Exact name first, then manifest directory, then name pattern."""
@@ -290,7 +335,17 @@ def check_root_manifest(root_manifest: dict) -> list[str]:
 def check_graph(graph: Graph, crates: list[Crate]) -> list[str]:
     violations = []
     nodes: dict[str, Node] = {}
+    isolated: dict[str, Isolated] = {}
     for crate in crates:
+        table = graph.classify_isolated(crate.name, crate.directory)
+        if table is not None:
+            isolated[crate.name] = table
+            if crate.name not in table.crates:
+                violations.append(
+                    f"graph: crate {crate.name} ({crate.directory}) matches [isolated.{table.id}] by its directory "
+                    f"only; list it in {GRAPH_FILE.name}, so that the checks keyed on names cover it"
+                )
+            continue
         node = graph.classify(crate.name, crate.directory)
         if node is None:
             violations.append(
@@ -305,6 +360,21 @@ def check_graph(graph: Graph, crates: list[Crate]) -> list[str]:
                     f"graph: crate {crate.name} ({crate.directory}) matches node {node.id} by its directory only; "
                     f"list it in {GRAPH_FILE.name}{expected}, so that the checks keyed on names cover it"
                 )
+
+    for crate in crates:
+        for dep in crate.dependencies:
+            if dep.name in isolated:
+                violations.append(
+                    f"graph: forbidden edge {crate.name} -> {dep.name} ({dep.kind} dependency; {dep.name} is "
+                    f"isolated by [isolated.{isolated[dep.name].id}]: no crate may depend on it)"
+                )
+            elif crate.name in isolated and dep.name in nodes:
+                source, target = isolated[crate.name], nodes[dep.name]
+                if not graph.isolated_allows(source, target):
+                    violations.append(
+                        f"graph: forbidden edge {crate.name} -> {dep.name} ({dep.kind} dependency; "
+                        f"[isolated.{source.id}] reaches {', '.join(source.depends_on)} only)"
+                    )
 
     present = {node.id for node in nodes.values()}
     for node in graph.nodes.values():

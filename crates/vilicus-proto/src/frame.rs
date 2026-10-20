@@ -261,9 +261,11 @@ mod tests {
 
     /// Story 2.7: the fuzz job's limit on a single allocation found that reading a frame at the
     /// maximum reserved twice its size (`read_to_end` doubles its buffer to probe for the end), a
-    /// 32 MiB allocation for a 16 MiB data frame. The buffer now ends at the declared length.
+    /// 32 MiB allocation for a 16 MiB data frame. The buffer now ends at the declared length,
+    /// give or take what `reserve_exact` may round up: the bound below allows 64 bytes of it.
     #[test]
     fn a_frame_is_read_into_a_buffer_no_larger_than_its_length() {
+        const ROUNDING: usize = 64;
         for kind in [SocketKind::Control, SocketKind::Data] {
             let max = kind.max_message_len();
             for len in [
@@ -277,10 +279,10 @@ mod tests {
                 let bytes = framed(len, &vec![0xab; len as usize]);
                 let read = read_frame(&mut bytes.as_slice(), kind).expect("within the maximum");
                 assert_eq!(read.len(), len as usize);
-                assert_eq!(
-                    read.capacity(),
-                    len as usize,
-                    "{kind:?} frame of {len} bytes"
+                assert!(
+                    read.capacity() <= len as usize + ROUNDING,
+                    "{kind:?} frame of {len} bytes read into {} bytes",
+                    read.capacity()
                 );
                 let slow = read_frame(&mut OneByteAtATime(&bytes), kind).expect("read slowly");
                 assert_eq!(slow, read);

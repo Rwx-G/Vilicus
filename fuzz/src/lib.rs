@@ -23,7 +23,7 @@ use vilicus_proto::frame::{self, FrameError, LENGTH_PREFIX_LEN};
 use vilicus_proto::message::{
     self, Hello, HelloRefusal, HelloReply, Message, RequestBody, first_frame,
 };
-use vilicus_proto::profile::{self, MAX_DEPTH, Rejection};
+use vilicus_proto::profile::{self, LISTED_TAGS, MAX_DEPTH, Rejection};
 use vilicus_proto::wire::{self, DecodeError, Wire};
 use vilicus_types::{
     ClientError, DataType, ErrorCode, ExceptionClass, Id, MessageKey, ModuleName, OperatorSetting,
@@ -467,9 +467,99 @@ fn frames(kind: SocketKind, data: &[u8]) {
                 return;
             }
             Err(FrameError::Io(_)) => return,
-            Err(FrameError::Message(_)) => {}
+            Err(FrameError::Message(error)) => {
+                let message = &consumed[LENGTH_PREFIX_LEN..];
+                if passes_item_bound_first(message, kind.max_items()) {
+                    assert_eq!(
+                        error,
+                        DecodeError::Profile(Rejection::TooManyItems(kind.max_items())),
+                        "a message of more than {} items was decoded",
+                        kind.max_items()
+                    );
+                }
+            }
         }
     }
+}
+
+/// Whether the head walk of the profile meets item `max_items + 1` before anything else it
+/// refuses: then the only verdict the item bound allows is `TooManyItems`, whatever a decode
+/// without the bound would make of the message. Walks the heads without decoding and without
+/// recursion, as the profile does, and stops at the first head the profile refuses earlier (a
+/// malformed or truncated head, a string past the input, a tag outside [`LISTED_TAGS`], a float, nesting past
+/// [`MAX_DEPTH`]), so its only allocation is the stack of open containers, at most
+/// [`MAX_DEPTH`] deep.
+pub fn passes_item_bound_first(bytes: &[u8], max_items: usize) -> bool {
+    let mut expected: Vec<u64> = vec![1];
+    let mut pos = 0usize;
+    let mut items = 0usize;
+    while let Some(&remaining) = expected.last() {
+        if remaining == 0 {
+            expected.pop();
+            continue;
+        }
+        let top = expected.len() - 1;
+        expected[top] = remaining - 1;
+        items += 1;
+        if items > max_items {
+            return true;
+        }
+        let Some(&initial) = bytes.get(pos) else {
+            return false;
+        };
+        let (major, additional) = (initial >> 5, initial & 0x1f);
+        let width = match additional {
+            0..=23 => 0,
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return false,
+        };
+        let Some(argument_bytes) = bytes.get(pos + 1..pos + 1 + width) else {
+            return false;
+        };
+        let argument = if width == 0 {
+            u64::from(additional)
+        } else {
+            argument_bytes
+                .iter()
+                .fold(0, |acc, byte| (acc << 8) | u64::from(*byte))
+        };
+        pos += 1 + width;
+        match major {
+            2 | 3 => {
+                match usize::try_from(argument)
+                    .ok()
+                    .and_then(|len| pos.checked_add(len))
+                    .filter(|end| *end <= bytes.len())
+                {
+                    Some(end) => pos = end,
+                    None => return false,
+                }
+            }
+            4..=6 => {
+                if major == 6 && !LISTED_TAGS.contains(&argument) {
+                    return false;
+                }
+                if expected.len() > MAX_DEPTH {
+                    return false;
+                }
+                let count = match major {
+                    4 => Some(argument),
+                    5 => argument.checked_mul(2),
+                    _ => Some(1),
+                };
+                let Some(count) = count else {
+                    return false;
+                };
+                expected.push(count);
+            }
+            7 if width >= 2 => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Reads a repetition: a 4-byte big-endian count, a 4-byte big-endian prefix length, the prefix,
@@ -728,6 +818,34 @@ mod tests {
             array_head(u64::from(u32::MAX)),
             [0x9a, 0xff, 0xff, 0xff, 0xff]
         );
+    }
+
+    #[test]
+    fn the_item_bound_is_passed_first_only_before_any_other_refusal() {
+        let zeros = |n: u8| [&[0x80 | n][..], &vec![0x00; n as usize]].concat();
+        // [0, 0, 0]: four items.
+        assert!(passes_item_bound_first(&zeros(3), 3));
+        assert!(!passes_item_bound_first(&zeros(3), 4));
+        // A float, a tag or a truncation before the fourth item is refused first.
+        assert!(!passes_item_bound_first(
+            &[0x83, 0xf9, 0x3c, 0x00, 0x00, 0x00],
+            3
+        ));
+        assert!(!passes_item_bound_first(&[0x83, 0xc0, 0x00, 0x00, 0x00], 3));
+        assert!(!passes_item_bound_first(&[0x83, 0x00], 3));
+        // After the fourth item, what follows does not matter: the bound comes first.
+        assert!(passes_item_bound_first(&[0x84, 0x00, 0x00, 0x00, 0xf9], 3));
+        // A map entry counts its key and its value.
+        assert!(passes_item_bound_first(&[0xa1, 0x00, 0x00], 2));
+        let mut deep = vec![0x81; MAX_DEPTH + 1];
+        deep.push(0x00);
+        assert!(!passes_item_bound_first(&deep, usize::MAX));
+        for (bytes, max) in [(zeros(3), 3usize), (vec![0xa1, 0x00, 0x00], 2)] {
+            assert_eq!(
+                profile::decode_with_max_items(&bytes, max),
+                Err(Rejection::TooManyItems(max))
+            );
+        }
     }
 
     #[test]

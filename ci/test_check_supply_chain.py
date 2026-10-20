@@ -253,7 +253,8 @@ def stack_versions() -> dict[str, str]:
 # The merge gates of AD-33 this workflow carries, written out by hand on purpose: the job id, the
 # check name branch protection requires, and the command lines that must appear whole in the job,
 # so that dropping a job, renaming its check, or losing `-D warnings`, `--frozen`, `--locked` or
-# `--deny warnings` turns this test red.
+# the audit report check (`cargo audit --deny warnings` with reasoned exceptions) turns this test
+# red.
 GATE_JOBS = {
     "workspace-policy": (
         "Crate graph, manifests and unsafe code (AD-3, D29)",
@@ -282,7 +283,13 @@ GATE_JOBS = {
     ),
     "deny": ("Licences, duplicates, advisories and sources (cargo deny)", ("cargo deny --locked check",)),
     "vet": ("Audited dependencies (cargo vet)", ("cargo vet --locked",)),
-    "audit": ("Security advisories (cargo audit)", ("cargo audit --deny warnings",)),
+    "audit": (
+        "Security advisories (cargo audit)",
+        (
+            'cargo audit --json > "$RUNNER_TEMP/audit.json" || true',
+            'python3 ci/check_audit_report.py ci/audit-exceptions.toml "$RUNNER_TEMP/audit.json"',
+        ),
+    ),
     "hpke-review": (
         "HPKE spike vectors and cross-test (D61, D120)",
         (

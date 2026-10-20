@@ -55,14 +55,14 @@ development_status:
   1-17-e1-and-e2-prf-half-early-run: in-progress
   epic-1-retrospective: optional
 
-  epic-2: in-progress
+  epic-2: done
   2-1-cargo-workspace-and-crate-graph-check: done
   2-2-merge-gates-format-lint-and-supply-chain: done
   2-3-debian-13-vm-ci-harness: done
   2-4-shared-vocabulary-in-vilicus-types: done
   2-5-wire-framing-and-canonical-encoding-in-vilicus-proto: done
   2-6-vilicus-testbed-binary-and-testing-tree: done
-  2-7-coverage-guided-fuzzing-of-vilicus-proto: review
+  2-7-coverage-guided-fuzzing-of-vilicus-proto: done
   epic-2-retrospective: optional
 
   epic-3: backlog

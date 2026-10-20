@@ -2,7 +2,7 @@
 title: 'Coverage-guided fuzzing of vilicus-proto'
 epic: 2
 story: 7
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-20
 implements: [AD-12, AD-13, D130, E19]

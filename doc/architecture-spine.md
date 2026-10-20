@@ -47,7 +47,7 @@ The design documents in `doc/` explain why; this spine fixes what independently 
 
 - **Binds:** all crates, FR-61, FR-109, DC-57
 - **Prevents:** a module, the Gateway, an AI process or a plugin linking key, storage or policy code; test code reaching the shipped binary.
-- **Rule:** dependencies follow the graph below and nothing else. `vilicus-crypto` and `vilicus-storage` are dependencies of `vilicus-core` only. `vilicus-mod-reference` and the test doubles under `testing/` are dev-dependencies, never linked into the shipped binary. A separate `vilicus-testbed` binary, never packaged, links the reference module, starts the test doubles, which are separate executables shipped beside it in the testbed artefact (D141), and accepts a CI test key; release gates that need a module or a double run against it, and every other gate runs against the shipped `.deb` [ADOPTED, D102]. A CI check over `cargo metadata` fails on any edge not in the graph; a direct dependency on a crate the graph already reaches transitively is allowed, except that `vilicus-crypto` and `vilicus-storage` still accept `vilicus-core` only (D140).
+- **Rule:** dependencies follow the graph below and nothing else. `vilicus-crypto` and `vilicus-storage` are dependencies of `vilicus-core` only. `vilicus-mod-reference` and the test doubles under `testing/` are dev-dependencies, never linked into the shipped binary. A separate `vilicus-testbed` binary, never packaged, links the reference module, starts the test doubles, which are separate executables shipped beside it in the testbed artefact (D141), and accepts a CI test key; release gates that need a module or a double run against it, and every other gate runs against the shipped `.deb` [ADOPTED, D102]. A CI check over `cargo metadata` fails on any edge not in the graph; a direct dependency on a crate the graph already reaches transitively is allowed, except that `vilicus-crypto` and `vilicus-storage` still accept `vilicus-core` only (D140). `vilicus-fuzz` (`fuzz/`) is outside the graph: it depends on `vilicus-proto`, no crate may depend on it, and only it may depend on the fuzzing crates (D142).
 
 ```mermaid
 flowchart BT
@@ -256,7 +256,7 @@ flowchart BT
 
 - **Binds:** FR-2, FR-22, FR-61, FR-109, all crates
 - **Prevents:** each epic deciding which checks block a merge.
-- **Rule:** CI runs on Linux (`[ASSUMPTION]` GitHub Actions) and blocks a merge on: format, lint with warnings as errors, tests, `cargo deny`, `cargo vet`, `cargo audit`, the crate graph check (AD-3), the capability matrix check (AD-9), the unit profile check (FR-2), the CSP browser test (AD-19), and the release-gate invariants (FR-61), the upgrade test (AD-41) and the restore drill (AD-31). Tests that need systemd, sockets and sandboxing run in a Debian 13 virtual machine with systemd as PID 1; the first CI story checks that the runner supports nested virtualisation, with a self-hosted runner as the fallback. Gates that need a module or a double run against `vilicus-testbed` (AD-3); UJ-1 to UJ-3 run automated in the Debian VM with a virtual authenticator, and manually once per release on one Android phone and one desktop browser (FR-109). A negative test of the bootstrap order runs the ceremony from a browser profile without a virtual authenticator, because Chrome's CDP virtual authenticator bypasses Chrome's refusal on certificate errors (E24), and asserts that the Core refuses a ceremony from a `localhost` origin (D138).
+- **Rule:** CI runs on Linux (`[ASSUMPTION]` GitHub Actions) and blocks a merge on: format, lint with warnings as errors, tests, `cargo deny`, `cargo vet`, `cargo audit`, the crate graph check (AD-3), the capability matrix check (AD-9), the unit profile check (FR-2), the CSP browser test (AD-19), coverage-guided fuzzing of every `vilicus-proto` decoder on a dated nightly toolchain, used by that job only (D142), and the release-gate invariants (FR-61), the upgrade test (AD-41) and the restore drill (AD-31). Tests that need systemd, sockets and sandboxing run in a Debian 13 virtual machine with systemd as PID 1; the first CI story checks that the runner supports nested virtualisation, with a self-hosted runner as the fallback. Gates that need a module or a double run against `vilicus-testbed` (AD-3); UJ-1 to UJ-3 run automated in the Debian VM with a virtual authenticator, and manually once per release on one Android phone and one desktop browser (FR-109). A negative test of the bootstrap order runs the ceremony from a browser profile without a virtual authenticator, because Chrome's CDP virtual authenticator bypasses Chrome's refusal on certificate errors (E24), and asserts that the Core refuses a ceremony from a `localhost` origin (D138).
 
 ### AD-34: Signed packages and anti-rollback from V0.1
 
@@ -448,6 +448,7 @@ Events to a consumer that is not ready stay in the source outbox and do not coun
 | Name | Version |
 | --- | --- |
 | Rust (edition 2024) | 1.99.0 |
+| Rust nightly (fuzz job only, D142) | nightly-2026-10-01 |
 | Debian target | 13 (trixie), amd64 for V0.1 |
 | OpenSSL (system, for SQLCipher and webauthn-rs) | Debian 13 libssl3, 3.5 LTS line |
 | tokio | 1.53.2 |
@@ -462,6 +463,7 @@ Events to a consumer that is not ready stay in the source outbox and do not coun
 | opaque-ke / @serenity-kit/opaque | 4.0.1 / 1.1.0 |
 | dcbor (canonical CBOR, Core) | 0.25.2 |
 | unicode-normalization (NFC tables of the canonical form, Unicode 17.0.0) | 0.1.25, pinned exactly |
+| libfuzzer-sys (fuzz targets of `vilicus-proto`, never shipped, D142) | 0.4.13 |
 | cbor2 (CBOR decoder, web client) | 2.4.0 |
 | ammonia (HTML sanitizer, Gateway, D139) | 4.2.4, pinned exactly |
 | serde | 1.0.229 |

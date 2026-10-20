@@ -13,3 +13,11 @@ workspace = true
 
 [dependencies]
 vilicus-types.workspace = true
+dcbor.workspace = true
+unicode-normalization.workspace = true
+
+# Test data only: the E19 vector generator (examples/gen_vectors.rs) and the vector replay
+# (tests/canonical_vectors.rs). Neither reaches a release artefact.
+[dev-dependencies]
+serde_json.workspace = true
+aws-lc-rs.workspace = true

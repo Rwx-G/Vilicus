@@ -1,0 +1,21 @@
+{"description":"Values every profile encoder must refuse: non-NFC text, map keys equal once normalized, nesting over the bound, an integer below the range. `value` is the notation, text exactly as written.","format":"vilicus-e19-encode-invalid/1","profile":{"floats":false,"indefinite_lengths":false,"int_max":"18446744073709551615","int_min":"-9223372036854775808","listed_tags":[],"max_depth":32,"simple_values":["false","true","null"],"text_normalization":"NFC","unicode_version":"17.0.0"},"items":[
+{"name":"non_nfc_text_5","value":{"text":"café"}},
+{"name":"keys_equal_after_nfc_5","value":{"map":[[{"text":"café"},{"int":"1"}],[{"text":"café"},{"int":"2"}]]}},
+{"name":"non_nfc_text_6","value":{"text":"Ångström"}},
+{"name":"keys_equal_after_nfc_6","value":{"map":[[{"text":"Ångström"},{"int":"1"}],[{"text":"Ångström"},{"int":"2"}]]}},
+{"name":"non_nfc_text_7","value":{"text":"Ωhm"}},
+{"name":"keys_equal_after_nfc_7","value":{"map":[[{"text":"Ωhm"},{"int":"1"}],[{"text":"Ωhm"},{"int":"2"}]]}},
+{"name":"non_nfc_text_8","value":{"text":"각"}},
+{"name":"keys_equal_after_nfc_8","value":{"map":[[{"text":"각"},{"int":"1"}],[{"text":"각"},{"int":"2"}]]}},
+{"name":"non_nfc_text_9","value":{"text":"á̖"}},
+{"name":"keys_equal_after_nfc_9","value":{"map":[[{"text":"á̖"},{"int":"1"}],[{"text":"á̖"},{"int":"2"}]]}},
+{"name":"non_nfc_text_10","value":{"text":"á̖"}},
+{"name":"keys_equal_after_nfc_10","value":{"map":[[{"text":"á̖"},{"int":"1"}],[{"text":"á̖"},{"int":"2"}]]}},
+{"name":"non_nfc_text_11","value":{"text":"क़"}},
+{"name":"keys_equal_after_nfc_11","value":{"map":[[{"text":"क़"},{"int":"1"}],[{"text":"क़"},{"int":"2"}]]}},
+{"name":"non_nfc_text_12","value":{"text":"שּׁ"}},
+{"name":"keys_equal_after_nfc_12","value":{"map":[[{"text":"שּׁ"},{"int":"1"}],[{"text":"שּׁ"},{"int":"2"}]]}},
+{"name":"arrays_over_depth","value":{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[{"array":[]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}},
+{"name":"maps_over_depth","value":{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"map":[[{"text":"k"},{"array":[]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}]]}},
+{"name":"int_below_range","value":{"int":"-9223372036854775809"}}
+]}

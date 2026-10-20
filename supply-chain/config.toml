@@ -19,10 +19,145 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
+[[exemptions.android_system_properties]]
+version = "0.1.6"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by iana-time-zone. cargo vet suggests `cargo vet diff android_system_properties 0.1.5 0.1.6` (3 files changed, 38 insertions(+), 10 deletions(-))."
+
+[[exemptions.autocfg]]
+version = "1.5.1"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by num-traits. cargo vet suggests `cargo vet diff autocfg 1.5.0 1.5.1` (5 files changed, 50 insertions(+), 21 deletions(-))."
+
+[[exemptions.aws-lc-rs]]
+version = "1.18.2"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by vilicus-proto. cargo vet suggests `cargo vet inspect aws-lc-rs 1.18.2` (34023 lines)."
+
+[[exemptions.aws-lc-sys]]
+version = "0.46.0"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
+
+[[exemptions.cc]]
+version = "1.9.0"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cmake, aws-lc-sys, and 1 other. cargo vet suggests `cargo vet diff cc 1.2.5 1.9.0` (42 files changed, 8939 insertions(+), 7782 deletions(-))."
+
+[[exemptions.cfg-if]]
+version = "1.0.5"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by half, js-sys, getrandom, and wasm-bindgen. cargo vet suggests `cargo vet diff cfg-if 1.0.4 1.0.5` (7 files changed, 20 insertions(+), 5 deletions(-))."
+
+[[exemptions.chrono]]
+version = "0.4.45"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by dcbor. cargo vet suggests `cargo vet inspect chrono 0.4.45` (34862 lines)."
+
+[[exemptions.cmake]]
+version = "0.1.58"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-sys. cargo vet suggests `cargo vet diff cmake 0.1.50 0.1.58` (7 files changed, 458 insertions(+), 144 deletions(-))."
+
+[[exemptions.dcbor]]
+version = "0.25.2"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. The canonical CBOR crate of D130 (spine Stack), a normal dependency of vilicus-proto. cargo vet suggests `cargo vet inspect dcbor 0.25.2` (20494 lines)."
+
+[[exemptions.find-msvc-tools]]
+version = "0.1.15"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cc. cargo vet suggests `cargo vet inspect find-msvc-tools 0.1.15` (3182 lines)."
+
+[[exemptions.fs_extra]]
+version = "1.3.0"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-sys. cargo vet suggests `cargo vet inspect fs_extra 1.3.0` (12715 lines)."
+
+[[exemptions.futures-task]]
+version = "0.3.21"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at 0.3.21, not the locked 0.3.34: cargo vet chose it as the base of the imported delta audits that reach the locked version, so a later version fails `cargo vet --locked` until it is audited, exempted, or covered by a deliberately refreshed import. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by futures-util. cargo vet suggests `cargo vet inspect futures-task 0.3.31` (1155 lines)."
+
+[[exemptions.futures-util]]
+version = "0.3.21"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at 0.3.21, not the locked 0.3.34: cargo vet chose it as the base of the imported delta audits that reach the locked version, so a later version fails `cargo vet --locked` until it is audited, exempted, or covered by a deliberately refreshed import. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by js-sys. cargo vet suggests `cargo vet inspect futures-util 0.3.21` (25067 lines)."
+
+[[exemptions.getrandom]]
+version = "0.4.3"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by jobserver. cargo vet suggests `cargo vet inspect getrandom 0.4.3` (4636 lines)."
+
+[[exemptions.half]]
+version = "2.7.1"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by dcbor. cargo vet suggests `cargo vet diff half 2.5.0 2.7.1` (15 files changed, 453 insertions(+), 137 deletions(-))."
+
+[[exemptions.iana-time-zone]]
+version = "0.1.65"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono. cargo vet suggests `cargo vet diff iana-time-zone 0.1.64 0.1.65` (10 files changed, 147 insertions(+), 32 deletions(-))."
+
+[[exemptions.itoa]]
+version = "1.0.18"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by serde_json. cargo vet suggests `cargo vet diff itoa 1.0.15 1.0.18` (9 files changed, 432 insertions(+), 291 deletions(-))."
+
+[[exemptions.jobserver]]
+version = "0.1.35"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cc. cargo vet suggests `cargo vet inspect jobserver 0.1.35` (2969 lines)."
+
+[[exemptions.js-sys]]
+version = "0.3.106"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono and iana-time-zone. cargo vet suggests `cargo vet inspect js-sys 0.3.106` (19473 lines)."
+
+[[exemptions.libc]]
+version = "0.2.191"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cc, getrandom, jobserver, and 1 other. cargo vet suggests `cargo vet inspect libc 0.2.191` (135905 lines)."
+
+[[exemptions.log]]
+version = "0.4.34"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by iana-time-zone. cargo vet suggests `cargo vet diff log 0.4.29 0.4.34` (11 files changed, 368 insertions(+), 67 deletions(-))."
+
+[[exemptions.memchr]]
+version = "2.8.3"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by serde_json. cargo vet suggests `cargo vet diff memchr 2.7.5 2.8.3` (15 files changed, 157 insertions(+), 45 deletions(-))."
+
+[[exemptions.once_cell]]
+version = "1.12.0"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at 1.12.0, not the locked 1.21.4: cargo vet chose it as the base of the imported delta audits that reach the locked version, so a later version fails `cargo vet --locked` until it is audited, exempted, or covered by a deliberately refreshed import. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen. cargo vet suggests `cargo vet inspect once_cell 1.12.0` (3974 lines)."
+
+[[exemptions.paste]]
+version = "1.0.10"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at 1.0.10, not the locked 1.0.15: cargo vet chose it as the base of the imported delta audits that reach the locked version, so a later version fails `cargo vet --locked` until it is audited, exempted, or covered by a deliberately refreshed import. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by dcbor. cargo vet suggests `cargo vet inspect paste 1.0.10` (2397 lines)."
+
+[[exemptions.pin-project-lite]]
+version = "0.2.17"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by futures-util. cargo vet suggests `cargo vet diff pin-project-lite 0.2.16 0.2.17` (19 files changed, 145 insertions(+), 147 deletions(-))."
+
 [[exemptions.proc-macro2]]
 version = "1.0.107"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of serde_derive, listed in ci/build_time_code.toml; cargo vet suggests a delta audit from 1.0.106."
+
+[[exemptions.r-efi]]
+version = "6.0.0"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by getrandom. cargo vet suggests `cargo vet inspect r-efi 6.0.0` (9953 lines)."
+
+[[exemptions.rustversion]]
+version = "1.0.23"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen. cargo vet suggests `cargo vet diff rustversion 1.0.22 1.0.23` (5 files changed, 19 insertions(+), 13 deletions(-))."
 
 [[exemptions.serde]]
 version = "1.0.229"
@@ -39,12 +174,107 @@ version = "1.0.229"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. serde's `derive` feature; compile-time only, listed in ci/build_time_code.toml. cargo vet suggests a delta audit from 1.0.228."
 
+[[exemptions.serde_json]]
+version = "1.0.154"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by vilicus-proto. cargo vet suggests `cargo vet diff serde_json 1.0.145 1.0.154` (23 files changed, 421 insertions(+), 100 deletions(-))."
+
+[[exemptions.slab]]
+version = "0.4.12"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by futures-util. cargo vet suggests `cargo vet diff slab 0.4.8 0.4.12` (7 files changed, 256 insertions(+), 90 deletions(-))."
+
+[[exemptions.syn]]
+version = "2.0.119"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by zerocopy-derive and 2 others. cargo vet suggests `cargo vet diff syn 3.0.9 2.0.119` (54 files changed, 2595 insertions(+), 4224 deletions(-))."
+
 [[exemptions.syn]]
 version = "3.0.9"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of serde_derive; no audited base version in the imported sets, so a full review (cargo vet inspect) is outstanding."
 
+[[exemptions.thiserror]]
+version = "2.0.21"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by dcbor. cargo vet suggests `cargo vet inspect thiserror 2.0.21` (3996 lines)."
+
+[[exemptions.thiserror-impl]]
+version = "2.0.21"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by thiserror. cargo vet suggests `cargo vet inspect thiserror-impl 2.0.21` (2747 lines)."
+
+[[exemptions.tinyvec]]
+version = "1.13.3"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by unicode-normalization. cargo vet suggests `cargo vet diff tinyvec 1.9.0 1.13.3` (25 files changed, 1421 insertions(+), 9784 deletions(-))."
+
 [[exemptions.unicode-ident]]
 version = "1.0.27"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of proc-macro2 and syn; cargo vet suggests a delta audit from 1.0.18."
+
+[[exemptions.wasm-bindgen]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono, js-sys, and iana-time-zone. cargo vet suggests `cargo vet inspect wasm-bindgen 0.2.129` (8893 lines)."
+
+[[exemptions.wasm-bindgen-macro]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen. cargo vet suggests `cargo vet inspect wasm-bindgen-macro 0.2.129` (449 lines)."
+
+[[exemptions.wasm-bindgen-macro-support]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen-macro. cargo vet suggests `cargo vet diff wasm-bindgen-macro-support 0.2.92 0.2.129` (10 files changed, 11251 insertions(+), 458 deletions(-))."
+
+[[exemptions.wasm-bindgen-shared]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen and wasm-bindgen-macro-support. cargo vet suggests `cargo vet diff wasm-bindgen-shared 0.2.92 0.2.129` (7 files changed, 506 insertions(+), 36 deletions(-))."
+
+[[exemptions.windows-core]]
+version = "0.62.2"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by iana-time-zone. cargo vet suggests `cargo vet diff windows-core 0.52.0 0.62.2` (52 files changed, 2872 insertions(+), 4050 deletions(-))."
+
+[[exemptions.windows-implement]]
+version = "0.60.2"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by windows-core. cargo vet suggests `cargo vet diff windows-implement 0.52.0 0.60.2` (6 files changed, 1000 insertions(+), 196 deletions(-))."
+
+[[exemptions.windows-interface]]
+version = "0.59.3"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by windows-core. cargo vet suggests `cargo vet inspect windows-interface 0.59.3` (1080 lines)."
+
+[[exemptions.windows-result]]
+version = "0.4.1"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by windows-core. cargo vet suggests `cargo vet inspect windows-result 0.4.1` (1241 lines)."
+
+[[exemptions.windows-strings]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by windows-core. cargo vet suggests `cargo vet inspect windows-strings 0.5.1` (1759 lines)."
+
+[[exemptions.zerocopy]]
+version = "0.8.63"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by half. cargo vet suggests `cargo vet diff zerocopy 0.8.27 0.8.63` (738 files changed, 27078 insertions(+), 11664 deletions(-))."
+
+[[exemptions.zerocopy-derive]]
+version = "0.8.63"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by zerocopy. cargo vet suggests `cargo vet diff zerocopy-derive 0.8.27 0.8.63` (209 files changed, 44900 insertions(+), 12109 deletions(-))."
+
+[[exemptions.zeroize]]
+version = "1.9.1"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-rs. cargo vet suggests `cargo vet diff zeroize 1.8.2 1.9.1` (13 files changed, 635 insertions(+), 217 deletions(-))."
+
+[[exemptions.zmij]]
+version = "1.0.23"
+criteria = "safe-to-run"
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by serde_json. cargo vet suggests `cargo vet diff zmij 1.0.21 1.0.23` (11 files changed, 1235 insertions(+), 673 deletions(-))."

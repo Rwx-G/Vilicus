@@ -130,8 +130,14 @@ jobs:
         with:
           tool: cargo-audit
           version: 0.22.2
+      # `cargo audit --deny warnings` with reasoned exceptions: the JSON report is judged by
+      # ci/check_audit_report.py, which fails on every vulnerability and on every warning not
+      # listed in ci/audit-exceptions.toml (Story 2.5, AC8). A crashed cargo-audit leaves no JSON,
+      # which fails the check.
       - name: cargo audit
-        run: cargo audit --deny warnings
+        run: |
+          cargo audit --json > "$RUNNER_TEMP/audit.json" || true
+          python3 ci/check_audit_report.py ci/audit-exceptions.toml "$RUNNER_TEMP/audit.json"
 
   # D61, D120: the RFC 9180 vector, the cross-test and the other checks of the HPKE spike, plus
   # an advisory gate on its lockfile (gate HPKE-3). The job always runs and ci/must_run.py filters

@@ -13,7 +13,11 @@ all-features = true
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-ignore = []
+# The same exceptions as ci/audit-exceptions.toml, which the `audit` job reads; each states its
+# reason and the date it is reviewed by.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 is unmaintained, with no known vulnerability; a build-time procedural macro of dcbor 0.25.2, the canonical CBOR crate of D130 (Story 1.9, finding 6). Review by 2027-04-16: check dcbor for a release without paste, or renew this exception." },
+]
 
 [licenses]
 # D29: every dependency must be compatible with Apache-2.0. The list holds permissive licences
@@ -30,6 +34,11 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
+    # dcbor (D130, Story 2.5), allowed by the owner: the BSD 2-clause licence with an explicit
+    # patent grant, OSI approved (https://opensource.org/license/bsdpluspatent). The ASF policy
+    # lists BSD-2-Clause in Category A and does not name this variant, which adds a grant and no
+    # restriction.
+    "BSD-2-Clause-Patent",
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
@@ -62,7 +71,9 @@ multiple-versions-include-dev = true
 wildcards = "deny"
 # Workspace crates depend on each other by path without a version; they are never published.
 allow-wildcard-paths = true
-skip = []
+skip = [
+    { crate = "syn@2.0.119", reason = "forced by zerocopy-derive@0.8.63: zerocopy 0.8.63, through half 2.7.1 and dcbor 0.25.2 (D130), derives with syn 2 on every platform, and windows-implement 0.60.2 and windows-interface 0.59.3 do too on Windows, through chrono 0.4.45; serde_derive 1.0.229 uses syn 3.0.9" },
+]
 skip-tree = []
 
 [sources]

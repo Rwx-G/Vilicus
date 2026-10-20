@@ -37,3 +37,14 @@ vilicus-mod-reference = { path = "testing/vilicus-mod-reference" }
 # Third-party crates at the versions of the spine's Stack table; each one needs owner approval and
 # passes the supply-chain gates of D28 (ci/check_supply_chain.py, cargo deny, vet and audit).
 serde = { version = "1.0.229", features = ["derive"] }
+# Canonical CBOR of AD-13 and D130, for vilicus-proto (Story 2.5). `dcbor` without its default
+# features: `std` alone, no big integers, hash maps or spin locks. `unicode-normalization` is
+# pinned exactly because its Unicode version is part of the canonical form (D130).
+dcbor = { version = "=0.25.2", default-features = false, features = ["std"] }
+unicode-normalization = { version = "=0.1.25", default-features = false }
+# Dev-dependencies of vilicus-proto only (Story 2.5, owner approval): reading and writing the E19
+# vector files, and SHA-256 for their hashes. aws-lc-rs is the version rustls 0.23.46 resolves
+# to (spine Stack), with only its `aws-lc-sys` backend; runtime hashing is the Core's, through
+# vilicus-crypto (AD-3).
+serde_json = "=1.0.154"
+aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys"] }

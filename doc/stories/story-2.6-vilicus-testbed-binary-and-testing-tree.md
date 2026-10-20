@@ -2,7 +2,7 @@
 title: 'vilicus-testbed binary and testing tree'
 epic: 2
 story: 6
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-109, AD-3, D102, D141]

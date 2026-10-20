@@ -14,3 +14,28 @@ serde_core = "build script runs `rustc --version`, prints cfg flags for older co
 serde_derive = "procedural macro behind serde's `derive` feature: expands #[derive(Serialize, Deserialize)] and #[serde(...)] attributes into impls at compile time"
 proc-macro2 = "dependency of serde_derive; build script runs `rustc --version` and compiles a probe file into OUT_DIR to detect proc_macro_span support, then prints cfg flags"
 quote = "dependency of serde_derive; build script runs `rustc --version` and prints one cfg flag for compilers before 1.78"
+# dcbor 0.25.2 (D130), for vilicus-proto (Story 2.5), and the crates of its tree, chrono's
+# platform crates included: the check judges every platform, so Windows, WebAssembly and Haiku
+# crates are listed although Debian 13 never builds them.
+paste = "procedural macro of dcbor that concatenates identifiers; its build script runs `rustc --version` and prints cfg flags. Unmaintained (RUSTSEC-2024-0436, deny.toml and ci/audit-exceptions.toml)"
+thiserror = "dependency of dcbor; build script compiles a probe file with rustc into OUT_DIR to detect nightly backtrace support, prints cfg flags and writes a private module to OUT_DIR; no network"
+thiserror-impl = "procedural macro behind thiserror's #[derive(Error)]: expands error enums into Display and Error impls at compile time"
+zerocopy = "dependency of half, itself a dependency of dcbor; build script runs `rustc --version`, reads its own Cargo.toml and prints cfg flags; no network, no file written"
+zerocopy-derive = "procedural macro of zerocopy: derives its byte-layout traits at compile time"
+crunchy = "dependency of half; build script writes a generated lib.rs of unrolling macros to OUT_DIR and prints a rustc-env variable; no network"
+num-traits = "dependency of chrono; build script uses autocfg to compile probe expressions with rustc into OUT_DIR and prints cfg flags"
+libc = "dependency of chrono's platform crates and of cc's jobserver; build script runs `rustc --version` and prints cfg flags for the target; no network, no file written"
+getrandom = "dependency of jobserver, which cc uses; build script reads CARGO_CFG_SANITIZE and prints one cfg flag; no network, no file written"
+iana-time-zone-haiku = "dependency of chrono on Haiku only, never built for Debian; build script compiles one C++ file with cc into OUT_DIR and links libbe on Haiku"
+windows-implement = "procedural macro of windows-core, on Windows only (chrono through iana-time-zone): expands COM interface implementations at compile time"
+windows-interface = "procedural macro of windows-core, on Windows only (chrono through iana-time-zone): expands COM interface declarations at compile time"
+wasm-bindgen = "dependency of chrono on WebAssembly only; build script prints cfg flags from the target and the compiler version; no network, no file written"
+wasm-bindgen-macro = "procedural macro of wasm-bindgen, on WebAssembly only: expands #[wasm_bindgen] items at compile time"
+wasm-bindgen-shared = "dependency of wasm-bindgen, on WebAssembly only; build script runs `git rev-parse HEAD` in its own directory to name the version, hashes its schema file and prints two rustc-env variables; no network, no file written"
+rustversion = "procedural macro of wasm-bindgen's build script, on WebAssembly only; its own build script runs `rustc --version` and writes the parsed version to OUT_DIR"
+# Dev-dependencies of vilicus-proto only (Story 2.5): the E19 vector generator and its tests.
+# Neither reaches a release artefact (ci/check_packaging.py).
+serde_json = "dev-dependency of vilicus-proto, reads and writes the E19 vector files; build script prints cfg flags from the target architecture and pointer width; no network, no file written"
+zmij = "dependency of serde_json; build script runs `rustc --version` and prints cfg flags; no network, no file written"
+aws-lc-rs = "dev-dependency of vilicus-proto, SHA-256 of the E19 vector files (spine Stack, the version rustls 0.23.46 pulls); build script reads its features and target and prints cfg flags; no network, no file written"
+aws-lc-sys = "dependency of aws-lc-rs; build script compiles the bundled AWS-LC C and assembly sources with cc into OUT_DIR and links them, with pregenerated bindings (no bindgen) and no cmake on Linux. It would link a system AWS-LC instead if one is found or AWS_LC_SYS_SYSTEM_DIR is set; none is in the pinned rust:1.99-trixie image (Story 2.5); no network"

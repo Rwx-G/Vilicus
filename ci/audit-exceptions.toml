@@ -1,0 +1,7 @@
+# The cargo-audit warnings the workspace lockfile may carry, each with its reason (D28). Read by
+# the `audit` job of .github/workflows/ci.yml through ci/check_audit_report.py, which fails on
+# every vulnerability, on every warning not listed here, and on an entry that matches nothing in
+# the report. deny.toml lists the same advisories under [advisories] ignore, for cargo deny.
+
+[advisories]
+RUSTSEC-2024-0436 = "paste 1.0.15 is unmaintained, with no known vulnerability; a build-time procedural macro of dcbor 0.25.2, the canonical CBOR crate of D130 (Story 1.9, finding 6). Review by 2027-04-16: check dcbor for a release without paste, or renew this exception."

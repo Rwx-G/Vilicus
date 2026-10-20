@@ -14,6 +14,9 @@ use crate::wire::{self, DecodeError, Wire};
 /// Bytes of the length prefix.
 pub const LENGTH_PREFIX_LEN: usize = 4;
 
+/// The first part of a message the buffer is sized for, before any byte of it arrives.
+const FIRST_READ: usize = 64 * 1024;
+
 /// The kind of an internal socket, which sets its largest frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocketKind {
@@ -89,8 +92,10 @@ impl From<DecodeError> for FrameError {
 }
 
 /// Reads one frame and returns its message bytes, still undecoded. The length is checked against
-/// the socket kind's maximum before any byte of the message is read, and the buffer grows with
-/// the bytes received rather than being reserved from the declared length.
+/// the socket kind's maximum before any byte of the message is read. The buffer is never reserved
+/// from the declared length: it holds 64 KiB at first, then doubles only once the bytes it holds
+/// have arrived, and never grows past the declared length, so a frame at the maximum takes one
+/// buffer of exactly its size.
 pub fn read_frame(reader: &mut impl Read, kind: SocketKind) -> Result<Vec<u8>, FrameError> {
     let mut prefix = [0u8; LENGTH_PREFIX_LEN];
     reader.read_exact(&mut prefix)?;
@@ -102,13 +107,22 @@ pub fn read_frame(reader: &mut impl Read, kind: SocketKind) -> Result<Vec<u8>, F
             max,
         });
     }
+    let len = len as usize;
     let mut message = Vec::new();
-    reader.take(u64::from(len)).read_to_end(&mut message)?;
-    if message.len() != len as usize {
-        return Err(FrameError::Io(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "the stream ended inside a frame",
-        )));
+    while message.len() < len {
+        let received = message.len();
+        let next = received.max(FIRST_READ).min(len - received);
+        message.reserve_exact(next);
+        message.resize(received + next, 0);
+        reader
+            .read_exact(&mut message[received..])
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::UnexpectedEof => FrameError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the stream ended inside a frame",
+                )),
+                _ => FrameError::Io(error),
+            })?;
     }
     Ok(message)
 }
@@ -242,6 +256,35 @@ mod tests {
             let read = read_frame(&mut bytes.as_slice(), kind).expect("at the maximum");
             assert_eq!(read.len(), max as usize);
             assert!(crate::profile::decode(&read).is_ok());
+        }
+    }
+
+    /// Story 2.7: the fuzz job's limit on a single allocation found that reading a frame at the
+    /// maximum reserved twice its size (`read_to_end` doubles its buffer to probe for the end), a
+    /// 32 MiB allocation for a 16 MiB data frame. The buffer now ends at the declared length.
+    #[test]
+    fn a_frame_is_read_into_a_buffer_no_larger_than_its_length() {
+        for kind in [SocketKind::Control, SocketKind::Data] {
+            let max = kind.max_message_len();
+            for len in [
+                0,
+                1,
+                FIRST_READ as u32,
+                FIRST_READ as u32 + 1,
+                max / 2 + 1,
+                max,
+            ] {
+                let bytes = framed(len, &vec![0xab; len as usize]);
+                let read = read_frame(&mut bytes.as_slice(), kind).expect("within the maximum");
+                assert_eq!(read.len(), len as usize);
+                assert_eq!(
+                    read.capacity(),
+                    len as usize,
+                    "{kind:?} frame of {len} bytes"
+                );
+                let slow = read_frame(&mut OneByteAtATime(&bytes), kind).expect("read slowly");
+                assert_eq!(slow, read);
+            }
         }
     }
 

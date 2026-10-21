@@ -130,11 +130,14 @@ fn own_action(member: Id) -> Call {
     }
 }
 
-/// What a session of taint `session` consumed: nothing, or something `external`.
+/// What a session of taint `session` consumed: nothing, or an `external` meals datum.
 fn consumed_in(session: Taint) -> Consumed {
-    Consumed {
-        data_types: Vec::new(),
-        taint: session.into(),
+    match session {
+        Taint::Trusted => Consumed::NOTHING,
+        Taint::External => Consumed {
+            data_types: vec![DataType::Meals],
+            taint: EffectiveTaint::External,
+        },
     }
 }
 
@@ -1252,7 +1255,7 @@ fn an_ai_write_cannot_drop_the_taint_its_session_consumed() {
     ] {
         let by = Call {
             consumed: Consumed {
-                data_types: Vec::new(),
+                data_types: vec![DataType::Meals],
                 taint: consumed,
             },
             ..ai_task(session)
@@ -1275,8 +1278,9 @@ fn an_ai_write_cannot_drop_the_taint_its_session_consumed() {
 }
 
 /// What a call says it consumed must fit its principal and session: a tainted AI session consumed
-/// something not `trusted`, an untainted one nothing `external`, and only an AI or plugin session
-/// consumes at all.
+/// something not `trusted`, with its data types, an untainted one nothing `external`, and only an
+/// AI or plugin session consumes at all; an AI task's unapproved write is authored by the member
+/// it acts for (re-review, nit 6).
 #[test]
 fn a_call_whose_consumption_does_not_fit_its_session_is_refused() {
     let module = notes_module();
@@ -1308,6 +1312,24 @@ fn a_call_whose_consumption_does_not_fit_its_session_is_refused() {
                 taint: EffectiveTaint::Trusted,
             },
             ..own_action(ella())
+        },
+        Call {
+            consumed: consumed(EffectiveTaint::External),
+            ..ai_task(Taint::External)
+        },
+        Call {
+            authority: Authority::Unapproved {
+                author: Some(noe()),
+                acting_for: Some(ella()),
+            },
+            ..ai_task(Taint::Trusted)
+        },
+        Call {
+            authority: Authority::Unapproved {
+                author: None,
+                acting_for: Some(ella()),
+            },
+            ..ai_task(Taint::Trusted)
         },
     ] {
         let refused = call(&handle, module, &by, &mut stamper, |records| {
@@ -2495,6 +2517,7 @@ fn stored_taint_is_never_member() {
             Taint::External
         };
         let member = [ella(), noe()][rng.below(2)];
+        let acting_for = [Some(ella()), Some(noe()), None][rng.below(3)];
         let authority = match principal {
             Principal::Member | Principal::Cli => Authority::OwnAction { member },
             Principal::AiTask | Principal::Plugin if rng.next() & 1 == 0 => Authority::Approved {
@@ -2503,8 +2526,12 @@ fn stored_taint_is_never_member() {
                 drafts: vec!["Pommes et poires".into()],
             },
             _ => Authority::Unapproved {
-                author: [Some(ella()), Some(noe()), None][rng.below(3)],
-                acting_for: [Some(ella()), Some(noe()), None][rng.below(3)],
+                author: if principal == Principal::AiTask {
+                    acting_for
+                } else {
+                    [Some(ella()), Some(noe()), None][rng.below(3)]
+                },
+                acting_for,
             },
         };
         let by = Call {

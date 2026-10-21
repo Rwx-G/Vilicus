@@ -192,13 +192,23 @@ fn check_call(call: &Call) -> Result<(), RecordError> {
 
 /// True when what the call says it consumed fits its principal and its session taint: only an AI
 /// or plugin session consumes, and a tainted session consumed something other than `trusted`,
-/// while an untainted one consumed nothing `external` (`doc/architecture.md` section 9.3).
+/// which carries data types, while an untainted one consumed nothing `external`
+/// (`doc/architecture.md` section 9.3, D103). An AI task's unapproved writes are authored by the
+/// member it acts for (spine conventions, D147).
 fn consumed_fits(call: &Call) -> bool {
     if !matches!(call.principal, Principal::AiTask | Principal::Plugin) {
         return call.consumed == Consumed::NOTHING;
     }
+    if let (Principal::AiTask, Authority::Unapproved { author, acting_for }) =
+        (call.principal, &call.authority)
+        && author != acting_for
+    {
+        return false;
+    }
     match call.session {
-        Taint::External => call.consumed.taint != EffectiveTaint::Trusted,
+        Taint::External => {
+            call.consumed.taint != EffectiveTaint::Trusted && !call.consumed.data_types.is_empty()
+        }
         Taint::Trusted => call.consumed.taint != EffectiveTaint::External,
     }
 }

@@ -628,3 +628,59 @@ fn a_call_without_typed_apis_refuses_every_read() {
         "{result:?}"
     );
 }
+
+/// Read connections that answer every request with the `shop` file of Ella's partition.
+struct Misplaced<'a> {
+    ellas: &'a Handle<Read>,
+}
+
+impl ApiFiles for Misplaced<'_> {
+    fn reader(&self, _: &ModuleName, _: Partition) -> Option<&Handle<Read>> {
+        Some(self.ellas)
+    }
+}
+
+/// AD-5, FR-19: the Core reads only the file of the module and partition it asked for. A
+/// household call reading Ella's item through connections that answer with her file never reads
+/// it: the connection of another file counts as a file that is not open.
+#[test]
+fn a_connection_of_another_file_is_never_read() {
+    let fixture = Fixture::new("api-misplaced");
+    let ellas = fixture
+        .readers
+        .handles
+        .iter()
+        .find(|handle| {
+            handle.file().module().as_str() == "shop" && handle.file().partition() == ELLA()
+        })
+        .expect("Ella's shop file");
+    let misplaced = Misplaced { ellas };
+    let boundary = Boundary {
+        apis: Some(Apis {
+            registry: fixture.registry,
+            files: &misplaced,
+        }),
+        ..fixture.boundary()
+    };
+    let notes = fixture.writer("notes", Partition::Household);
+    let declaration = fixture
+        .registry
+        .module(notes.file().module())
+        .expect("registered");
+    let hers = fixture.items[0];
+    let result = boundary.run(
+        notes,
+        declaration,
+        &rule(),
+        &fixture.invocation(),
+        &mut *fixture.stamper.borrow_mut(),
+        |records| records.read("shop", "item", hers),
+    );
+    match result {
+        Err(HandlerError::Refused(RecordError::Unavailable(unavailable))) => {
+            assert_eq!(unavailable.state(), AvailabilityState::Opening);
+            assert_eq!(unavailable.partition(), Partition::Household);
+        }
+        other => panic!("{other:?}"),
+    }
+}

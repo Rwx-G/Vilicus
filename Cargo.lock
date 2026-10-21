@@ -636,6 +636,8 @@ version = "0.0.0"
 dependencies = [
  "vilicus-core",
  "vilicus-mod-reference",
+ "vilicus-module-api",
+ "vilicus-types",
 ]
 
 [[package]]

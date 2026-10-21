@@ -256,10 +256,7 @@ impl Boundary<'_> {
                     fault = Some(Fault::Panicked);
                     Err(WriteError::Failed)
                 }
-                Ok(_)
-                    if self.clock.now() > deadline
-                        || self.states.fault(&name, partition).is_some() =>
-                {
+                Ok(_) if self.clock.now() > deadline => {
                     fault = Some(Fault::TimeBudget);
                     Err(WriteError::Failed)
                 }

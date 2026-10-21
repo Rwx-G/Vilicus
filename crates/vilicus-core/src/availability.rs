@@ -396,8 +396,9 @@ impl ModuleStates {
         }
     }
 
-    /// The fault of `module` in `partition`, if it faulted.
-    pub(crate) fn fault(&self, module: &ModuleName, partition: Partition) -> Option<Fault> {
+    /// The fault of `module` in `partition`, if it faulted: the first one, which the state
+    /// `faulted` does not tell.
+    pub fn fault(&self, module: &ModuleName, partition: Partition) -> Option<Fault> {
         self.files()
             .entries
             .get(&(module.clone(), partition))

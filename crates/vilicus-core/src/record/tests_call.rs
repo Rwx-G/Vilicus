@@ -15,7 +15,7 @@ use vilicus_types::{EffectiveTaint, Id, ModuleName, Principal, Rev, Source, Tain
 use super::envelope::data_types_text;
 use super::tests::{content, module, noon, open_new, rows, text};
 use super::{
-    Authority, Call, CallOutcome, RecordChange, RecordError, RecordProvenance, Stamper,
+    Authority, Call, CallOutcome, Consumed, RecordChange, RecordError, RecordProvenance, Stamper,
     check_stored_rows, insert, run_call,
 };
 
@@ -122,6 +122,16 @@ fn own_action(member: Id) -> Call {
         session: Taint::Trusted,
         authority: Authority::OwnAction { member },
         read: Vec::new(),
+        consumed: Consumed::NOTHING,
+        implicit_inputs: Vec::new(),
+    }
+}
+
+/// What a session of taint `session` consumed: nothing, or something `external`.
+fn consumed_in(session: Taint) -> Consumed {
+    Consumed {
+        data_types: Vec::new(),
+        taint: session.into(),
     }
 }
 
@@ -136,6 +146,8 @@ fn ai_task(session: Taint) -> Call {
             acting_for: Some(ella()),
         },
         read: Vec::new(),
+        consumed: consumed_in(session),
+        implicit_inputs: Vec::new(),
     }
 }
 
@@ -151,6 +163,8 @@ fn approved(session: Taint, written: &[&str], drafts: &[&str]) -> Call {
             drafts: drafts.iter().map(|text| (*text).to_owned()).collect(),
         },
         read: Vec::new(),
+        consumed: consumed_in(session),
+        implicit_inputs: Vec::new(),
     }
 }
 
@@ -178,6 +192,8 @@ fn unapproved(principal: Principal, source: Source) -> Call {
             acting_for: None,
         },
         read: Vec::new(),
+        consumed: Consumed::NOTHING,
+        implicit_inputs: Vec::new(),
     }
 }
 
@@ -1054,6 +1070,320 @@ fn inputs_of_other_files_and_the_updated_record_count() {
     );
 }
 
+fn provenance(
+    id: Id,
+    taint: Taint,
+    author: Option<Id>,
+    data_types: &[DataType],
+) -> RecordProvenance {
+    RecordProvenance {
+        id,
+        taint,
+        author,
+        data_types: data_types.to_vec(),
+        free_text: Vec::new(),
+    }
+}
+
+/// Story 3.5 review, decision C2 and M3 (D103, I43): an AI task's or a plugin's write holds the
+/// data types its session consumed whatever inputs it declares, insert and update; a consumed
+/// type the record kind does not declare refuses the write, approved or not. A member's own or
+/// approved write holds what its kind declares.
+#[test]
+fn an_ai_or_plugin_write_holds_the_data_types_its_session_consumed() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "consumed-types");
+    let mut stamper = TestStamper::at(noon());
+    let list = member_id(30);
+    seed(
+        &handle,
+        module,
+        "notes",
+        &provenance(
+            list,
+            Taint::Trusted,
+            Some(ella()),
+            &[DataType::ShoppingList],
+        ),
+        &note("Liste"),
+    );
+    let meals = Consumed {
+        data_types: vec![DataType::Meals],
+        taint: EffectiveTaint::Trusted,
+    };
+    let declared = vec![
+        (ai_task(Taint::Trusted), "shopping_list"),
+        (
+            Call {
+                consumed: meals.clone(),
+                ..ai_task(Taint::Trusted)
+            },
+            "meals,shopping_list",
+        ),
+        (
+            Call {
+                consumed: meals.clone(),
+                ..unapproved(Principal::Plugin, Source::Plugin(task()))
+            },
+            "meals,shopping_list",
+        ),
+        (own_action(ella()), "meals,shopping_list"),
+        (approved(Taint::Trusted, &[], &[]), "meals,shopping_list"),
+    ];
+    for (by, expected) in &declared {
+        let written = insert_one(
+            &handle,
+            module,
+            by,
+            &mut stamper,
+            "notes",
+            &note("Pommes"),
+            &[list],
+        );
+        assert_eq!(
+            stored_data_types(&handle, "notes", written.id),
+            *expected,
+            "{:?}",
+            by.principal
+        );
+    }
+    let narrow = insert_one(
+        &handle,
+        module,
+        &ai_task(Taint::Trusted),
+        &mut stamper,
+        "notes",
+        &note("Pommes"),
+        &[list],
+    );
+    let consuming = Call {
+        consumed: meals.clone(),
+        ..ai_task(Taint::Trusted)
+    };
+    call(&handle, module, &consuming, &mut stamper, |records| {
+        records.update(
+            "notes",
+            narrow.id,
+            Rev::FIRST,
+            &[("quantity", Value::Integer(2))],
+            &[list],
+        )
+    })
+    .expect("the call commits");
+    assert_eq!(
+        stored_data_types(&handle, "notes", narrow.id),
+        "meals,shopping_list",
+        "an update holds what its session consumed"
+    );
+
+    let health = Consumed {
+        data_types: vec![DataType::Health],
+        taint: EffectiveTaint::Trusted,
+    };
+    let mut plugin_approved = approved(Taint::Trusted, &[], &[]);
+    plugin_approved.principal = Principal::Plugin;
+    plugin_approved.source = Source::Plugin(task());
+    let before = content(&handle);
+    for by in [
+        ai_task(Taint::Trusted),
+        approved(Taint::Trusted, &[], &[]),
+        unapproved(Principal::Plugin, Source::Plugin(task())),
+        plugin_approved,
+    ] {
+        let by = Call {
+            consumed: health.clone(),
+            ..by
+        };
+        let refused = call(&handle, module, &by, &mut stamper, |records| {
+            records.insert("notes", &note("Régime"), &[list])
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(RecordError::UndeclaredDataType { table: "notes" })
+            ),
+            "{:?}",
+            by.principal
+        );
+    }
+    assert_eq!(content(&handle), before);
+}
+
+/// Story 3.5 review, minor 6 (D70, AD-7): an AI task that read another member's record cannot
+/// drop it from the stored taint by leaving it out of its inputs. A session that read only Noé's
+/// structured fields is not tainted, yet consumed `member` data: Ella's assistant writing from
+/// her own record alone stores `external`, as it would naming Noé's.
+#[test]
+fn an_ai_write_cannot_drop_the_taint_its_session_consumed() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "consumed-taint");
+    let mut stamper = TestStamper::at(noon());
+    let ellas = member_id(31);
+    seed_note(&handle, module, ellas, Taint::Trusted, Some(ella()));
+    for (session, consumed, expected) in [
+        (Taint::Trusted, EffectiveTaint::Trusted, "trusted"),
+        (Taint::Trusted, EffectiveTaint::Member, "external"),
+        (Taint::External, EffectiveTaint::Member, "external"),
+        (Taint::External, EffectiveTaint::External, "external"),
+    ] {
+        let by = Call {
+            consumed: Consumed {
+                data_types: Vec::new(),
+                taint: consumed,
+            },
+            ..ai_task(session)
+        };
+        let written = insert_one(
+            &handle,
+            module,
+            &by,
+            &mut stamper,
+            "notes",
+            &note("Pommes"),
+            &[ellas],
+        );
+        assert_eq!(
+            stored_taint(&handle, "notes", written.id),
+            expected,
+            "session {session}, consumed {consumed}"
+        );
+    }
+}
+
+/// What a call says it consumed must fit its principal and session: a tainted AI session consumed
+/// something not `trusted`, an untainted one nothing `external`, and only an AI or plugin session
+/// consumes at all.
+#[test]
+fn a_call_whose_consumption_does_not_fit_its_session_is_refused() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "consumed-fit");
+    let mut stamper = TestStamper::at(noon());
+    let ellas = member_id(32);
+    seed_note(&handle, module, ellas, Taint::Trusted, Some(ella()));
+    let consumed = |taint| Consumed {
+        data_types: Vec::new(),
+        taint,
+    };
+    let before = content(&handle);
+    for by in [
+        Call {
+            consumed: consumed(EffectiveTaint::Trusted),
+            ..ai_task(Taint::External)
+        },
+        Call {
+            consumed: consumed(EffectiveTaint::External),
+            ..ai_task(Taint::Trusted)
+        },
+        Call {
+            consumed: consumed(EffectiveTaint::Member),
+            ..unapproved(Principal::Rule, Source::Rule(task()))
+        },
+        Call {
+            consumed: Consumed {
+                data_types: vec![DataType::Meals],
+                taint: EffectiveTaint::Trusted,
+            },
+            ..own_action(ella())
+        },
+    ] {
+        let refused = call(&handle, module, &by, &mut stamper, |records| {
+            records.insert("notes", &note("Pommes"), &[ellas])
+        });
+        assert!(
+            matches!(refused, Err(RecordError::InconsistentCall)),
+            "{:?}",
+            by.principal
+        );
+    }
+    assert_eq!(content(&handle), before);
+}
+
+/// Story 3.5 review, minor 7 (AD-7, AD-39, AD-45): a rule, a playbook or an event consumer
+/// derives from records the call carries for it, the definition an adult validated or the
+/// emitting record, without the module naming them. A rule Ella validated, acting for her,
+/// stores `trusted` with her as author and the definition among its inputs; with no member to
+/// act for, her definition reads as another member's and stores `external`; an event from an
+/// `external` record stores `external`; with neither inputs nor implicit inputs the write is
+/// refused.
+#[test]
+fn a_rule_derives_from_the_definition_its_call_carries() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "implicit");
+    let mut stamper = TestStamper::at(noon());
+    let definition = provenance(
+        member_id(33),
+        Taint::Trusted,
+        Some(ella()),
+        &[DataType::Meals],
+    );
+    let rule = |acting_for| Call {
+        implicit_inputs: vec![definition.clone()],
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for,
+        },
+        ..unapproved(Principal::Rule, Source::Rule(task()))
+    };
+    let outcome = call(
+        &handle,
+        module,
+        &rule(Some(ella())),
+        &mut stamper,
+        |records| records.insert("notes", &note("Acheter du pain"), &[]),
+    )
+    .expect("the call commits");
+    let id = outcome.value.id;
+    assert_eq!(stored_taint(&handle, "notes", id), "trusted");
+    assert_eq!(stored_author(&handle, "notes", id), Some(ella()));
+    assert_eq!(stored_data_types(&handle, "notes", id), "meals");
+    assert_eq!(outcome.changes[0].inputs, [definition.id]);
+
+    let unowned = insert_one(
+        &handle,
+        module,
+        &rule(None),
+        &mut stamper,
+        "notes",
+        &note("Acheter du pain"),
+        &[],
+    );
+    assert_eq!(stored_taint(&handle, "notes", unowned.id), "external");
+
+    let event = Call {
+        implicit_inputs: vec![provenance(
+            member_id(34),
+            Taint::External,
+            None,
+            &[DataType::Meals],
+        )],
+        ..unapproved(Principal::Event, Source::Event(task()))
+    };
+    let reacted = insert_one(
+        &handle,
+        module,
+        &event,
+        &mut stamper,
+        "notes",
+        &note("Réponse"),
+        &[],
+    );
+    assert_eq!(stored_taint(&handle, "notes", reacted.id), "external");
+
+    let before = content(&handle);
+    let bare = call(
+        &handle,
+        module,
+        &unapproved(Principal::Rule, Source::Rule(task())),
+        &mut stamper,
+        |records| records.insert("notes", &note("Acheter du pain"), &[]),
+    );
+    assert!(matches!(
+        bare,
+        Err(RecordError::MissingInputs { table: "notes" })
+    ));
+    assert_eq!(content(&handle), before);
+}
+
 /// Seeded SplitMix64, for the property tests; not for cryptographic use.
 struct TestRng(u64);
 
@@ -1716,6 +2046,12 @@ fn stored_taint_is_never_member() {
             session,
             authority,
             read: Vec::new(),
+            consumed: if matches!(principal, Principal::AiTask | Principal::Plugin) {
+                consumed_in(session)
+            } else {
+                Consumed::NOTHING
+            },
+            implicit_inputs: Vec::new(),
         };
         let inputs = rng.subset(&known);
         let title = ["Pommes", "Pommes et poires", "Autre"][rng.below(3)];

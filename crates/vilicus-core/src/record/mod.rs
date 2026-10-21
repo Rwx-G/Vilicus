@@ -63,7 +63,7 @@ use vilicus_module_api::{
 use vilicus_storage::{Handle, Inspect, SqlValue, Write};
 use vilicus_types::{Id, UtcMillis};
 
-pub use call::{Authority, Call, CallOutcome, RecordChange, Stamper, run_call};
+pub use call::{Authority, Call, CallOutcome, Consumed, RecordChange, Stamper, run_call};
 #[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
 pub use provenance::{DRAFT_RUN_WORDS, RecordProvenance};

@@ -5,7 +5,7 @@ use vilicus_module_api::{
     Field, FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written,
 };
 use vilicus_storage::{Handle, SqlValue, Write};
-use vilicus_types::{DataType, Id, Principal, Rev, Source, Taint, UtcMillis};
+use vilicus_types::{DataType, EffectiveTaint, Id, Principal, Rev, Source, Taint, UtcMillis};
 
 use super::envelope::{self, data_types_text};
 use super::provenance::{self, RecordProvenance, Stamp, Stored};
@@ -26,11 +26,40 @@ pub struct Call {
     /// (`doc/architecture.md` section 9.3); for an event, its emitting call's taint (AD-27);
     /// otherwise `trusted`.
     pub session: Taint,
+    /// What an AI or plugin session consumed before the call, which every write of the call holds
+    /// whatever inputs it declares; [`Consumed::NOTHING`] for every other principal.
+    pub consumed: Consumed,
     /// Whether a member made or approved the call's writes.
     pub authority: Authority,
     /// The records of other files the call read, with the provenance the Core read with them: a
     /// write may name them as inputs. A record of the written file is read from the file itself.
     pub read: Vec<RecordProvenance>,
+    /// The records every write of the call is derived from without the module naming them: the
+    /// definition of a rule or a playbook an adult validated, or the record whose event a call
+    /// consumes. They count as inputs of each write, and stand for its declared inputs.
+    pub implicit_inputs: Vec<RecordProvenance>,
+}
+
+/// What an AI or plugin session consumed before a call (D103, AD-7), as its capability token
+/// recorded it: the data types of every datum it read, and the most restrictive effective taint
+/// among them as the member it acts for saw them, `member` for another member's structured
+/// fields included, which do not taint the session (D70). A write of the call holds at least
+/// these data types and derives from at least this taint, so declaring fewer inputs never lowers
+/// what it stores.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Consumed {
+    /// The data types of what the session read.
+    pub data_types: Vec<DataType>,
+    /// The most restrictive effective taint of what the session read.
+    pub taint: EffectiveTaint,
+}
+
+impl Consumed {
+    /// A session that read nothing, and every principal that has no session.
+    pub const NOTHING: Self = Self {
+        data_types: Vec::new(),
+        taint: EffectiveTaint::Trusted,
+    };
 }
 
 /// Whether a member made or approved a call's writes, which decides their stored taint and
@@ -88,7 +117,8 @@ pub struct RecordChange {
     pub before: Option<Rev>,
     /// Its revision after the write; `None` for a delete.
     pub after: Option<Rev>,
-    /// The inputs the write declared, each once, in the order given.
+    /// The inputs of the write, each once: those it declared, in the order given, then the
+    /// call's implicit inputs.
     pub inputs: Vec<Id>,
 }
 
@@ -142,7 +172,8 @@ pub fn run_call<T>(
 
 /// Refuses a call whose authority or source does not fit its principal: only `Member` and `Cli`
 /// act as a member themselves, and always do; only a request of a token principal is approved;
-/// and the `source` stamped on its records is one the principal produces.
+/// the `source` stamped on its records is one the principal produces; and what it consumed fits
+/// its session.
 fn check_call(call: &Call) -> Result<(), RecordError> {
     let acts_as_member = matches!(call.principal, Principal::Member | Principal::Cli);
     let authority_fits = match call.authority {
@@ -152,10 +183,23 @@ fn check_call(call: &Call) -> Result<(), RecordError> {
         }
         Authority::Unapproved { .. } => !acts_as_member,
     };
-    if authority_fits && source_fits(call) {
+    if authority_fits && source_fits(call) && consumed_fits(call) {
         Ok(())
     } else {
         Err(RecordError::InconsistentCall)
+    }
+}
+
+/// True when what the call says it consumed fits its principal and its session taint: only an AI
+/// or plugin session consumes, and a tainted session consumed something other than `trusted`,
+/// while an untainted one consumed nothing `external` (`doc/architecture.md` section 9.3).
+fn consumed_fits(call: &Call) -> bool {
+    if !matches!(call.principal, Principal::AiTask | Principal::Plugin) {
+        return call.consumed == Consumed::NOTHING;
+    }
+    match call.session {
+        Taint::External => call.consumed.taint != EffectiveTaint::Trusted,
+        Taint::Trusted => call.consumed.taint != EffectiveTaint::External,
     }
 }
 
@@ -266,7 +310,7 @@ impl CallRecords<'_> {
             table,
             &envelope,
             fields,
-            &inputs_union(&inputs),
+            &provenance::floor(self.call, &inputs),
         )?;
         self.changes.push(RecordChange {
             table: table.name,
@@ -319,7 +363,7 @@ impl CallRecords<'_> {
             id,
             &envelope,
             fields,
-            &inputs_union(&inputs),
+            &provenance::floor(self.call, &inputs),
         )?;
         self.changes.push(RecordChange {
             table: table.name,
@@ -357,14 +401,17 @@ impl CallRecords<'_> {
     }
 
     /// The provenance of each input, each id once: a record of this file, read in the write
-    /// transaction, or one the call read from another file. A write that must declare inputs
-    /// and declares none is refused.
+    /// transaction, or one the call read from another file, then the call's implicit inputs. A
+    /// write that must declare inputs and has none is refused.
     fn resolve_inputs(
         &self,
         table: &'static Table,
         inputs: &[Id],
     ) -> Result<(Vec<Id>, Vec<RecordProvenance>), RecordError> {
-        if inputs.is_empty() && provenance::requires_inputs(self.call) {
+        if inputs.is_empty()
+            && self.call.implicit_inputs.is_empty()
+            && provenance::requires_inputs(self.call)
+        {
             return Err(RecordError::MissingInputs { table: table.name });
         }
         let mut ids: Vec<Id> = Vec::with_capacity(inputs.len());
@@ -385,6 +432,12 @@ impl CallRecords<'_> {
             };
             ids.push(*id);
             resolved.push(found);
+        }
+        for implicit in &self.call.implicit_inputs {
+            if !ids.contains(&implicit.id) {
+                ids.push(implicit.id);
+                resolved.push(implicit.clone());
+            }
         }
         Ok((ids, resolved))
     }
@@ -580,10 +633,6 @@ fn author_value(stamp: &Stamp) -> Value {
     stamp.author.map_or(Value::Null, |author| {
         Value::Blob(author.to_bytes().to_vec())
     })
-}
-
-fn inputs_union(inputs: &[RecordProvenance]) -> Vec<DataType> {
-    provenance::union(inputs.iter().map(|input| input.data_types.as_slice()))
 }
 
 /// What the module's code learns of a refused write: the names its declaration holds, and no

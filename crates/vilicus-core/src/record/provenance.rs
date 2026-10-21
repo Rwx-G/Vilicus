@@ -83,6 +83,11 @@ pub(crate) fn requires_inputs(call: &Call) -> bool {
 
 /// The provenance of a write of `fields` into `table` by `call`, derived from `inputs` and, for an
 /// update, from the record it changes.
+///
+/// Data types: a member's own or approved write holds what its kind declares; any other write
+/// the union of its inputs' sets, or the kind's set when it has none (a plugin's or an adapter's).
+/// Both hold the [`floor`], and an update adds the record's stored set, so a set only grows; a
+/// set beyond the kind's declaration is refused, never narrowed (D103).
 pub(crate) fn stamp(
     call: &Call,
     table: &'static Table,
@@ -95,15 +100,17 @@ pub(crate) fn stamp(
         Some(stored) => most_restrictive(written, stored.provenance.taint),
         None => written,
     };
-    let derived = if inputs.is_empty() {
-        table.data_types.to_vec()
-    } else {
-        union(inputs.iter().map(|input| input.data_types.as_slice()))
-    };
-    let data_types = match stored {
-        Some(stored) => union([derived.as_slice(), &stored.provenance.data_types]),
-        None => derived,
-    };
+    let declared = matches!(
+        call.authority,
+        Authority::OwnAction { .. } | Authority::Approved { .. }
+    ) || inputs.is_empty();
+    let floor = floor(call, inputs);
+    let data_types = union(
+        [floor.as_slice()]
+            .into_iter()
+            .chain(declared.then_some(table.data_types))
+            .chain(stored.map(|stored| stored.provenance.data_types.as_slice())),
+    );
     if !data_types
         .iter()
         .all(|data_type| table.data_types.contains(data_type))
@@ -175,8 +182,27 @@ fn written_taint(
                     *acting_for,
                 ))
             })
+            .chain(consumes(call).then(|| stored_taint(call.consumed.taint)))
             .fold(call.session, most_restrictive),
     }
+}
+
+/// The data types every write of `call` derived from `inputs` holds whatever else it is: the
+/// union of its inputs' sets and, for an AI or plugin session, of what the session consumed.
+/// The row writer refuses an envelope below it.
+pub(crate) fn floor(call: &Call, inputs: &[RecordProvenance]) -> Vec<DataType> {
+    union(
+        inputs
+            .iter()
+            .map(|input| input.data_types.as_slice())
+            .chain(consumes(call).then_some(call.consumed.data_types.as_slice())),
+    )
+}
+
+/// True for the principals whose session's consumption every write of theirs holds (AD-7): an AI
+/// task and a plugin, whose inputs are declared by code the model or the plugin drives.
+fn consumes(call: &Call) -> bool {
+    matches!(call.principal, Principal::AiTask | Principal::Plugin)
 }
 
 /// The free text of the inputs that are not `trusted` for `member`: text a member's write may

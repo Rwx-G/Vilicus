@@ -21,7 +21,7 @@ Status: Revision 2, early development: the V0.1 spikes live in `spikes/`, their 
 | [`key-management.md`](key-management.md) | Keys, unlock, recovery, rotation | Revision 2 |
 | [`ai-safety.md`](ai-safety.md) | Principles P1 to P14, invariants I1 to I43 | Revision 2 |
 | [`capability-matrix.md`](capability-matrix.md) | Action by tier by confirmation | Revision 2 |
-| [`decisions.md`](decisions.md) | Decisions D1 to D150 | Revision 2 |
+| [`decisions.md`](decisions.md) | Decisions D1 to D151 | Revision 2 |
 | [`research-notes.md`](research-notes.md) | Claims and experiments E1 to E32 (E21 unused) | Revision 2 |
 | [`prd.md`](prd.md) | Product requirements FR-1 to FR-112, design changes DC-1 to DC-81 | Final |
 | [`architecture-spine.md`](architecture-spine.md) | Architecture decisions AD-1 to AD-56 | Final |
@@ -98,6 +98,8 @@ Terms are used with one meaning across all documents.
 | **Data type** | One value of the closed set held in `vilicus-types` (`health`, `journal`, `budget`, `meals`, `meal_plan`, `stock`, `shopping_list`, `presence`, `home_state`, `alarm_state`, `calendar`, `child`, `mail_raw`, `household_other`, `personal_other`). Every record stores the set of data types it contains, a derived record's set being the union of its inputs' sets; the provider policy, the provider bound to a capability token and a secondary channel's ceiling all read it. The only term for this classification; "data class" is not used (see D48, D80, D103) |
 | **Structured field** | A field whose value set is fixed at build time: a compiled enumeration, a bounded number, a date or an opaque UUIDv7, or a value of a reviewed vocabulary; validated on every write (see D37, D98, D104). Every other field is free text |
 | **Reviewed vocabulary** | A run-time list of labels (tags, categories, room, scene, mode or ingredient names) whose every new label an adult confirms, at most 32 characters of Latin letters, digits, spaces, hyphens and apostrophes; only confirmed labels are structured values (see D104, D146) |
+| **Availability state** | Where one module file of one partition stands, as the Core holds it: `locked`, `opening`, `re-keying`, `migrating`, `ready`, `failed migration`, `faulted`, `deactivated` or `newer than code` (see spine AD-54, D151) |
+| **Handler table** | The functions of a module's tools, undo handlers and consumers, bound by name to its declaration (see spine AD-9, D151) |
 | **Reference module** | A module that exists to exercise the module contract in tests. Never packaged; linked only into the `vilicus-testbed` binary (see D102) |
 | **Test double** | A non-shipped plugin, AI process or channel used in V0.1 tests to exercise an interface that has no shipped consumer yet; linked only into the `vilicus-testbed` binary (see D102) |
 | **Testbed** | `vilicus-testbed`, a binary never packaged that links the reference module and the test doubles and accepts a CI test key; release gates that need them run against it, every other gate against the shipped package (see D102) |

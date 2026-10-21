@@ -83,6 +83,7 @@ macro_rules! closed_set {
 
 mod call_id;
 mod data_type;
+mod digest;
 mod effect;
 mod error;
 mod exception_class;
@@ -102,6 +103,7 @@ mod test_support;
 
 pub use call_id::{CallId, CallIdError};
 pub use data_type::DataType;
+pub use digest::{SHA256_LEN, sha256_hex};
 pub use effect::EffectOutcome;
 pub use error::{ClientError, ClientFacingError, ErrorCode, MessageKey, RetryClass};
 pub use exception_class::ExceptionClass;

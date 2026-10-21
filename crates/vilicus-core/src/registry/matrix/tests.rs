@@ -83,6 +83,7 @@ fn module(name: &'static str, sections: Vec<&'static str>, tools: Vec<Tool>) -> 
         topics: &[],
         consumers: &[],
         tools: leak(tools),
+        queries: &[],
     }
 }
 

@@ -24,10 +24,11 @@ mod tests;
 use core::fmt;
 use std::path::Path;
 
-use vilicus_storage::{Handle, ModuleFile, Partition, Write, maintenance};
+use vilicus_storage::{Handle, ModuleFile, Partition, Read, Write, maintenance};
 use vilicus_types::ModuleName;
 
 use crate::alert::InstanceAdminAlert;
+use crate::api::{ApiFiles, Apis, Layered, NoApiFiles};
 use crate::availability::{Generation, ModuleStates, Stage, StageRefused};
 use crate::boundary::Boundary;
 use crate::bus::{
@@ -61,10 +62,12 @@ impl Rekey for NothingToRekey {
 }
 
 /// The open module files of one partition, as the Core holds them once they serve: the write
-/// handle of each ready file.
+/// handle of each ready file, and the read handle the typed APIs of other modules read it through
+/// (AD-5, AD-9).
 pub struct PartitionFiles {
     partition: Partition,
     handles: Vec<Handle<Write>>,
+    readers: Vec<Handle<Read>>,
 }
 
 impl fmt::Debug for PartitionFiles {
@@ -95,12 +98,16 @@ impl PartitionFiles {
             .find(|handle| handle.file().module() == module)
     }
 
-    /// Closes every handle, each with a TRUNCATE checkpoint; the first failure is returned once
-    /// every handle was closed.
+    /// Closes every handle, the read handles first, each with a TRUNCATE checkpoint; the first
+    /// failure is returned once every handle was closed.
     pub fn close(self) -> Result<(), vilicus_storage::Error> {
         let mut first = Ok(());
-        for handle in self.handles {
-            let closed = handle.close();
+        let closes = self
+            .readers
+            .into_iter()
+            .map(Handle::close)
+            .chain(self.handles.into_iter().map(Handle::close));
+        for closed in closes {
             if first.is_ok() {
                 first = closed;
             }
@@ -112,6 +119,17 @@ impl PartitionFiles {
 impl ConsumerFiles for PartitionFiles {
     fn open(&self, module: &ModuleName) -> Option<&Handle<Write>> {
         self.handle(module)
+    }
+}
+
+impl ApiFiles for PartitionFiles {
+    fn reader(&self, module: &ModuleName, partition: Partition) -> Option<&Handle<Read>> {
+        if partition != self.partition {
+            return None;
+        }
+        self.readers
+            .iter()
+            .find(|reader| reader.file().module() == module)
     }
 }
 
@@ -200,7 +218,9 @@ pub struct Delivery<'a> {
 /// (AD-54): each is re-keyed through `rekey` if it must be, then migrated by `registry`'s runner,
 /// then opened and checked, each move recorded in `boundary`'s availability states under
 /// `generation`; then the outbox of each ready file is delivered through `delivery`, its
-/// consumers' code run inside `boundary`. A registered module whose file is not given is reported
+/// consumers' code run inside `boundary`, their typed API reads served from the partition's
+/// ready files, then from the files `boundary` serves (the household's, for a member's
+/// partition). A registered module whose file is not given is reported
 /// and left `locked`. Once the partition is locked again the bring-up stops where it is: no stage
 /// change of it moves a file any more, it opens nothing and delivers nothing. Returns the ready
 /// files, which the Core holds from then on, and what became of each file. Refused, before any
@@ -271,11 +291,15 @@ pub(crate) fn bring_up_with_space(
     let mut open = PartitionFiles {
         partition,
         handles: Vec::new(),
+        readers: Vec::new(),
     };
     for (target, outcome) in files.iter().zip(&mut outcomes) {
         if outcome.is_none() {
             match mover.opened(registry, target, &mut report.alerts) {
-                Ok(handle) => open.handles.push(handle),
+                Ok((handle, reader)) => {
+                    open.handles.push(handle);
+                    open.readers.push(reader);
+                }
                 Err(failed) => *outcome = Some(failed),
             }
         }
@@ -306,8 +330,23 @@ pub(crate) fn bring_up_with_space(
         links,
         stamper,
     } = delivery;
+    let given: &dyn ApiFiles = match &boundary.apis {
+        Some(apis) => apis.files,
+        None => &NoApiFiles,
+    };
+    let files = Layered {
+        first: &open,
+        then: given,
+    };
+    let boundary = Boundary {
+        apis: Some(Apis {
+            registry: *registry,
+            files: &files,
+        }),
+        ..*boundary
+    };
     for handle in &open.handles {
-        let delivered = deliver_outbox(registry, handle, &open, boundary, code, links, stamper);
+        let delivered = deliver_outbox(registry, handle, &open, &boundary, code, links, stamper);
         if let Ok(delivered) = &delivered {
             report.alerts.extend(delivered.alerts.iter().cloned());
         }
@@ -434,20 +473,32 @@ impl Mover<'_> {
         Err(FileOutcome::Migration(Box::new(migration)))
     }
 
-    /// Opens `target` as the Core opens every file and puts it `ready`; a file that does not open
-    /// is `newer than code` when it is, otherwise not served this time, `failed migration`, with
-    /// its alert. A file opened after the partition was locked is closed again.
+    /// Opens `target` as the Core opens every file, its write handle and the read handle the
+    /// typed APIs read it through, and puts it `ready`; a file that does not open is `newer than
+    /// code` when it is, otherwise not served this time, `failed migration`, with its alert. A
+    /// file opened after the partition was locked is closed again.
     fn opened(
         &self,
         registry: &Registry,
         target: &FileToMigrate<'_>,
         alerts: &mut Vec<InstanceAdminAlert>,
-    ) -> Result<Handle<Write>, FileOutcome> {
+    ) -> Result<(Handle<Write>, Handle<Read>), FileOutcome> {
         let file = target.file;
-        match registry.open::<Write>(file, target.key) {
-            Ok(handle) if self.put(file, Stage::Ready) => Ok(handle),
-            Ok(handle) => {
-                // The partition was locked: the handle goes, whatever its close reports.
+        let opened = registry.open::<Write>(file, target.key).and_then(|handle| {
+            match registry.open::<Read>(file, target.key) {
+                Ok(reader) => Ok((handle, reader)),
+                Err(error) => {
+                    // The read handle failed: the write handle goes, whatever its close reports.
+                    let _ = handle.close();
+                    Err(error)
+                }
+            }
+        });
+        match opened {
+            Ok(handles) if self.put(file, Stage::Ready) => Ok(handles),
+            Ok((handle, reader)) => {
+                // The partition was locked: the handles go, whatever their closes report.
+                let _ = reader.close();
                 let _ = handle.close();
                 Err(FileOutcome::PartitionLocked)
             }
@@ -481,6 +532,7 @@ impl Mover<'_> {
         PartitionFiles {
             partition,
             handles: Vec::new(),
+            readers: Vec::new(),
         }
     }
 }

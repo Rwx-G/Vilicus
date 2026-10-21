@@ -153,6 +153,7 @@ fn declare(
         tools: &[],
         topics,
         consumers,
+        queries: &[],
     }))
 }
 
@@ -247,6 +248,7 @@ impl Files {
         Boundary {
             states: &self.states,
             budget: HANDLER_TIME_BUDGET,
+            apis: None,
         }
     }
 

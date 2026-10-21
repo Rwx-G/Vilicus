@@ -169,6 +169,7 @@ pub(super) fn module(
         topics: &[],
         consumers: &[],
         tools: &[],
+        queries: &[],
     }))
 }
 

@@ -1,7 +1,7 @@
 //! What a module declares: its tables, each one record kind with its data types and its fields,
 //! its FTS5 tables and its migrations (AD-6, AD-9, D98, D103, D104, D127), its tools with the
-//! capability matrix sections they implement (FR-22, I13, AD-48), and the event topics it emits
-//! and consumes (FR-24, AD-29).
+//! capability matrix sections they implement (FR-22, I13, AD-48), the event topics it emits
+//! and consumes (FR-24, AD-29), and the queries of its typed API (AD-5).
 //!
 //! Every declaration is plain `'static` data built in a `const` item, so the set of tables,
 //! fields, value sets, data types and tools is fixed when the binary is built; nothing in this
@@ -10,6 +10,7 @@
 use vilicus_types::DataType;
 
 use crate::event::{Consumer, Topic};
+use crate::query::Query;
 use crate::tool::Tool;
 
 /// The SQL type a column is declared with in the module's migrations; the registry compares it
@@ -274,6 +275,9 @@ pub struct ModuleDeclaration {
     pub topics: &'static [Topic],
     /// The module's consumers, each of one topic.
     pub consumers: &'static [Consumer],
+    /// The module's typed API: the reads it offers other modules, each with its access list
+    /// (AD-5).
+    pub queries: &'static [Query],
 }
 
 impl ModuleDeclaration {
@@ -302,6 +306,11 @@ impl ModuleDeclaration {
     /// The topic named `name`, among those the module emits.
     pub fn topic(&self, name: &str) -> Option<&'static Topic> {
         self.topics.iter().find(|topic| topic.name == name)
+    }
+
+    /// The query named `name`, among those the module offers.
+    pub fn query(&self, name: &str) -> Option<&'static Query> {
+        self.queries.iter().find(|query| query.name == name)
     }
 
     /// The module's consumer of the topic `topic`, if it has one.

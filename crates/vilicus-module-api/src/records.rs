@@ -12,7 +12,8 @@
 //! Nor does it reach another module's file: it emits an event about a record it changed, which
 //! the Core delivers to the consumers the topic allows once the call commits, or requests a link
 //! from such a record to a record of another module, which the Core registers in the link table
-//! of the partition after the commit (AD-10, AD-29).
+//! of the partition after the commit (AD-10, AD-29); and it reads another module's record through
+//! that module's typed API, which the Core serves (AD-5).
 //!
 //! A module's code holds a `&mut dyn Records` for the duration of one call:
 //!
@@ -40,6 +41,7 @@ use core::fmt;
 
 use vilicus_types::{Id, Rev};
 
+use crate::query::ReadRecord;
 use crate::value::{Value, ValueError};
 
 /// The record API a module writes through, implemented by the Core for one call on one module
@@ -112,6 +114,21 @@ pub trait Records {
         target_module: &str,
         target: Id,
     ) -> Result<Id, WriteError>;
+
+    /// Reads the record `id` through the query `query` of the module `module`'s typed API (AD-5):
+    /// the fields the query names, as that module's file holds them, read on a read connection of
+    /// that file, never in this call's transaction. The Core looks the record up only in the
+    /// partitions in this call's scope: the partition of the call's own file, and the household
+    /// partition when that file is a member's. A query the module does not offer is
+    /// [`WriteError::UnknownQuery`], one whose access list does not name this module
+    /// [`WriteError::QueryNotAllowed`], a file in scope that is not ready
+    /// [`WriteError::ModuleUnavailable`], and a record the query's table does not hold in scope
+    /// [`WriteError::RecordNotFound`]. Like a refused write, a refused read ends the call.
+    ///
+    /// The record's provenance stays with the Core, and every write the call makes after the read
+    /// derives from it, whether the write names it as an input or not, so reading another
+    /// module's record never lowers what a write stores (AD-7).
+    fn read(&mut self, module: &str, query: &str, id: Id) -> Result<ReadRecord, WriteError>;
 }
 
 /// A record the Core wrote: its id and the revision it now has.
@@ -224,6 +241,12 @@ pub enum WriteError {
     /// A consumer's call requested an outbound effect or emitted an event: a write in reaction to
     /// an event is at most tier 1 (AD-27, D20), and an event does not trigger another.
     NotInConsumer,
+    /// A read of a query no registered module offers under that name.
+    UnknownQuery,
+    /// A read of a query whose access list does not name the calling module (AD-5).
+    QueryNotAllowed,
+    /// A read of a module whose file in the call's scope is not ready (AD-54).
+    ModuleUnavailable,
     /// An earlier write of this call was refused; the call is rolled back.
     CallRefused,
     /// The Core could not complete the write; the call is rolled back.
@@ -293,6 +316,13 @@ impl fmt::Display for WriteError {
             }
             Self::NotInConsumer => {
                 formatter.write_str("a consumer of an event requests no effect and emits no event")
+            }
+            Self::UnknownQuery => formatter.write_str("no module offers such a query"),
+            Self::QueryNotAllowed => {
+                formatter.write_str("the query's access list does not name this module")
+            }
+            Self::ModuleUnavailable => {
+                formatter.write_str("the file of the module read is not ready")
             }
             Self::CallRefused => formatter.write_str("an earlier write of this call was refused"),
             Self::Failed => formatter.write_str("the write failed and the call was rolled back"),

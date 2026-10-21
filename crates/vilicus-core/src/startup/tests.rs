@@ -90,6 +90,7 @@ fn declare(
         tools: &[],
         topics,
         consumers,
+        queries: &[],
     }))
 }
 
@@ -271,6 +272,7 @@ fn boundary(states: &ModuleStates) -> Boundary<'_> {
     Boundary {
         states,
         budget: HANDLER_TIME_BUDGET,
+        apis: None,
     }
 }
 

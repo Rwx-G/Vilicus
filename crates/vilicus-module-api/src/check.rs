@@ -1,5 +1,5 @@
 //! The rules a module declaration must meet before the registry accepts it (FR-18, FR-21, FR-22,
-//! FR-24, FR-58, FR-60, FR-68, AD-6, AD-8, AD-9, AD-29, AD-48, I13, I18, D20, D46, D98, D103,
+//! FR-24, FR-58, FR-60, FR-68, AD-5, AD-6, AD-8, AD-9, AD-29, AD-48, I13, I18, D20, D46, D98, D103,
 //! D104, D127), as `const`
 //! functions: a module checks its own declaration in a `const` item, where a refusal stops the
 //! build, and the Core's registry runs the same check on every module it is built from.
@@ -18,6 +18,7 @@ use crate::declaration::{
     Structured, Table,
 };
 use crate::event::{Consumer, Topic, is_topic};
+use crate::query::Query;
 use crate::tool::{Confirmation, Tool};
 
 /// Longest identifier accepted for a table, a field, an FTS5 table or column, an enumeration
@@ -66,6 +67,8 @@ pub enum IdentifierKind {
     UndoHandler,
     /// A consumer of events.
     Consumer,
+    /// A query of the module's typed API.
+    Query,
 }
 
 impl IdentifierKind {
@@ -80,6 +83,7 @@ impl IdentifierKind {
             Self::Tool => "tool",
             Self::UndoHandler => "undo handler",
             Self::Consumer => "consumer",
+            Self::Query => "query",
         }
     }
 }
@@ -343,6 +347,33 @@ pub enum DeclarationError {
         /// The topic.
         topic: &'static str,
     },
+    /// Two queries of the module share a name.
+    DuplicateQuery {
+        /// The query.
+        query: &'static str,
+    },
+    /// A query reads a table the module does not declare.
+    QueryOfUndeclaredTable {
+        /// The query.
+        query: &'static str,
+        /// The table it names.
+        table: &'static str,
+    },
+    /// A query returns a field its table does not declare, or a field twice.
+    InvalidQueryField {
+        /// The query.
+        query: &'static str,
+        /// The field refused.
+        field: &'static str,
+    },
+    /// A query's access list names something other than a module name, a module twice, or the
+    /// module itself, which reads its own file in its call's transaction (AD-5).
+    InvalidQueryCaller {
+        /// The query.
+        query: &'static str,
+        /// The entry refused.
+        module: &'static str,
+    },
 }
 
 impl DeclarationError {
@@ -420,6 +451,16 @@ impl DeclarationError {
             }
             Self::DuplicateConsumer { .. } => "two consumers share a name",
             Self::TwoConsumersOfOneTopic { .. } => "two consumers of a module consume one topic",
+            Self::DuplicateQuery { .. } => "two queries share a name",
+            Self::QueryOfUndeclaredTable { .. } => {
+                "a query reads a table the module does not declare"
+            }
+            Self::InvalidQueryField { .. } => {
+                "a query returns a field its table does not declare, or a field twice"
+            }
+            Self::InvalidQueryCaller { .. } => {
+                "a query's access list names another module at most once"
+            }
         }
     }
 }
@@ -489,6 +530,14 @@ impl fmt::Display for DeclarationError {
                 write!(formatter, ": {topic} ({module:?})")
             }
             Self::DuplicateConsumer { consumer } => write!(formatter, ": {consumer}"),
+            Self::DuplicateQuery { query } => write!(formatter, ": {query}"),
+            Self::QueryOfUndeclaredTable { query, table } => {
+                write!(formatter, ": {query} ({table})")
+            }
+            Self::InvalidQueryField { query, field } => write!(formatter, ": {query} ({field})"),
+            Self::InvalidQueryCaller { query, module } => {
+                write!(formatter, ": {query} ({module:?})")
+            }
         }
     }
 }
@@ -553,6 +602,11 @@ impl ModuleDeclaration {
             check!(validate_consumer(self.consumers, index));
             index += 1;
         }
+        index = 0;
+        while index < self.queries.len() {
+            check!(validate_query(self, index));
+            index += 1;
+        }
         Ok(())
     }
 
@@ -601,6 +655,7 @@ impl ModuleDeclaration {
     ///         undo_handler: None,
     ///         matrix_row: MatrixRow { section: "7", action: "Create or edit a page" },
     ///     }],
+    ///     queries: &[],
     /// };
     /// const _: () = MODULE.assert_valid();
     /// ```
@@ -627,6 +682,7 @@ impl ModuleDeclaration {
     ///     topics: &[],
     ///     consumers: &[],
     ///     tools: &[],
+    ///     queries: &[],
     /// };
     /// const _: () = MODULE.assert_valid();
     /// ```
@@ -693,6 +749,7 @@ impl ModuleDeclaration {
     ///         undo_handler: None,
     ///         matrix_row: MatrixRow { section: "10", action: "Install or enable a plugin" },
     ///     }],
+    ///     queries: &[],
     /// };
     /// const _: () = MODULE.assert_valid();
     /// ```
@@ -719,6 +776,7 @@ impl ModuleDeclaration {
     ///         undo_handler: None,
     ///         matrix_row: MatrixRow { section: "2", action: "Purge deleted tasks" },
     ///     }],
+    ///     queries: &[],
     /// };
     /// const _: () = MODULE.assert_valid();
     /// ```
@@ -1161,6 +1219,53 @@ const fn validate_consumer(consumers: &[Consumer], index: usize) -> Result<(), D
             });
         }
         other += 1;
+    }
+    Ok(())
+}
+
+/// The rules of the query at `index` of `module`: an identifier, unique in the module, reading a
+/// table the module declares and returning fields of it, each once, with an access list of
+/// distinct names of other modules.
+const fn validate_query(module: &ModuleDeclaration, index: usize) -> Result<(), DeclarationError> {
+    let query: &Query = &module.queries[index];
+    check!(identifier(IdentifierKind::Query, query.name));
+    let mut other = index + 1;
+    while other < module.queries.len() {
+        if same(query.name, module.queries[other].name) {
+            return Err(DeclarationError::DuplicateQuery { query: query.name });
+        }
+        other += 1;
+    }
+    let Some(table) = find_table(module, query.table) else {
+        return Err(DeclarationError::QueryOfUndeclaredTable {
+            query: query.name,
+            table: query.table,
+        });
+    };
+    let mut field = 0;
+    while field < query.fields.len() {
+        let name = query.fields[field];
+        if !has_field(table, name) || listed(query.fields.split_at(field + 1).1, name) {
+            return Err(DeclarationError::InvalidQueryField {
+                query: query.name,
+                field: name,
+            });
+        }
+        field += 1;
+    }
+    let mut entry = 0;
+    while entry < query.callers.len() {
+        let caller = query.callers[entry];
+        if !ModuleName::is_valid(caller)
+            || same(caller, module.name)
+            || listed(query.callers.split_at(entry + 1).1, caller)
+        {
+            return Err(DeclarationError::InvalidQueryCaller {
+                query: query.name,
+                module: caller,
+            });
+        }
+        entry += 1;
     }
     Ok(())
 }

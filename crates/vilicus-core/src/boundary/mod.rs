@@ -2,8 +2,9 @@
 //! event consumer, run on the writer thread of the module's file.
 //!
 //! [`Boundary::run`] admits a call only on a file that is ready (AD-54), registers it, and runs the
-//! module's code inside [`run_call`]'s transaction and inside `catch_unwind`, with the thread
-//! marked as running module code. The handler time budget runs on the availability states' clock
+//! module's code inside [`run_call`](crate::record::run_call)'s transaction and inside
+//! `catch_unwind`, with the thread marked as running module code, its typed API reads of other
+//! modules served from the boundary's [`Apis`] (AD-5). The handler time budget runs on the availability states' clock
 //! from the moment the module's code starts to the moment it returns: the writes it makes through
 //! the Core's record port count, as part of its work, while the Core's own work before it (the
 //! write lock, the call's deduplication) and after it (the commit) does not, so a slow commit never
@@ -27,13 +28,14 @@ use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::Duration;
 
-use vilicus_module_api::{ModuleDeclaration, Records, Value, WriteError, Written};
+use vilicus_module_api::{ModuleDeclaration, ReadRecord, Records, Value, WriteError, Written};
 use vilicus_storage::{Handle, Write};
 use vilicus_types::{Id, ModuleName, Rev};
 
 use crate::alert::InstanceAdminAlert;
+use crate::api::{ApiReads, Apis};
 use crate::availability::{CallTicket, Fault, ModuleStates, ModuleUnavailable};
-use crate::record::{Call, CallResult, Invocation, RecordError, Stamper, run_call};
+use crate::record::{Call, CallResult, Invocation, RecordError, Stamper, run_call_reading};
 
 thread_local! {
     /// True while the module's code of a call runs on this thread, outside the Core's record
@@ -160,6 +162,10 @@ impl Records for CorePort<'_> {
     ) -> Result<Id, WriteError> {
         self.core(|records| records.request_link(record, target_module, target))
     }
+
+    fn read(&mut self, module: &str, query: &str, id: Id) -> Result<ReadRecord, WriteError> {
+        self.core(|records| records.read(module, query, id))
+    }
 }
 
 /// Why a call of module code did not commit.
@@ -222,7 +228,8 @@ impl Drop for Registered<'_> {
 }
 
 /// The boundary of AD-9: the availability states the calls are admitted by and faults are
-/// recorded in, whose clock the budgets run on, and the time budget of one call.
+/// recorded in, whose clock the budgets run on, the time budget of one call, and what the typed
+/// API reads of the module's code are served from.
 #[derive(Clone, Copy)]
 pub struct Boundary<'a> {
     /// The availability states of the module files.
@@ -230,10 +237,14 @@ pub struct Boundary<'a> {
     /// How long the module's code of one call may run
     /// ([`HANDLER_TIME_BUDGET`](vilicus_types::HANDLER_TIME_BUDGET) in the Core).
     pub budget: Duration,
+    /// The typed APIs the module's code reads other modules through (AD-5), each read gated by
+    /// `states`; `None` refuses every read.
+    pub apis: Option<Apis<'a>>,
 }
 
 impl Boundary<'_> {
-    /// Runs `body`, the module's code for one call, as [`run_call`] runs it on `handle`, the write
+    /// Runs `body`, the module's code for one call, as [`run_call`](crate::record::run_call) runs
+    /// it on `handle`, the write
     /// handle of `module`'s file, inside the boundary: refused before anything runs unless the
     /// file is ready; the call registered until it ends, with a deadline while `body` runs; `body` run inside
     /// `catch_unwind` with the thread marked. A panic of `body`, or `body` returning after the
@@ -267,33 +278,45 @@ impl Boundary<'_> {
         };
         let mut fault = None;
         let core_panicked = Cell::new(false);
-        let result = run_call(handle, module, call, invocation, stamper, |records| {
-            let deadline = self.states.start_budget(&ticket, self.budget);
-            let returned = {
-                let _module = Mark::set(true);
-                let mut port = CorePort {
-                    inner: records,
-                    core_panicked: &core_panicked,
-                };
-                catch_unwind(AssertUnwindSafe(|| body(&mut port)))
-            };
-            let late = self.states.now() > deadline;
-            self.states.stop_budget(&ticket);
-            match returned {
-                Err(payload) if core_panicked.get() => resume_unwind(payload),
-                Err(payload) => {
-                    drop_module_payload(payload);
-                    fault = Some(Fault::Panicked);
-                    Err(WriteError::Failed)
-                }
-                Ok(_) if core_panicked.get() => resume_unwind(Box::new(CORE_PANIC_CAUGHT)),
-                Ok(_) if late => {
-                    fault = Some(Fault::TimeBudget);
-                    Err(WriteError::Failed)
-                }
-                Ok(returned) => returned,
-            }
+        let reads = self.apis.map(|apis| ApiReads {
+            apis,
+            states: self.states,
         });
+        let result = run_call_reading(
+            handle,
+            module,
+            call,
+            invocation,
+            reads,
+            stamper,
+            |records| {
+                let deadline = self.states.start_budget(&ticket, self.budget);
+                let returned = {
+                    let _module = Mark::set(true);
+                    let mut port = CorePort {
+                        inner: records,
+                        core_panicked: &core_panicked,
+                    };
+                    catch_unwind(AssertUnwindSafe(|| body(&mut port)))
+                };
+                let late = self.states.now() > deadline;
+                self.states.stop_budget(&ticket);
+                match returned {
+                    Err(payload) if core_panicked.get() => resume_unwind(payload),
+                    Err(payload) => {
+                        drop_module_payload(payload);
+                        fault = Some(Fault::Panicked);
+                        Err(WriteError::Failed)
+                    }
+                    Ok(_) if core_panicked.get() => resume_unwind(Box::new(CORE_PANIC_CAUGHT)),
+                    Ok(_) if late => {
+                        fault = Some(Fault::TimeBudget);
+                        Err(WriteError::Failed)
+                    }
+                    Ok(returned) => returned,
+                }
+            },
+        );
         match (fault, result) {
             (Some(fault), _) => Err(HandlerError::Faulted {
                 fault,

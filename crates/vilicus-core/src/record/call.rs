@@ -5,12 +5,12 @@
 //! and the event it consumes recorded with it.
 
 use vilicus_module_api::{
-    EVENT_PAYLOAD_MAX_LEN, FieldKind, ModuleDeclaration, Records, Table, Value, WriteError,
-    Written, is_identifier, topic_module,
+    EVENT_PAYLOAD_MAX_LEN, FieldKind, ModuleDeclaration, ReadRecord, Records, Table, Value,
+    WriteError, Written, is_identifier, topic_module,
 };
 use vilicus_storage::{
     AuthorityKind, CallKey, EffectIntent, EventIntent, Handle, JournalEntry, JournalRow,
-    LinkIntent, SqlValue, Write,
+    LinkIntent, Role, SqlValue, Write,
 };
 use vilicus_types::{
     CallId, DataType, EffectiveTaint, Id, ModuleName, Principal, Rev, Source, Taint, UtcMillis,
@@ -22,6 +22,7 @@ use super::provenance::{self, RecordProvenance, Stamp, Stored};
 use super::{
     RecordError, declared_table, from_stored, in_write_transaction, insert_row, update_row,
 };
+use crate::api::{self, ApiReads};
 
 /// Who makes a call and on what authority, as the pipeline established it (AD-8, AD-7). The
 /// module never sees it: the Core stamps each write of the call from it.
@@ -235,11 +236,29 @@ pub struct EarlierCall {
 ///
 /// The call is refused before any write when its authority does not fit its principal, or a
 /// delivery its principal ([`RecordError::InconsistentCall`]).
+///
+/// The call serves no typed API read: each [`Records::read`] of `body` is
+/// [`RecordError::UnknownQuery`]. The boundary of AD-9 runs module code with the reads its
+/// [`Boundary`](crate::boundary::Boundary) serves.
 pub fn run_call<T>(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
     call: &Call,
     invocation: &Invocation,
+    stamper: &mut dyn Stamper,
+    body: impl FnOnce(&mut dyn Records) -> Result<T, WriteError>,
+) -> Result<CallResult<T>, RecordError> {
+    run_call_reading(handle, module, call, invocation, None, stamper, body)
+}
+
+/// [`run_call`], with the typed API reads of `body` served from `reads` (AD-5): each record a read
+/// returns counts as an input of every later write of the call.
+pub(crate) fn run_call_reading<T>(
+    handle: &Handle<Write>,
+    module: &'static ModuleDeclaration,
+    call: &Call,
+    invocation: &Invocation,
+    reads: Option<ApiReads<'_>>,
     stamper: &mut dyn Stamper,
     body: impl FnOnce(&mut dyn Records) -> Result<T, WriteError>,
 ) -> Result<CallResult<T>, RecordError> {
@@ -270,6 +289,8 @@ pub fn run_call<T>(
             changes: Vec::new(),
             removed: Vec::new(),
             effects: Vec::new(),
+            reads,
+            read_records: Vec::new(),
             refusal: None,
         };
         let returned = body(&mut records);
@@ -463,6 +484,11 @@ struct CallRecords<'a> {
     /// about the deletion carries.
     removed: Vec<RecordProvenance>,
     effects: Vec<RequestedEffect>,
+    /// What the call's typed API reads are served from; `None` refuses them.
+    reads: Option<ApiReads<'a>>,
+    /// The provenance of each record the call read through another module's typed API, each id
+    /// once: an input of every write the call makes after the read (AD-7).
+    read_records: Vec<RecordProvenance>,
     /// The first refused write of the call, which ends it.
     refusal: Option<RecordError>,
 }
@@ -512,6 +538,10 @@ impl Records for CallRecords<'_> {
         target: Id,
     ) -> Result<Id, WriteError> {
         self.attempt(|records| records.link(record, target_module, target))
+    }
+
+    fn read(&mut self, module: &str, query: &str, id: Id) -> Result<ReadRecord, WriteError> {
+        self.attempt(|records| records.read_through_api(module, query, id))
     }
 }
 
@@ -584,7 +614,7 @@ impl CallRecords<'_> {
             },
             None,
             after,
-            &journal::encode_inputs(&inputs, &self.call.implicit_inputs)?,
+            &journal::encode_inputs(&inputs, &self.implicit_inputs())?,
         )?;
         Ok(Written {
             id,
@@ -651,7 +681,7 @@ impl CallRecords<'_> {
             },
             before,
             after,
-            &journal::encode_inputs(&inputs, &self.call.implicit_inputs)?,
+            &journal::encode_inputs(&inputs, &self.implicit_inputs())?,
         )?;
         Ok(Written { id, rev: next })
     }
@@ -675,9 +705,14 @@ impl CallRecords<'_> {
         let before = journal::image(self.handle, table, id)?;
         self.handle
             .execute_values(&format!("DELETE FROM {} WHERE id = ?1", table.name), &key)?;
-        let call = self.call;
-        let implicit = &call.implicit_inputs;
-        let inputs = journal::encode_inputs(implicit, implicit)?;
+        let implicit: Vec<RecordProvenance> = self
+            .call
+            .implicit_inputs
+            .iter()
+            .chain(self.reads_beside_implicit())
+            .cloned()
+            .collect();
+        let inputs = journal::encode_inputs(&implicit, &implicit)?;
         self.journal(
             RecordChange {
                 table: table.name.to_owned(),
@@ -874,8 +909,9 @@ impl CallRecords<'_> {
     /// The provenance of each input, each id once: the snapshot the call carries when the id is
     /// one of its implicit inputs (D147: an implicit input counts as captured, even when the
     /// module names it), otherwise a record of this file, read in the write transaction, or one
-    /// the call read from another file; then the call's other implicit inputs. A snapshot whose
-    /// record the call also read afresh counts as the two combined, the most restrictive of both
+    /// the call read from another file; then the call's other implicit inputs, the records it read
+    /// through another module's typed API included. A snapshot whose record the call also read
+    /// afresh counts as the two combined, the most restrictive of both
     /// ([`RecordProvenance::combined`]), so a fresher read never lowers a snapshot. A write that
     /// must declare inputs and has none is refused, and so is one of more than
     /// [`MAX_WRITE_INPUTS`] inputs, declared and implicit together.
@@ -884,13 +920,11 @@ impl CallRecords<'_> {
         table: &'static Table,
         inputs: &[Id],
     ) -> Result<(Vec<Id>, Vec<RecordProvenance>), RecordError> {
-        if inputs.len().saturating_add(self.call.implicit_inputs.len()) > MAX_WRITE_INPUTS {
+        let implicit = self.implicit_inputs();
+        if inputs.len().saturating_add(implicit.len()) > MAX_WRITE_INPUTS {
             return Err(RecordError::TooManyInputs { table: table.name });
         }
-        if inputs.is_empty()
-            && self.call.implicit_inputs.is_empty()
-            && provenance::requires_inputs(self.call)
-        {
+        if inputs.is_empty() && implicit.is_empty() && provenance::requires_inputs(self.call) {
             return Err(RecordError::MissingInputs { table: table.name });
         }
         let mut ids: Vec<Id> = Vec::with_capacity(inputs.len());
@@ -899,13 +933,8 @@ impl CallRecords<'_> {
             if ids.contains(id) {
                 continue;
             }
-            let implicit = self
-                .call
-                .implicit_inputs
-                .iter()
-                .find(|implicit| implicit.id == *id);
-            let found = match implicit {
-                Some(implicit) => self.captured(implicit),
+            let found = match implicit.iter().find(|implicit| implicit.id == *id) {
+                Some(implicit) => implicit.clone(),
                 None => match self.read_in_file(*id)? {
                     Some(found) => found,
                     None => self
@@ -920,22 +949,80 @@ impl CallRecords<'_> {
             ids.push(*id);
             resolved.push(found);
         }
-        for implicit in &self.call.implicit_inputs {
+        for implicit in implicit {
             if !ids.contains(&implicit.id) {
                 ids.push(implicit.id);
-                resolved.push(self.captured(implicit));
+                resolved.push(implicit);
             }
         }
         Ok((ids, resolved))
     }
 
-    /// An implicit input as a write counts it: its snapshot, combined with the call's fresher
-    /// read of the same record when the call read it too.
+    /// The inputs every write of the call derives from without the module naming them, as a write
+    /// counts them: the call's implicit inputs, each captured ([`captured`](Self::captured)), then
+    /// each record the call has read so far through another module's typed API that is not one of
+    /// them (AD-7).
+    fn implicit_inputs(&self) -> Vec<RecordProvenance> {
+        self.call
+            .implicit_inputs
+            .iter()
+            .map(|implicit| self.captured(implicit))
+            .chain(self.reads_beside_implicit().cloned())
+            .collect()
+    }
+
+    /// The records the call read through another module's typed API that are not among its
+    /// implicit inputs.
+    fn reads_beside_implicit(&self) -> impl Iterator<Item = &RecordProvenance> {
+        self.read_records.iter().filter(|read| {
+            !self
+                .call
+                .implicit_inputs
+                .iter()
+                .any(|implicit| implicit.id == read.id)
+        })
+    }
+
+    /// An implicit input as a write counts it: its snapshot, combined with each fresher read of
+    /// the same record the call made, before the call or through a typed API during it.
     fn captured(&self, implicit: &RecordProvenance) -> RecordProvenance {
-        match self.call.read.iter().find(|read| read.id == implicit.id) {
-            Some(fresher) => implicit.combined(fresher),
-            None => implicit.clone(),
+        self.call
+            .read
+            .iter()
+            .chain(&self.read_records)
+            .filter(|read| read.id == implicit.id)
+            .fold(implicit.clone(), |captured, fresher| {
+                captured.combined(fresher)
+            })
+    }
+
+    /// Reads the record `id` through the query `query` of `module` (AD-5), and keeps its
+    /// provenance as an input of every later write of the call, combined with an earlier read of
+    /// the same record.
+    fn read_through_api(
+        &mut self,
+        module: &str,
+        query: &str,
+        id: Id,
+    ) -> Result<ReadRecord, RecordError> {
+        let reads = self.reads.ok_or(RecordError::UnknownQuery)?;
+        let (record, provenance) = api::read(
+            reads,
+            self.module,
+            self.handle.file().partition(),
+            module,
+            query,
+            id,
+        )?;
+        match self
+            .read_records
+            .iter_mut()
+            .find(|read| read.id == provenance.id)
+        {
+            Some(earlier) => *earlier = earlier.combined(&provenance),
+            None => self.read_records.push(provenance),
         }
+        Ok(record)
     }
 
     /// The provenance of the record `id` of this file, in whichever of the module's tables holds
@@ -956,27 +1043,38 @@ impl CallRecords<'_> {
         table: &'static Table,
         id: Id,
     ) -> Result<Option<RecordProvenance>, RecordError> {
-        let columns: Vec<&str> = PROVENANCE_COLUMNS
-            .into_iter()
-            .chain(table.fields.iter().map(|field| field.name))
-            .collect();
-        let rows = self.handle.query_values(
-            &format!(
-                "SELECT {} FROM {} WHERE id = ?1",
-                columns.join(", "),
-                table.name
-            ),
-            &[SqlValue::Blob(id.to_bytes().to_vec())],
-        )?;
-        match rows.into_iter().next() {
-            Some(row) => {
-                let mut values = row.into_iter().map(from_stored);
-                let mut provenance = provenance_of(table, id, &mut values)?;
-                provenance.free_text = free_text_of(table, values);
-                Ok(Some(provenance))
-            }
-            None => Ok(None),
+        Ok(read_record(self.handle, table, id)?.map(|(provenance, _)| provenance))
+    }
+}
+
+/// The record `id` of `table` on `handle`, if the table holds it: its provenance, its free text
+/// included, and the value of each of the table's fields, in declared order.
+pub(crate) fn read_record<R: Role>(
+    handle: &Handle<R>,
+    table: &'static Table,
+    id: Id,
+) -> Result<Option<(RecordProvenance, Vec<Value>)>, RecordError> {
+    let columns: Vec<&str> = PROVENANCE_COLUMNS
+        .into_iter()
+        .chain(table.fields.iter().map(|field| field.name))
+        .collect();
+    let rows = handle.query_values(
+        &format!(
+            "SELECT {} FROM {} WHERE id = ?1",
+            columns.join(", "),
+            table.name
+        ),
+        &[SqlValue::Blob(id.to_bytes().to_vec())],
+    )?;
+    match rows.into_iter().next() {
+        Some(row) => {
+            let mut values = row.into_iter().map(from_stored);
+            let mut provenance = provenance_of(table, id, &mut values)?;
+            let fields: Vec<Value> = values.collect();
+            provenance.free_text = free_text_of(table, fields.iter().cloned());
+            Ok(Some((provenance, fields)))
         }
+        None => Ok(None),
     }
 }
 
@@ -1144,6 +1242,9 @@ fn write_error(error: &RecordError) -> WriteError {
         RecordError::PayloadTooLong => WriteError::PayloadTooLong,
         RecordError::InvalidLink => WriteError::InvalidLink,
         RecordError::NotInConsumer => WriteError::NotInConsumer,
+        RecordError::UnknownQuery => WriteError::UnknownQuery,
+        RecordError::QueryNotAllowed { .. } => WriteError::QueryNotAllowed,
+        RecordError::Unavailable(_) => WriteError::ModuleUnavailable,
         RecordError::IdChanged { .. }
         | RecordError::InvalidJournal
         | RecordError::InvalidEvent

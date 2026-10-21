@@ -25,6 +25,7 @@
 //!     topics: &[],
 //!     consumers: &[],
 //!     tools: &[],
+//!     queries: &[],
 //! };
 //! const REGISTRY: Registry = match Registry::new(&[&NOTES]) {
 //!     Ok(registry) => registry,

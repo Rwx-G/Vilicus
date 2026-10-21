@@ -96,6 +96,7 @@ fn shop(second: Option<&str>, fts5: bool) -> &'static ModuleDeclaration {
         topics: &[],
         consumers: &[],
         tools: &[],
+        queries: &[],
     }))
 }
 

@@ -175,6 +175,7 @@ fn declare(
         tools,
         topics: &[],
         consumers: &[],
+        queries: &[],
     }))
 }
 
@@ -315,6 +316,7 @@ impl Fixture {
         Boundary {
             states: &self.states,
             budget: BUDGET,
+            apis: None,
         }
     }
 
@@ -837,14 +839,18 @@ fn a_call_still_running_past_its_deadline_is_expired_by_the_supervisor() {
     let name = tasks.file().module().clone();
     let (started, wait_started) = mpsc::channel::<()>();
     let (release, wait_release) = mpsc::channel::<()>();
-    let boundary = Boundary {
-        states: &states,
-        budget: BUDGET,
-    };
+    let states_of_the_handler = &states;
     let mut stamper = TestStamper::at(noon());
     let invocation = invocation(&mut stamper);
     std::thread::scope(|scope| {
         let handler = scope.spawn(move || {
+            // The boundary of the file's writer thread, built on it: its typed API reads are
+            // served from that thread's read connections.
+            let boundary = Boundary {
+                states: states_of_the_handler,
+                budget: BUDGET,
+                apis: None,
+            };
             let result = boundary.run(
                 &tasks,
                 module,

@@ -20,6 +20,7 @@
 //!     tools: &[],
 //!     topics: &[],
 //!     consumers: &[],
+//!     queries: &[],
 //! };
 //! const NOTES_CODE: ModuleCode = ModuleCode {
 //!     module: "notes",

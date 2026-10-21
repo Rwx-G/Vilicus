@@ -1,6 +1,6 @@
 //! The rules of a module declaration (Story 3.2, AC2 to AC4 and AC7; Story 3.3, AC1 and AC3 to
-//! AC5): a declaration that meets them passes, and each rule broken alone is refused with its own
-//! typed error.
+//! AC5; Story 3.10, AC2 and AC5): a declaration that meets them passes, and each rule broken alone
+//! is refused with its own typed error.
 
 use super::*;
 
@@ -88,6 +88,7 @@ const VALID: ModuleDeclaration = ModuleDeclaration {
     topics: &[],
     consumers: &[],
     tools: &[READ_TOOL, WRITE_TOOL, CART_TOOL, LIGHT_TOOL],
+    queries: &[],
 };
 
 const _: () = VALID.assert_valid();
@@ -1391,6 +1392,157 @@ fn every_event_error_names_its_rule_and_its_item() {
         DeclarationError::DuplicateConsumer { consumer: "react" }.to_string(),
         "two consumers share a name: react"
     );
+}
+
+// Story 3.10: the queries of a module's typed API (AD-5).
+
+fn with_queries(queries: Vec<Query>) -> ModuleDeclaration {
+    ModuleDeclaration {
+        queries: leak(queries),
+        ..VALID
+    }
+}
+
+fn query(name: &'static str, fields: &'static [&'static str]) -> Query {
+    Query {
+        name,
+        table: "items",
+        fields,
+        callers: &["tasks", "meals"],
+    }
+}
+
+#[test]
+fn a_declaration_with_queries_that_meet_every_rule_is_accepted() {
+    let declaration = with_queries(vec![
+        query("item", &["label", "status", "quantity"]),
+        query("item_status", &["status"]),
+        Query {
+            name: "note",
+            table: "notes",
+            fields: &["body"],
+            callers: &[],
+        },
+    ]);
+    assert_eq!(declaration.validate(), Ok(()));
+    assert_eq!(
+        declaration.query("item_status").map(|query| query.fields),
+        Some(&["status"][..])
+    );
+    assert!(declaration.query("items").is_none());
+    assert!(VALID.query("item").is_none());
+}
+
+#[test]
+fn queries_that_break_a_rule_are_refused() {
+    let outcome = |queries: Vec<Query>| with_queries(queries).validate();
+    for name in ["Item", "", "item.status", "sqlite_item"] {
+        assert_eq!(
+            outcome(vec![query(name, &["label"])]),
+            Err(DeclarationError::InvalidIdentifier {
+                kind: IdentifierKind::Query,
+                name,
+            })
+        );
+    }
+    assert_eq!(
+        outcome(vec![query("item", &["label"]), query("item", &["status"])]),
+        Err(DeclarationError::DuplicateQuery { query: "item" })
+    );
+    for table in ["absent", "items_search"] {
+        assert_eq!(
+            outcome(vec![Query {
+                table,
+                ..query("item", &["label"])
+            }]),
+            Err(DeclarationError::QueryOfUndeclaredTable {
+                query: "item",
+                table,
+            })
+        );
+    }
+    for (fields, field) in [
+        (&["label", "absent"][..], "absent"),
+        (&["taint"][..], "taint"),
+        (&["id"][..], "id"),
+        (&["body"][..], "body"),
+        (&["label", "status", "label"][..], "label"),
+    ] {
+        assert_eq!(
+            outcome(vec![query("item", fields)]),
+            Err(DeclarationError::InvalidQueryField {
+                query: "item",
+                field,
+            }),
+            "{fields:?}"
+        );
+    }
+    for (callers, module) in [
+        (&["Tasks"][..], "Tasks"),
+        (&["tasks", "tasks"][..], "tasks"),
+        (&["meals", "sample"][..], "sample"),
+        (&[""][..], ""),
+    ] {
+        assert_eq!(
+            outcome(vec![Query {
+                callers,
+                ..query("item", &["label"])
+            }]),
+            Err(DeclarationError::InvalidQueryCaller {
+                query: "item",
+                module,
+            }),
+            "{callers:?}"
+        );
+    }
+}
+
+#[test]
+fn every_query_error_names_its_rule_and_its_item() {
+    assert_eq!(
+        DeclarationError::QueryOfUndeclaredTable {
+            query: "item",
+            table: "absent",
+        }
+        .to_string(),
+        "a query reads a table the module does not declare: item (absent)"
+    );
+    assert_eq!(
+        DeclarationError::InvalidQueryField {
+            query: "item",
+            field: "taint",
+        }
+        .to_string(),
+        "a query returns a field its table does not declare, or a field twice: item (taint)"
+    );
+    assert_eq!(
+        DeclarationError::InvalidQueryCaller {
+            query: "item",
+            module: "sample",
+        }
+        .to_string(),
+        "a query's access list names another module at most once: item (\"sample\")"
+    );
+    assert_eq!(
+        DeclarationError::DuplicateQuery { query: "item" }.to_string(),
+        "two queries share a name: item"
+    );
+}
+
+#[test]
+fn a_read_record_gives_the_fields_its_query_names() {
+    let id = Id::from_bytes([0x01, 0x92, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1])
+        .expect("a v7 id");
+    let record = ReadRecord {
+        id,
+        fields: vec![
+            ("label", Value::Text("Pommes".into())),
+            ("quantity", Value::Null),
+        ],
+    };
+    assert_eq!(record.field("label"), Some(&Value::Text("Pommes".into())));
+    assert_eq!(record.field("quantity"), Some(&Value::Null));
+    assert_eq!(record.field("status"), None);
 }
 
 // Story 3.9: the module port's handler table.

@@ -28,6 +28,7 @@
 //!     tools: &[],
 //!     topics: &[],
 //!     consumers: &[Consumer { name: "plan", topic: "tasks.task.added" }],
+//!     queries: &[],
 //! };
 //! const MEALS_CODE: ModuleCode = ModuleCode {
 //!     module: "meals",

@@ -78,10 +78,13 @@ use vilicus_module_api::{
 use vilicus_storage::{Handle, Inspect, SqlValue, Write};
 use vilicus_types::{Id, UtcMillis};
 
+use crate::availability::ModuleUnavailable;
+
 pub use call::{
     Authority, Call, CallOutcome, CallResult, Consumed, EarlierCall, EventDelivery, Invocation,
     MAX_WRITE_INPUTS, RecordChange, RequestedEffect, Stamper, run_call,
 };
+pub(crate) use call::{read_record, run_call_reading};
 pub use effect::{
     ReportTo, UnknownEffect, effects_to_perform, record_effect_outcome, retry_failed_effect,
 };
@@ -240,6 +243,15 @@ pub enum RecordError {
     NotInConsumer,
     /// An event's provenance in the outbox does not decode.
     InvalidEvent,
+    /// A read of a query no registered module offers under that name (AD-5).
+    UnknownQuery,
+    /// A read of a query whose access list does not name the calling module (AD-5).
+    QueryNotAllowed {
+        /// The query.
+        query: &'static str,
+    },
+    /// A read of a module whose file in the call's scope is not ready, or not open (AD-54).
+    Unavailable(ModuleUnavailable),
     /// The module's code ended the call with its own error; the call was rolled back.
     Aborted(WriteError),
     /// The storage layer failed; the transaction was rolled back.
@@ -337,6 +349,14 @@ impl fmt::Display for RecordError {
                 formatter.write_str("a consumer of an event requests no effect and emits no event")
             }
             Self::InvalidEvent => formatter.write_str("an event of the outbox is malformed"),
+            Self::UnknownQuery => formatter.write_str("no module offers such a query"),
+            Self::QueryNotAllowed { query } => {
+                write!(
+                    formatter,
+                    "query {query}: its access list does not name the caller"
+                )
+            }
+            Self::Unavailable(unavailable) => write!(formatter, "{unavailable}"),
             Self::Aborted(error) => write!(formatter, "the module ended the call: {error}"),
             Self::Storage(error) => write!(formatter, "{error}"),
         }

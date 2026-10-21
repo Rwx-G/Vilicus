@@ -161,6 +161,7 @@ fn sample() -> ModuleDeclaration {
         topics: &[],
         consumers: &[],
         tools: &[],
+        queries: &[],
     }
 }
 
@@ -200,6 +201,7 @@ const EMPTY: ModuleDeclaration = ModuleDeclaration {
     topics: &[],
     consumers: &[],
     tools: &[],
+    queries: &[],
 };
 
 const LITERAL: ModuleDeclaration = ModuleDeclaration {
@@ -228,6 +230,7 @@ const LITERAL: ModuleDeclaration = ModuleDeclaration {
     topics: &[],
     consumers: &[],
     tools: &[],
+    queries: &[],
 };
 
 /// AC1: a registry built in a `const` item, from a `'static` list.
@@ -1338,6 +1341,7 @@ const fn events_only(
         tools: &[],
         topics,
         consumers,
+        queries: &[],
     }
 }
 

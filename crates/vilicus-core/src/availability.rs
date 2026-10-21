@@ -118,6 +118,18 @@ impl ModuleUnavailable {
         })
     }
 
+    /// The answer for `module`'s file in `partition` when the states report it ready but the Core
+    /// holds no connection of it to serve the call: `opening`, as the event bus counts such a
+    /// file, retryable.
+    pub(crate) fn not_open(module: ModuleName, partition: Partition) -> Self {
+        Self {
+            module,
+            partition,
+            state: AvailabilityState::Opening,
+            retry_class: RetryClass::Retryable,
+        }
+    }
+
     /// The module.
     pub fn module(&self) -> &ModuleName {
         &self.module

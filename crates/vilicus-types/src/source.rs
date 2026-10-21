@@ -144,6 +144,12 @@ impl ModuleName {
     /// Longest module name accepted, in characters.
     pub const MAX_LEN: usize = MODULE_NAME_MAX_LEN;
 
+    /// True when `name` follows the grammar of a module name. A `const` check, so a declaration
+    /// read at build time can report a bad name as a value rather than a panic.
+    pub const fn is_valid(name: &str) -> bool {
+        is_module_name(name)
+    }
+
     /// A module name known at build time, such as a module's own declaration.
     ///
     /// # Panics
@@ -336,6 +342,13 @@ mod tests {
             Ok("familydocs")
         );
         assert!(ModuleName::parse("family docs").is_err());
+        for name in ["familydocs", "family docs", "Meals", ""] {
+            assert_eq!(
+                ModuleName::is_valid(name),
+                ModuleName::parse(name).is_ok(),
+                "{name:?}"
+            );
+        }
         assert!(from_str::<ModuleName>("meals.plan").is_err());
         assert_eq!(
             to_json(&ModuleName::from_static("home")).as_deref(),

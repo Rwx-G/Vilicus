@@ -1082,7 +1082,6 @@ const fn has_field(table: &Table, name: &str) -> bool {
     false
 }
 
-/// The identifier grammar of [`DeclarationError::InvalidIdentifier`].
 /// The rules of the topic at `index` of `module`: its name in the topic grammar and of the
 /// module, a version from 1, unique in the module, and an access list of distinct module names.
 const fn validate_topic(module: &ModuleDeclaration, index: usize) -> Result<(), DeclarationError> {
@@ -1155,6 +1154,7 @@ const fn validate_consumer(consumers: &[Consumer], index: usize) -> Result<(), D
     Ok(())
 }
 
+/// The identifier grammar of [`DeclarationError::InvalidIdentifier`].
 const fn identifier(kind: IdentifierKind, name: &'static str) -> Result<(), DeclarationError> {
     if is_identifier(name) {
         Ok(())

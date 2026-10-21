@@ -130,6 +130,14 @@ pub enum DeclarationError {
         /// The table.
         table: &'static str,
     },
+    /// A record kind exempt from the elevated queue holds a free-text field: from an AI or
+    /// plugin principal an exempt kind accepts structured fields only (D104).
+    ExemptKindWithFreeText {
+        /// The table.
+        table: &'static str,
+        /// The free-text field.
+        field: &'static str,
+    },
     /// A record kind declares a data type twice.
     DuplicateDataType {
         /// The table.
@@ -386,6 +394,9 @@ impl DeclarationError {
             Self::DuplicateField { .. } => "two fields of a table share a name",
             Self::EnvelopeName { .. } => "a field takes the name of an envelope column",
             Self::NoDataType { .. } => "a record kind declares no data type",
+            Self::ExemptKindWithFreeText { .. } => {
+                "a record kind exempt from elevation holds a free-text field"
+            }
             Self::DuplicateDataType { .. } => "a record kind declares a data type twice",
             Self::FreeTextWithoutMaxLength { .. } => "a free-text field has no maximum length",
             Self::FreeTextTooLong { .. } => "a free-text field declares too long a maximum length",
@@ -477,6 +488,7 @@ impl fmt::Display for DeclarationError {
             | Self::NoDataType { table }
             | Self::Fts5WithoutColumn { table } => write!(formatter, ": {table}"),
             Self::DuplicateField { table, field }
+            | Self::ExemptKindWithFreeText { table, field }
             | Self::EnvelopeName { table, field }
             | Self::FreeTextWithoutMaxLength { table, field }
             | Self::FreeTextTooLong { table, field }
@@ -814,6 +826,12 @@ const fn validate_table(table: &Table) -> Result<(), DeclarationError> {
     while index < table.fields.len() {
         let field = &table.fields[index];
         check!(validate_field(table.name, field));
+        if table.elevation_exempt && matches!(field.kind, FieldKind::FreeText { .. }) {
+            return Err(DeclarationError::ExemptKindWithFreeText {
+                table: table.name,
+                field: field.name,
+            });
+        }
         let mut other = index + 1;
         while other < table.fields.len() {
             if same(field.name, table.fields[other].name) {

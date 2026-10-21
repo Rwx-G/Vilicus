@@ -500,39 +500,61 @@ fn every_field_kind_maps_to_its_sql_type() {
     );
 }
 
-/// Story 3.10, AC2 (D104, DC-59): a record kind exempt from elevation takes, from an AI or plugin
-/// principal, a write of structured fields only without elevation; free text, an undeclared name
-/// or a kind that is not exempt leave the write to the elevated queue.
+/// Story 3.10, AC2 (D104, DC-59): a record kind exempt from elevation holds structured fields
+/// only, and the build refuses one with a free-text field; a write the exemption may cover gives
+/// declared fields of an exempt kind only.
 #[test]
-fn an_exempt_record_kind_spares_only_structured_writes_from_elevation() {
+fn an_exempt_record_kind_holds_and_spares_structured_fields_only() {
+    let structured: Vec<Field> = VALID.tables[0]
+        .fields
+        .iter()
+        .copied()
+        .filter(|field| matches!(field.kind, FieldKind::Structured(_)))
+        .collect();
+    let names: Vec<&str> = structured.iter().map(|field| field.name).collect();
+    assert!(names.len() > 1);
     let exempt = Table {
+        elevation_exempt: true,
+        fields: leak(structured),
+        ..VALID.tables[0]
+    };
+    let declaration = ModuleDeclaration {
+        tables: leak(vec![exempt, VALID.tables[1]]),
+        fts5_tables: &[],
+        ..VALID
+    };
+    assert_eq!(declaration.validate(), Ok(()));
+    assert!(exempt.exempt_fields_only(&names));
+    assert!(exempt.exempt_fields_only(&names[..1]));
+    assert!(exempt.exempt_fields_only(&[]));
+    assert!(!exempt.exempt_fields_only(&[names[0], "absent"]));
+    let not_exempt = Table {
+        elevation_exempt: false,
+        ..exempt
+    };
+    assert!(!not_exempt.exempt_fields_only(&names));
+
+    let with_text = with_items(|items| items.elevation_exempt = true);
+    assert_eq!(
+        with_text.validate(),
+        Err(DeclarationError::ExemptKindWithFreeText {
+            table: "items",
+            field: "label",
+        })
+    );
+    let free_text = Table {
         elevation_exempt: true,
         ..VALID.tables[0]
     };
-    let structured: Vec<&str> = exempt
-        .fields
-        .iter()
-        .filter(|field| matches!(field.kind, FieldKind::Structured(_)))
-        .map(|field| field.name)
-        .collect();
-    assert!(structured.len() > 1);
-    assert!(exempt.accepts_without_elevation(&structured));
-    assert!(exempt.accepts_without_elevation(&structured[..1]));
-    assert!(exempt.accepts_without_elevation(&[]));
-    for field in exempt.fields {
-        let alone = exempt.accepts_without_elevation(&[field.name]);
-        assert_eq!(
-            alone,
-            matches!(field.kind, FieldKind::Structured(_)),
-            "{}",
-            field.name
-        );
-    }
-    let with_text: Vec<&str> = structured.iter().copied().chain(["label"]).collect();
-    assert!(!exempt.accepts_without_elevation(&with_text));
-    assert!(!exempt.accepts_without_elevation(&["status", "absent"]));
-    assert!(!VALID.tables[0].elevation_exempt);
-    assert!(!VALID.tables[0].accepts_without_elevation(&structured));
+    assert!(!free_text.exempt_fields_only(&["label"]));
+    assert_eq!(
+        DeclarationError::ExemptKindWithFreeText {
+            table: "items",
+            field: "label",
+        }
+        .to_string(),
+        "a record kind exempt from elevation holds a free-text field: items.label"
+    );
 }
 
 /// AC7 (D127): an FTS5 table's content is empty or a table of the module, whose fields it

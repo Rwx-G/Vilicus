@@ -158,19 +158,24 @@ pub struct Table {
     pub fields: &'static [Field],
     /// True for a low-risk record kind the module declares exempt from the elevated queue,
     /// reviewed with the module (PRD FR-28, `doc/capability-matrix.md` Legend, *exempt*): a
-    /// tainted AI or plugin session writes it without elevation, but from such a principal it
-    /// accepts structured fields only, so free text the assistant writes there is still elevated
-    /// (D104, DC-59). [`Table::accepts_without_elevation`] states which writes the exemption
-    /// covers; elevating the others is the pipeline's.
+    /// tainted AI or plugin session may write it without elevation. From such a principal an
+    /// exempt kind accepts structured fields only (D104, DC-59), so the build refuses an exempt
+    /// kind with a free-text field, and free text the assistant writes is never spared.
+    /// [`Table::exempt_fields_only`] states which writes the exemption may cover; whether a call
+    /// is elevated is the pipeline's.
     pub elevation_exempt: bool,
 }
 
 impl Table {
-    /// True when a write of an AI or plugin principal giving `fields` to this record kind needs
-    /// no elevation from a tainted session (D104): the kind is exempt, and every field given is a
-    /// structured field it declares. A free-text field, or a name the kind does not declare,
-    /// leaves the write to the elevated queue.
-    pub fn accepts_without_elevation(&self, fields: &[&str]) -> bool {
+    /// True when a write giving `fields` to this record kind is a write the exemption from
+    /// elevation may cover (D104): the kind is exempt, and every field given is a structured field
+    /// it declares. A free-text field, or a name the kind does not declare, leaves the write to
+    /// the elevated queue.
+    ///
+    /// Necessary, not sufficient: D104 elevates any household write from a session that has read
+    /// personal free text, exempt kind or not, and the pipeline applies that rule and the call's
+    /// tier before it spares an AI or plugin write from the elevated queue (Story 10.6).
+    pub fn exempt_fields_only(&self, fields: &[&str]) -> bool {
         self.elevation_exempt
             && fields.iter().all(|given| {
                 self.fields.iter().any(|field| {

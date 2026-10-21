@@ -5,4 +5,7 @@
 //! It links no test crate: the reference module and the test doubles reach `vilicus-testbed`
 //! only (`doc/architecture-spine.md`, AD-2, AD-3 and Consistency Conventions, CLI).
 
+#[cfg(test)]
+mod registry;
+
 fn main() {}

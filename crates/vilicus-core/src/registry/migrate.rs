@@ -277,21 +277,58 @@ impl Registry {
             .iter()
             .zip(modules)
             .zip(standings)
-            .map(|((target, module), standing)| match standing {
-                Standing::Current => FileMigration::Current,
-                Standing::NewerThanCode(alert) => FileMigration::NewerThanCode { alert },
-                Standing::StillFailed(mark) => FileMigration::StillFailed { mark },
-                Standing::Failed(alert, error) => held(module, target.file, alert, error),
-                Standing::Pending {
-                    from, migrations, ..
-                } => match self.migrate_on_copy(module, target, from, &migrations) {
-                    FileMigration::Failed { alert, error } => {
-                        held(module, target.file, alert, error)
-                    }
-                    other => other,
-                },
-            })
+            .map(|((target, module), standing)| self.finish(module, target, standing))
             .collect())
+    }
+
+    /// Migrates `target` alone, as [`migrate_files`](Self::migrate_files) migrates each file of a
+    /// run: the free space is that of its own data directory, read just before, so a run of one
+    /// file per call reads it again before each file.
+    pub fn migrate_file(
+        &self,
+        target: &FileToMigrate<'_>,
+    ) -> Result<FileMigration, MigrationRunError> {
+        self.migrate_file_with_space(target, &maintenance::available_space)
+    }
+
+    /// [`migrate_file`](Self::migrate_file), with the free space read by `available_space`.
+    pub(crate) fn migrate_file_with_space(
+        &self,
+        target: &FileToMigrate<'_>,
+        available_space: &dyn Fn(&Path) -> Result<u64, vilicus_storage::Error>,
+    ) -> Result<FileMigration, MigrationRunError> {
+        let module = self
+            .module(target.file.module())
+            .ok_or_else(|| MigrationRunError::UnregisteredModule(target.file.module().clone()))?;
+        let standing = standing(module, target);
+        check_space(
+            std::slice::from_ref(target),
+            std::slice::from_ref(&standing),
+            available_space,
+        )?;
+        Ok(self.finish(module, target, standing))
+    }
+
+    /// What becomes of `target`, which stands at `standing`: migrated on a copy when its
+    /// migrations are pending, and its failure held unless it is the host's.
+    fn finish(
+        &self,
+        module: &'static ModuleDeclaration,
+        target: &FileToMigrate<'_>,
+        standing: Standing,
+    ) -> FileMigration {
+        match standing {
+            Standing::Current => FileMigration::Current,
+            Standing::NewerThanCode(alert) => FileMigration::NewerThanCode { alert },
+            Standing::StillFailed(mark) => FileMigration::StillFailed { mark },
+            Standing::Failed(alert, error) => held(module, target.file, alert, error),
+            Standing::Pending {
+                from, migrations, ..
+            } => match self.migrate_on_copy(module, target, from, &migrations) {
+                FileMigration::Failed { alert, error } => held(module, target.file, alert, error),
+                other => other,
+            },
+        }
     }
 
     fn migrate_on_copy(

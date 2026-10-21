@@ -12,8 +12,9 @@
 //! declaration (FR-18, FR-58, AD-6, AD-7); [`bus`] delivers the events and link requests of a
 //! module file's outbox once its call committed (FR-24, AD-10, AD-27, AD-29). [`availability`]
 //! holds the state of every module file (AD-54), [`boundary`] runs every call of a module's code
-//! inside the fault boundary of AD-9, and [`handlers`] binds each module's code to its
-//! declaration.
+//! inside the fault boundary of AD-9, [`handlers`] binds each module's code to its declaration,
+//! and [`startup`] brings a partition's files up once its keys are derived: re-key, migration,
+//! then outbox delivery (FR-11).
 
 // AD-9, D131: a module's panic is caught at the boundary of its call and never unwinds into the
 // Core, which needs unwinding; a build that aborts on panic would take the Core down with any
@@ -28,3 +29,4 @@ pub mod bus;
 pub mod handlers;
 pub mod record;
 pub mod registry;
+pub mod startup;

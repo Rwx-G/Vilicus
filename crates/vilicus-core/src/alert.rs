@@ -101,6 +101,33 @@ pub enum InstanceAdminAlert {
         /// The state of the consumer's file.
         state: AvailabilityState,
     },
+    /// The data directory had less free space than twice the file, so its migration did not
+    /// start; the file is kept, and the migration is tried again at the partition's next unlock
+    /// (AD-23).
+    NoSpaceToMigrate {
+        /// The module.
+        module: ModuleName,
+        /// The partition.
+        partition: Partition,
+        /// The file name, `<module>.<partition>.db`.
+        file_name: String,
+        /// The free space, in bytes.
+        available: u64,
+        /// Twice the file, in bytes.
+        required: u64,
+    },
+    /// The file could not be migrated, opened or checked for a reason that is not the code's
+    /// (the file system, its free space unread, a key or an epoch, a lock), or a file whose
+    /// migrations all ran is not what its declaration says: it is not served until the
+    /// partition's next unlock (AD-54).
+    FileNotServed {
+        /// The module.
+        module: ModuleName,
+        /// The partition.
+        partition: Partition,
+        /// The file name, `<module>.<partition>.db`.
+        file_name: String,
+    },
     /// A pending row of the file's outbox whose id does not decode: no delivery can be recorded
     /// for it, so it is closed `refused` rather than left to block the rows after it (AD-29).
     MalformedOutboxRow {
@@ -162,6 +189,15 @@ impl InstanceAdminAlert {
 }
 
 impl InstanceAdminAlert {
+    /// The alert of `file`, not served for a reason that is not its migration's code.
+    pub fn file_not_served(file: &ModuleFile) -> Self {
+        Self::FileNotServed {
+            module: file.module().clone(),
+            partition: file.partition(),
+            file_name: file.file_name(),
+        }
+    }
+
     /// The alert of the event `event` of `file`, of topic `topic`, that `consumer` kept failing,
     /// now the dead letter `dead_letter`.
     pub fn dead_letter(
@@ -259,6 +295,21 @@ impl fmt::Display for InstanceAdminAlert {
                 formatter,
                 "{file_name}: event {event} of {topic} outlived the outbox's retention while \
                  {consumer} is {state}; it is dead letter {dead_letter}"
+            ),
+            Self::NoSpaceToMigrate {
+                file_name,
+                available,
+                required,
+                ..
+            } => write!(
+                formatter,
+                "{file_name}: {available} bytes free, {required} needed to migrate; the file is \
+                 kept and its migration waits for the next unlock"
+            ),
+            Self::FileNotServed { file_name, .. } => write!(
+                formatter,
+                "{file_name}: the file could not be migrated, opened or checked; it is not served \
+                 until the next unlock"
             ),
             Self::MalformedOutboxRow { file_name, seq, .. } => write!(
                 formatter,

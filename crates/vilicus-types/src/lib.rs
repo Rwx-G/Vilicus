@@ -1,6 +1,6 @@
-//! Shared vocabulary of Vilicus: identifiers, time, taint, tier, principal, the `source`
-//! vocabulary, the closed sets every other crate maps to, the confirmed V0.1 values and the shape
-//! of an error that reaches a client.
+//! Shared vocabulary of Vilicus: identifiers, time, taint, tier, principal, record revisions,
+//! the `source` vocabulary, the closed sets every other crate maps to, the confirmed V0.1 values
+//! and the shape of an error that reaches a client.
 //!
 //! It holds no key and depends on no other workspace crate; every crate of the dependency graph
 //! reaches it (`doc/architecture-spine.md`, AD-3 and Consistency Conventions). It does no I/O and
@@ -81,13 +81,19 @@ macro_rules! closed_set {
     };
 }
 
+mod availability;
+mod call_id;
 mod data_type;
+mod digest;
+mod effect;
 mod error;
 mod exception_class;
 mod id;
+mod label;
 mod limits;
 mod name;
 mod principal;
+mod rev;
 mod source;
 mod taint;
 mod tier;
@@ -96,18 +102,28 @@ mod time;
 #[cfg(test)]
 mod test_support;
 
+pub use availability::AvailabilityState;
+pub use call_id::{CallId, CallIdError};
 pub use data_type::DataType;
+pub use digest::{SHA256_LEN, sha256_hex};
+pub use effect::EffectOutcome;
 pub use error::{ClientError, ClientFacingError, ErrorCode, MessageKey, RetryClass};
 pub use exception_class::ExceptionClass;
 pub use id::{Id, IdError};
+pub use label::{
+    VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, is_vocabulary_label,
+    is_vocabulary_label_letter,
+};
 pub use limits::{
     CAPABILITY_TOKEN_DEFAULT_BUDGET, CAPABILITY_TOKEN_LIFETIME, DEFAULT_AUDIT_SPOOL_ENTRIES,
-    DEFAULT_BACKUP_INTERVAL, DEFAULT_CERTIFICATE_ALERT_LEAD_TIME, OperatorSetting,
+    DEFAULT_BACKUP_INTERVAL, DEFAULT_CERTIFICATE_ALERT_LEAD_TIME, EVENT_DELIVERY_ATTEMPTS,
+    HANDLER_TIME_BUDGET, HOME_JOURNAL_RETENTION, OUTBOX_RETENTION, OperatorSetting,
     UNDO_JOURNAL_RETENTION, UNLOCK_WINDOW_DEFAULT, UNLOCK_WINDOW_MAX,
 };
 pub use name::NameError;
 pub use principal::Principal;
+pub use rev::Rev;
 pub use source::{ModuleName, Source};
-pub use taint::{EffectiveTaint, Taint};
+pub use taint::{EffectiveTaint, Projection, RecordLabels, Taint, TextTaint};
 pub use tier::Tier;
-pub use time::{TimeError, UtcMillis};
+pub use time::{TimeError, UtcMillis, is_full_date};

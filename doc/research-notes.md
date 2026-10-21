@@ -185,7 +185,7 @@ Taken from the PRD spike table (section 9). Pass criteria and fallbacks are not 
 - ~~Whether the private-network naming option fits FR-4 and FR-6.~~ Resolved by D137: 100.64.0.0/10 is private only on one overlay interface the operator names, with the Gateway's socket bound to it.
 - Whether Firefox with a real authenticator accepts an allow list of two credentials; its WebDriver virtual authenticator refused every such list (E24). Blocks the E24 gate of V0.1. **open**.
 - How the enrollment test notification (D105) proves receipt now that the push payload carries no token (D135): the candidate is confirming the payload's opaque reference in the member's signed-in client, which alone acknowledges nothing. **open**, before Story 8.1.
-- Whether FTS5 shadow tables stay read-only to module SQL under `SQLITE_DBCONFIG_DEFENSIVE` and pass `integrity-check` after a migration, as D127 requires (E15, and the E11 suite rerun with defensive mode on). **open**.
+- Whether FTS5 shadow tables stay read-only to module SQL under `SQLITE_DBCONFIG_DEFENSIVE` and pass `integrity-check` after a migration, as D127 requires (E15, and the E11 suite rerun with defensive mode on). Settled by story 3.7 (D149): under `SQLITE_DBCONFIG_DEFENSIVE`, insert, update and delete on every FTS5 shadow table, and drop or alter of one, are refused to module SQL on write handles and in migrations, while the authorizer alone would allow them; FTS5's `integrity-check` passes after a migration and fails on a damaged index; the E11 suite passes with defensive mode on, checked on every handle. E15 (per-record keys with FTS5) stays open: no record cipher exists yet.
 
 ## 5. How to update this file
 

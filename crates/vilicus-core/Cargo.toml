@@ -18,8 +18,30 @@ missing_docs = "deny"
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 
+# `testing` compiles the write path fuzz test, `Registry::fuzz_write_paths`, which confirms
+# vocabulary labels in the scratch files it creates (Story 3.4), and `vilicus_core::testing`, the
+# storage names the testbed's tests use (Story 3.10). Only test code enables it: the testbed and
+# the vilicus binary's dev-dependency; ci/check_packaging.py refuses it in the normal or build
+# dependencies of a release artefact.
+[features]
+testing = []
+
 [dependencies]
+vilicus-types.workspace = true
 vilicus-proto.workspace = true
 vilicus-module-api.workspace = true
 vilicus-crypto.workspace = true
 vilicus-storage.workspace = true
+# NFKC folding of the words of the verbatim test (D104, D147), at the version vilicus-proto
+# already ships (D130): a direct edge to a package of the release tree, not a new package.
+unicode-normalization.workspace = true
+
+# Test code only: the registry tests change module files outside the authorizer and defensive mode,
+# to plant what no migration can make (forged shadow tables, rewritten versions) and check that the
+# Core refuses the file.
+# aws-lc-rs decrypts the pages of a module file for the file inspection of Story 3.6 (E17), as
+# the spike of Story 1.11 did with OpenSSL: the package and version vilicus-proto's tests already
+# use, a new dev-dependency edge and no new package.
+[dev-dependencies]
+rusqlite.workspace = true
+aws-lc-rs.workspace = true

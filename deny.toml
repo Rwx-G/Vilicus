@@ -61,7 +61,11 @@ exceptions = [
 ]
 
 [licenses.private]
-# Workspace crates are checked too: they declare Apache-2.0 (D29).
+# Workspace crates are checked too: they declare Apache-2.0 (D29). cargo-deny reads manifests only,
+# so it does not see the SQLCipher amalgamation vilicus-storage compiles from
+# crates/vilicus-storage/sqlcipher/ (D143): BSD-3-Clause (Zetetic LLC, sqlcipher/LICENSE.md) and the
+# public domain SQLite code, both compatible with Apache-2.0. ci/check_sqlcipher_source.py pins
+# those files by hash; a binary package reproduces sqlcipher/LICENSE.md.
 ignore = false
 
 [bans]

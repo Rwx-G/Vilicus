@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-16-2026 18:30
-last_updated: 10-20-2026 22:00
+last_updated: 10-21-2026 23:59
 project: Vilicus
 project_key: NOKEY
 tracking_system: file-system
@@ -65,17 +65,17 @@ development_status:
   2-7-coverage-guided-fuzzing-of-vilicus-proto: done
   epic-2-retrospective: optional
 
-  epic-3: backlog
-  3-1-sqlcipher-storage-layer-and-connection-authorizer: ready-for-dev
-  3-2-module-registry-and-record-envelope: ready-for-dev
-  3-3-tool-declarations-and-capability-matrix-check: ready-for-dev
-  3-4-structured-field-validation-and-reviewed-vocabularies: ready-for-dev
-  3-5-typed-record-writes-with-taint-and-data-type-stamping: ready-for-dev
-  3-6-core-journal-tables-and-caller-idempotency: ready-for-dev
-  3-7-forward-only-migrations-on-copies: ready-for-dev
-  3-8-in-partition-events-and-outbox-delivery: ready-for-dev
-  3-9-module-availability-states-and-fault-isolation: ready-for-dev
-  3-10-reference-module-exercising-the-whole-contract: ready-for-dev
+  epic-3: in-progress
+  3-1-sqlcipher-storage-layer-and-connection-authorizer: done
+  3-2-module-registry-and-record-envelope: done
+  3-3-tool-declarations-and-capability-matrix-check: done
+  3-4-structured-field-validation-and-reviewed-vocabularies: done
+  3-5-typed-record-writes-with-taint-and-data-type-stamping: done
+  3-6-core-journal-tables-and-caller-idempotency: done
+  3-7-forward-only-migrations-on-copies: done
+  3-8-in-partition-events-and-outbox-delivery: done
+  3-9-module-availability-states-and-fault-isolation: done
+  3-10-reference-module-exercising-the-whole-contract: review
   epic-3-retrospective: optional
 
   epic-4: backlog

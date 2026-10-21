@@ -43,6 +43,8 @@ jobs:
         run: python3 ci/check_supply_chain.py
       - name: Check vendor/ against Cargo.lock (D28)
         run: python3 ci/check_supply_chain.py --vendor
+      - name: Check the vendored SQLCipher source against its hashes (D143)
+        run: python3 ci/check_sqlcipher_source.py
       - name: Check that no release artefact carries test code (FR-109, D102)
         run: python3 ci/check_packaging.py
       - name: Check that every release gate carries a target tag (FR-109)
@@ -59,6 +61,12 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup toolchain install
+      # D143: vilicus-storage compiles SQLCipher against the system OpenSSL headers and links its
+      # libcrypto; the runner image provides them, and this step makes that dependency explicit.
+      - name: Check the system OpenSSL that SQLCipher builds against (D143)
+        run: |
+          dpkg -s libssl-dev | grep -E '^(Status|Version):'
+          pkg-config --modversion openssl
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
@@ -76,6 +84,12 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup toolchain install
+      # D143: vilicus-storage compiles SQLCipher against the system OpenSSL headers and links its
+      # libcrypto; the runner image provides them, and this step makes that dependency explicit.
+      - name: Check the system OpenSSL that SQLCipher builds against (D143)
+        run: |
+          dpkg -s libssl-dev | grep -E '^(Status|Version):'
+          pkg-config --modversion openssl
       - name: Build
         run: cargo build --workspace --frozen --config ci/cargo-vendored.toml
       - name: Test
@@ -223,6 +237,34 @@ jobs:
           cargo audit --file spikes/hpke-review/Cargo.lock --json > "$RUNNER_TEMP/hpke-audit.json" || true
           python3 ci/check_audit_report.py spikes/hpke-review/audit-exceptions.toml "$RUNNER_TEMP/hpke-audit.json"
 
+  # D143: regenerates the vendored SQLCipher amalgamation from its official release tag and
+  # compares it byte for byte with the committed files, which ci/check_sqlcipher_source.py only
+  # checks against SHA256SUMS. Path-filtered inside the job like hpke-review, so it stays a
+  # required check; it always runs on the weekly schedule and on manual runs. The pinned build
+  # image clones the tag, the only network access, and the checkout is mounted read-only.
+  sqlcipher-regenerate:
+    name: SQLCipher amalgamation regenerated from its tag (D143)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Detect a change under the watched paths
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          watched=(crates/vilicus-storage/sqlcipher .github/workflows/ci.yml ci/must_run.py ci/check_sqlcipher_source.py)
+          run="$(python3 ci/must_run.py --event "$EVENT" --base "$BASE" "${watched[@]}")"
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          echo "regenerate the SQLCipher amalgamation: ${run}"
+      - name: Regenerate the amalgamation and compare it with the committed files
+        if: steps.changes.outputs.run == 'true'
+        run: docker run --rm -v "$PWD:/w:ro" -w /w rust:1.99-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a bash crates/vilicus-storage/sqlcipher/regenerate.sh
+
   # Story 2.3 (AD-33): the Debian 13 VM harness of ci/vm/README.md, not yet a required check. It
   # boots the cloud image of e2e/vm/IMAGE.lock with QEMU and KVM, systemd as PID 1, and runs the
   # built binary, the smoke unit, a privileged systemd container and the release gates of Story
@@ -257,6 +299,12 @@ jobs:
         run: rustup toolchain install
       # One build per artefact of ci/release_gates.py, the shipped vilicus first, then the testbed
       # (vilicus-testbed and the test doubles), so that they never share a build.
+      # D143: vilicus-storage compiles SQLCipher against the system OpenSSL headers and links its
+      # libcrypto; the runner image provides them, and this step makes that dependency explicit.
+      - name: Check the system OpenSSL that SQLCipher builds against (D143)
+        run: |
+          dpkg -s libssl-dev | grep -E '^(Status|Version):'
+          pkg-config --modversion openssl
       - name: Build the package and testbed artefacts
         run: python3 ci/release_gates.py build
       - name: Boot the Debian 13 VM

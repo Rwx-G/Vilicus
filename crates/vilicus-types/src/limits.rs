@@ -27,6 +27,27 @@ pub const UNLOCK_WINDOW_DEFAULT: Duration = Duration::from_secs(12 * HOUR);
 /// partitions; the audit log is not affected (PRD FR-29, D113).
 pub const UNDO_JOURNAL_RETENTION: Duration = Duration::from_secs(30 * DAY);
 
+/// How long journal entries are kept in the home partition, whose rules and adapters write far
+/// more often than members do (spine AD-26, `[ASSUMPTION]`).
+pub const HOME_JOURNAL_RETENTION: Duration = Duration::from_secs(24 * HOUR);
+
+/// How long the outbox keeps a row once it is created: a delivered event, a registered or
+/// refused link, a `done` effect intent. Rows are marked, never deleted on delivery, so a restore
+/// can re-deliver every row newer than the oldest file copy of the backup (spine AD-26,
+/// `[ASSUMPTION]`).
+pub const OUTBOX_RETENTION: Duration = Duration::from_secs(30 * DAY);
+
+/// How many failed deliveries of one event to one consumer move the event to that consumer's
+/// dead letters (spine AD-29). A consumer that is not ready is not a failure (AD-54).
+pub const EVENT_DELIVERY_ATTEMPTS: u32 = 5;
+
+/// How long one call of a module's code (a tool handler, an undo handler or an event consumer)
+/// may run on its file's writer thread before the module is marked faulted for that partition and
+/// receives no further call there (spine AD-9, AD-54, `[ASSUMPTION]`). Far above the 100 ms p99 of
+/// one action through the whole pipeline (D116, D136) and above any wait a writer can meet on its
+/// own file (a backup pause, D136), so only a handler that loops or blocks reaches it.
+pub const HANDLER_TIME_BUDGET: Duration = Duration::from_secs(5);
+
 const _: () = assert!(UNLOCK_WINDOW_DEFAULT.as_secs() <= UNLOCK_WINDOW_MAX.as_secs());
 
 closed_set! {
@@ -71,6 +92,18 @@ mod tests {
             UNDO_JOURNAL_RETENTION,
             Duration::from_secs(30 * 24 * 60 * 60)
         );
+        assert_eq!(HOME_JOURNAL_RETENTION, Duration::from_secs(24 * 60 * 60));
+    }
+
+    #[test]
+    fn outbox_values_of_ad_26_and_ad_29() {
+        assert_eq!(OUTBOX_RETENTION, Duration::from_secs(30 * 24 * 60 * 60));
+        assert_eq!(EVENT_DELIVERY_ATTEMPTS, 5);
+    }
+
+    #[test]
+    fn the_handler_time_budget_of_ad_9() {
+        assert_eq!(HANDLER_TIME_BUDGET, Duration::from_secs(5));
     }
 
     #[test]

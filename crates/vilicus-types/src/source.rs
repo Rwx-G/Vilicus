@@ -7,8 +7,8 @@ use crate::id::Id;
 use crate::name::{MODULE_NAME_MAX_LEN, NameError, is_module_name};
 
 /// Who produced a record, from the closed vocabulary of the spine conventions. Every identifier
-/// is an [`Id`]; [`Event`](Source::Event) carries the `call_id` of the call that delivered the
-/// event (spine AD-28).
+/// is an [`Id`]; [`Event`](Source::Event) carries the id of the event a consumer's call reacts to,
+/// whose `call_id` is the emitting call's (spine AD-27, conventions; D150).
 ///
 /// Serialized externally tagged, the tag being the vocabulary name: `"system"`, or a one-entry map
 /// such as `{"member": "<id>"}`. Deserialization accepts only those two forms: `system` as a
@@ -33,7 +33,7 @@ pub enum Source {
     ScheduledTask(Id),
     /// A playbook.
     Playbook(Id),
-    /// An event, by the call id that delivered it.
+    /// An event, by its id: the source of a consumer's call (spine AD-27, D150).
     Event(Id),
     /// A home rule.
     Rule(Id),
@@ -62,7 +62,7 @@ closed_set! {
         ScheduledTask => "scheduled_task",
         /// `playbook(id)`.
         Playbook => "playbook",
-        /// `event(call id)`.
+        /// `event(event id)`.
         Event => "event",
         /// `rule(id)`.
         Rule => "rule",
@@ -70,6 +70,94 @@ closed_set! {
         Display => "display",
         /// `adapter(id)`.
         Adapter => "adapter",
+    }
+}
+
+impl Source {
+    /// The kind of the source, the name its text and serialized forms carry.
+    fn kind(&self) -> SourceKind {
+        match self {
+            Self::Member(_) => SourceKind::Member,
+            Self::System => SourceKind::System,
+            Self::Module(_) => SourceKind::Module,
+            Self::Plugin(_) => SourceKind::Plugin,
+            Self::Import(_) => SourceKind::Import,
+            Self::AiTask(_) => SourceKind::AiTask,
+            Self::ScheduledTask(_) => SourceKind::ScheduledTask,
+            Self::Playbook(_) => SourceKind::Playbook,
+            Self::Event(_) => SourceKind::Event,
+            Self::Rule(_) => SourceKind::Rule,
+            Self::Display(_) => SourceKind::Display,
+            Self::Adapter(_) => SourceKind::Adapter,
+        }
+    }
+
+    /// The source of `kind` whose payload is the text `payload`: an identifier's lowercase
+    /// hyphenated text, or a module name.
+    fn with_payload(kind: SourceKind, payload: &str) -> Result<Self, NameError> {
+        let id = || Id::parse(payload).map_err(|_| NameError::new("source"));
+        Ok(match kind {
+            SourceKind::System => return Err(NameError::new("source")),
+            SourceKind::Module => Self::Module(ModuleName::parse(payload)?),
+            SourceKind::Member => Self::Member(id()?),
+            SourceKind::Plugin => Self::Plugin(id()?),
+            SourceKind::Import => Self::Import(id()?),
+            SourceKind::AiTask => Self::AiTask(id()?),
+            SourceKind::ScheduledTask => Self::ScheduledTask(id()?),
+            SourceKind::Playbook => Self::Playbook(id()?),
+            SourceKind::Event => Self::Event(id()?),
+            SourceKind::Rule => Self::Rule(id()?),
+            SourceKind::Display => Self::Display(id()?),
+            SourceKind::Adapter => Self::Adapter(id()?),
+        })
+    }
+
+    /// Reads the text form [`Display`](fmt::Display) writes, the notation of the spine
+    /// conventions: `system`, or the kind's name and its payload in parentheses, such as
+    /// `member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f)` or `module(meals)`. Anything else is
+    /// refused, never normalized, so one source has one text.
+    ///
+    /// ```
+    /// use vilicus_types::Source;
+    ///
+    /// let source = Source::parse("module(meals)")?;
+    /// assert_eq!(source.to_string(), "module(meals)");
+    /// assert!(Source::parse("Module(meals)").is_err());
+    /// # Ok::<(), vilicus_types::NameError>(())
+    /// ```
+    pub fn parse(text: &str) -> Result<Self, NameError> {
+        if text == SourceKind::System.as_str() {
+            return Ok(Self::System);
+        }
+        let (name, rest) = text.split_once('(').ok_or(NameError::new("source"))?;
+        let payload = rest.strip_suffix(')').ok_or(NameError::new("source"))?;
+        let kind = SourceKind::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == name)
+            .ok_or(NameError::new("source"))?;
+        Self::with_payload(kind, payload)
+    }
+}
+
+impl fmt::Display for Source {
+    /// Writes `system`, or the kind's name and its payload in parentheses.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = self.kind().as_str();
+        match self {
+            Self::System => formatter.write_str(kind),
+            Self::Module(name) => write!(formatter, "{kind}({name})"),
+            Self::Member(id)
+            | Self::Plugin(id)
+            | Self::Import(id)
+            | Self::AiTask(id)
+            | Self::ScheduledTask(id)
+            | Self::Playbook(id)
+            | Self::Event(id)
+            | Self::Rule(id)
+            | Self::Display(id)
+            | Self::Adapter(id) => write!(formatter, "{kind}({id})"),
+        }
     }
 }
 
@@ -143,6 +231,12 @@ pub struct ModuleName(Cow<'static, str>);
 impl ModuleName {
     /// Longest module name accepted, in characters.
     pub const MAX_LEN: usize = MODULE_NAME_MAX_LEN;
+
+    /// True when `name` follows the grammar of a module name. A `const` check, so a declaration
+    /// read at build time can report a bad name as a value rather than a panic.
+    pub const fn is_valid(name: &str) -> bool {
+        is_module_name(name)
+    }
 
     /// A module name known at build time, such as a module's own declaration.
     ///
@@ -320,6 +414,35 @@ mod tests {
         assert!(empty.is_err(), "empty map accepted");
     }
 
+    /// The text form reads back for every kind, under the kind's vocabulary name, and nothing
+    /// but that form is read.
+    #[test]
+    fn the_text_form_reads_back_and_refuses_any_other_spelling() {
+        for source in one_of_each() {
+            let text = source.to_string();
+            assert!(text.starts_with(vocabulary_name(&source)), "{text}");
+            assert_eq!(Source::parse(&text), Ok(source));
+        }
+        for text in [
+            "",
+            "System",
+            "system()",
+            "member",
+            "member()",
+            "member(017F22E2-79B0-7CC3-98C4-DC0C0C07398F)",
+            "member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f",
+            "member (017f22e2-79b0-7cc3-98c4-dc0c0c07398f)",
+            "member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f) ",
+            "member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f)x",
+            "mail(017f22e2-79b0-7cc3-98c4-dc0c0c07398f)",
+            "module(Meals)",
+            "module(meals)(meals)",
+            "forged source",
+        ] {
+            assert!(Source::parse(text).is_err(), "{text:?}");
+        }
+    }
+
     #[test]
     fn system_has_one_encoding() {
         assert_eq!(from_str::<Source>("system"), Ok(Source::System));
@@ -336,6 +459,13 @@ mod tests {
             Ok("familydocs")
         );
         assert!(ModuleName::parse("family docs").is_err());
+        for name in ["familydocs", "family docs", "Meals", ""] {
+            assert_eq!(
+                ModuleName::is_valid(name),
+                ModuleName::parse(name).is_ok(),
+                "{name:?}"
+            );
+        }
         assert!(from_str::<ModuleName>("meals.plan").is_err());
         assert_eq!(
             to_json(&ModuleName::from_static("home")).as_deref(),

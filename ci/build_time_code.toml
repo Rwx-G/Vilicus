@@ -33,12 +33,18 @@ wasm-bindgen = "dependency of chrono on WebAssembly only; build script prints cf
 wasm-bindgen-macro = "procedural macro of wasm-bindgen, on WebAssembly only: expands #[wasm_bindgen] items at compile time"
 wasm-bindgen-shared = "dependency of wasm-bindgen, on WebAssembly only; build script runs `git rev-parse HEAD` in its own directory to name the version, hashes its schema file and prints two rustc-env variables; no network, no file written"
 rustversion = "procedural macro of wasm-bindgen's build script, on WebAssembly only; its own build script runs `rustc --version` and writes the parsed version to OUT_DIR"
-# Dev-dependencies of vilicus-proto only (Story 2.5): the E19 vector generator and its tests.
-# Neither reaches a release artefact (ci/check_packaging.py).
+# Dev-dependencies of vilicus-proto (Story 2.5): the E19 vector generator and its tests; aws-lc-rs
+# is also one of vilicus-core (Story 3.6), for the E17 file inspection tests. serde_json and zmij
+# reach no release artefact (ci/check_packaging.py); aws-lc-rs and aws-lc-sys do since Story 3.7,
+# as a dependency of vilicus-crypto, the Core's hashing (spine Stack).
 serde_json = "dev-dependency of vilicus-proto, reads and writes the E19 vector files; build script prints cfg flags from the target architecture and pointer width; no network, no file written"
 zmij = "dependency of serde_json; build script runs `rustc --version` and prints cfg flags; no network, no file written"
-aws-lc-rs = "dev-dependency of vilicus-proto, SHA-256 of the E19 vector files (spine Stack, the version rustls 0.23.46 pulls); build script reads its features and target and prints cfg flags; no network, no file written"
+aws-lc-rs = "dependency of vilicus-crypto, SHA-256 of each migration checked against its frozen hash (Story 3.7); dev-dependency of vilicus-proto, SHA-256 of the E19 vector files, and of vilicus-core, AES-256-CBC decryption of module file pages in the E17 inspection tests (spine Stack, the version rustls 0.23.46 pulls); build script reads its features and target and prints cfg flags; no network, no file written"
 aws-lc-sys = "dependency of aws-lc-rs; build script compiles the bundled AWS-LC C and assembly sources with cc into OUT_DIR and links them, with pregenerated bindings (no bindgen) and no cmake on Linux. It would link a system AWS-LC instead if one is found or AWS_LC_SYS_SYSTEM_DIR is set; none is in the pinned rust:1.99-trixie image (Story 2.5); no network"
 # The fuzzing runtime of vilicus-fuzz (Story 2.7, owner approval), behind its `libfuzzer` feature,
 # which only the nightly `fuzz` job enables. Never in a release artefact.
 libfuzzer-sys = "fuzzing runtime of vilicus-fuzz; with its default `link_libfuzzer` feature, the build script compiles the bundled libFuzzer C++ sources (libfuzzer/*.cpp) with cc as C++17 into OUT_DIR and links them statically, or links the library CUSTOM_LIBFUZZER_PATH names when set (the fuzz job never sets it); no network"
+# SQLite access for vilicus-storage (Story 3.1, spine Stack), with SQLCipher 4.19.0 compiled from the
+# vendored amalgamation of crates/vilicus-storage/sqlcipher/ (D143).
+libsqlite3-sys = "dependency of rusqlite with its `sqlcipher` and `bundled_bindings` features (no `bundled`): the build script copies the prebuilt bindings of its sqlcipher/ directory to OUT_DIR, probes pkg-config for a `sqlcipher` library (none in the pinned image or on the CI runner) and prints `rustc-link-lib=dylib=sqlcipher`, which resolves to the archive vilicus-storage builds; it compiles nothing, and its own SQLCipher 4.14.0 sources are not used; no network"
+vilicus-storage = "first-party build script (build.rs): compiles crates/vilicus-storage/sqlcipher/sqlite3.c, checked against its SHA256SUMS by ci/check_sqlcipher_source.py, with the system C compiler (CC or cc) and a fixed list of defines into OUT_DIR, archives it with ar (AR or ar) as libsqlcipher.a and links it whole with the system libcrypto; reads no CFLAGS and no LIBSQLITE3_FLAGS; no network"

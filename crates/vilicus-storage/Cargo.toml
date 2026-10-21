@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# build.rs compiles the vendored SQLCipher amalgamation of sqlcipher/ into the static library that
+# rusqlite's `sqlcipher` feature links (D143); `links` keeps a second copy out of the build graph.
+links = "vilicus-sqlcipher"
 
 # Not inherited from the workspace: unsafe code is allowed in this crate, denied at crate level
 # and allowed per block with a `// SAFETY:` comment (D140; the crate list is in ci/crate_graph.toml).
@@ -20,3 +23,8 @@ undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 vilicus-types.workspace = true
+rusqlite.workspace = true
+zeroize.workspace = true
+# statvfs, the free space the migration runner checks before it copies a file (AD-23): libc, at
+# the version Cargo.lock already holds in the tree of dcbor and cc, a new edge and no new package.
+libc.workspace = true

@@ -12,5 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-vilicus-core.workspace = true
+vilicus-core = { workspace = true, features = ["testing"] }
 vilicus-mod-reference.workspace = true
+# The module port and the shared vocabulary the testbed's second module and its gates are written
+# in (Story 3.10): edges to crates vilicus-core already reaches (AD-3, D140), not new packages.
+vilicus-module-api.workspace = true
+vilicus-types.workspace = true

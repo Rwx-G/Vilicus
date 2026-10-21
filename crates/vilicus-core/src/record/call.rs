@@ -161,8 +161,9 @@ pub const MAX_WRITE_INPUTS: usize = 4096;
 /// A record a call changed: what the write journal of the call records (AD-26).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordChange {
-    /// The table.
-    pub table: &'static str,
+    /// The table, as the journal names it: a table a later migration removed (Story 3.7) is
+    /// still named, though the module no longer declares it.
+    pub table: String,
     /// The record.
     pub id: Id,
     /// Its revision before the write; `None` for an insert.
@@ -246,7 +247,7 @@ pub fn run_call<T>(
         call_id: invocation.call_id,
     };
     in_write_transaction(handle, || {
-        if let Some(earlier) = earlier_call(handle, module, &key, invocation.request_hash)? {
+        if let Some(earlier) = earlier_call(handle, &key, invocation.request_hash)? {
             return Ok(CallResult::Deduplicated(earlier));
         }
         if let Some(delivery) = invocation.delivery
@@ -296,7 +297,6 @@ pub fn run_call<T>(
 /// is another request under the same call id, refused with [`RecordError::CallIdReused`].
 fn earlier_call(
     handle: &Handle<Write>,
-    module: &'static ModuleDeclaration,
     key: &CallKey<'_>,
     request_hash: Option<[u8; 32]>,
 ) -> Result<Option<EarlierCall>, RecordError> {
@@ -316,7 +316,7 @@ fn earlier_call(
     Ok(Some(EarlierCall {
         changes: journal
             .into_iter()
-            .map(|row| journaled_change(module, row))
+            .map(journaled_change)
             .collect::<Result<_, _>>()?,
         effects: effects
             .into_iter()
@@ -329,16 +329,12 @@ fn earlier_call(
     }))
 }
 
-/// The change a journal row of `module`'s file records.
-fn journaled_change(
-    module: &'static ModuleDeclaration,
-    row: JournalRow,
-) -> Result<RecordChange, RecordError> {
-    let table = module
-        .table(&row.table)
-        .ok_or(RecordError::InvalidJournal)?;
+/// The change a journal row of `module`'s file records. The row may name a table a migration
+/// removed since the call (Story 3.7): its rows stay journaled until retention removes them, and
+/// a repeated call still gets the first call's changes, under the table's journaled name.
+fn journaled_change(row: JournalRow) -> Result<RecordChange, RecordError> {
     Ok(RecordChange {
-        table: table.name,
+        table: row.table,
         id: row.record,
         before: row.rev_before,
         after: row.rev_after,
@@ -550,7 +546,7 @@ impl CallRecords<'_> {
         let after = journal::image(self.handle, table, id)?;
         self.journal(
             RecordChange {
-                table: table.name,
+                table: table.name.to_owned(),
                 id,
                 before: None,
                 after: Some(Rev::FIRST),
@@ -617,7 +613,7 @@ impl CallRecords<'_> {
         let after = journal::image(self.handle, table, id)?;
         self.journal(
             RecordChange {
-                table: table.name,
+                table: table.name.to_owned(),
                 id,
                 before: Some(rev),
                 after: Some(next),
@@ -651,7 +647,7 @@ impl CallRecords<'_> {
         let inputs = journal::encode_inputs(implicit, implicit)?;
         self.journal(
             RecordChange {
-                table: table.name,
+                table: table.name.to_owned(),
                 id,
                 before: Some(rev),
                 after: None,
@@ -680,7 +676,7 @@ impl CallRecords<'_> {
             member,
             change_index: u32::try_from(self.changes.len())
                 .map_err(|_| RecordError::InvalidJournal)?,
-            table: change.table,
+            table: &change.table,
             record: change.id,
             rev_before: change.before,
             rev_after: change.after,

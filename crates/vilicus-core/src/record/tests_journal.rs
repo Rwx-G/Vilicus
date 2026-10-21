@@ -1056,3 +1056,69 @@ fn a_name_based_call_id_deduplicates_a_rule_action() {
         CallResult::Deduplicated(_)
     ));
 }
+
+/// Story 3.6's open point, settled by Story 3.7: a migration that removes a table leaves its
+/// journal rows until retention removes them, and a repeated call whose rows name it still gets
+/// the first call's changes, under the table's journaled name, rather than a malformed journal.
+#[test]
+fn a_repeated_call_is_answered_after_a_migration_removed_its_table() {
+    let module = notes_module();
+    let (file, handle) = open_new(module, "dedup-removed-table");
+    let mut stamper = TestStamper::at(noon());
+    let by = own_action(ella());
+    let invocation = new_invocation(&by);
+    let CallResult::Committed(first) =
+        run_call(&handle, module, &by, &invocation, &mut stamper, |records| {
+            records.insert("notes", &note("Pommes"), &[])
+        })
+        .expect("commits")
+    else {
+        panic!("a new call runs")
+    };
+    handle.close().expect("close");
+
+    let mut without_notes = *module;
+    without_notes.tables = without_notes
+        .tables
+        .iter()
+        .copied()
+        .filter(|table| table.name != "notes")
+        .collect::<Vec<_>>()
+        .leak();
+    let mut migrations = without_notes.migrations.to_vec();
+    migrations.push(crate::registry::frozen("DROP TABLE notes;"));
+    without_notes.migrations = migrations.leak();
+    let without_notes: &'static _ = Box::leak(Box::new(without_notes));
+    let registry = super::tests::registry_of(vec![without_notes]);
+    let outcomes = registry
+        .migrate_files(&[crate::registry::FileToMigrate {
+            file: &file,
+            key: &super::tests::KEY,
+            verified_backup: None,
+        }])
+        .expect("run");
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [crate::registry::FileMigration::Migrated { .. }]
+        ),
+        "{outcomes:?}"
+    );
+    let handle = registry
+        .open::<Write>(&file, &super::tests::KEY)
+        .expect("open");
+    let again = run_call(
+        &handle,
+        without_notes,
+        &by,
+        &invocation,
+        &mut stamper,
+        |_| Ok(()),
+    )
+    .expect("answered");
+    let CallResult::Deduplicated(earlier) = again else {
+        panic!("the same call is deduplicated")
+    };
+    assert_eq!(earlier.changes, first.changes);
+    assert_eq!(earlier.changes[0].table, "notes");
+}

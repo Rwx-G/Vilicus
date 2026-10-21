@@ -415,7 +415,7 @@ fn the_core_stamps_the_envelope_of_an_insert() {
     assert_eq!(
         outcome.changes,
         [RecordChange {
-            table: "notes",
+            table: "notes".to_owned(),
             id: written.id,
             before: None,
             after: Some(Rev::FIRST),
@@ -479,7 +479,7 @@ fn an_update_bumps_rev_and_a_stale_one_is_refused() {
     assert_eq!(
         outcome.changes,
         [RecordChange {
-            table: "notes",
+            table: "notes".to_owned(),
             id: first.id,
             before: Some(Rev::FIRST),
             after: Some(second.rev),
@@ -539,7 +539,7 @@ fn a_delete_by_id_removes_the_record() {
     assert_eq!(
         outcome.changes,
         [RecordChange {
-            table: "notes",
+            table: "notes".to_owned(),
             id: written.id,
             before: Some(Rev::FIRST),
             after: None,

@@ -215,7 +215,7 @@ pub enum RecordError {
     /// An effect intent whose effect is not an identifier, or whose idempotency key is empty
     /// (AD-28).
     InvalidEffect,
-    /// A journal row of the file does not decode, or names a table the module does not declare.
+    /// A journal row of the file does not decode.
     InvalidJournal,
     /// An effect request of a name and idempotency key the file holds for another payload or
     /// another caller (AD-28).

@@ -38,6 +38,30 @@ mod tests {
         }
     }
 
+    /// The write path fuzz test of Story 3.4 (D98, I40) on the shipped modules: every insert and
+    /// update of every table refuses values outside their declarations and leaves the file
+    /// unchanged.
+    #[test]
+    fn every_shipped_write_path_refuses_values_outside_its_declaration() {
+        let directory =
+            std::env::temp_dir().join(format!("vilicus-shipped-fuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create the scratch directory");
+        let report = REGISTRY
+            .fuzz_write_paths(&directory, &[0x6b; 32], 0x5419_7ed0, 256)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let tables: usize = REGISTRY
+            .modules()
+            .iter()
+            .map(|module| module.tables.len())
+            .sum();
+        assert_eq!(
+            report.paths.len(),
+            2 * tables,
+            "an insert and an update per table"
+        );
+        std::fs::remove_dir_all(&directory).expect("remove the scratch directory");
+    }
+
     /// Every Rust source file of the binary, with its text.
     fn sources(directory: &Path, found: &mut Vec<(PathBuf, String)>) {
         for entry in std::fs::read_dir(directory).expect("read the source directory") {

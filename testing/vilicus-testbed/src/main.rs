@@ -7,4 +7,7 @@
 //! later stories give it behaviour (the Core roles, the CI test key of D102, starting the doubles
 //! in Story 10.1), it starts and exits with status 0.
 
+#[cfg(test)]
+mod registry;
+
 fn main() {}

@@ -61,6 +61,7 @@ pub const CORE_TABLES: &[&str] = &[
     "_migrations",
     "_journal",
     "_outbox",
+    "_deliveries",
     "_consumed",
     "_dead_letter",
     "_record_keys",
@@ -68,7 +69,8 @@ pub const CORE_TABLES: &[&str] = &[
 
 /// The Core tables module SQL cannot read either, under any policy but the Core's own: the
 /// journal's images are earlier states of records, deleted ones included, which a module would
-/// otherwise still read once the record is gone; the outbox holds the payloads of effects; and
+/// otherwise still read once the record is gone; the outbox holds the payloads of effects and
+/// events, and `_deliveries` and `_dead_letter` which events each consumer missed; and
 /// a module that read a wrapped record key could copy it into a record and defeat its shredding
 /// (D132). `_migrations`, the frozen hash of every migration the file ran, holds nothing secret,
 /// but module SQL has no use for it, and D148 lets module SQL read `_meta` and `_vocabulary`
@@ -78,6 +80,7 @@ pub const CORE_PRIVATE_TABLES: &[&str] = &[
     "_migrations",
     "_journal",
     "_outbox",
+    "_deliveries",
     "_consumed",
     "_dead_letter",
     "_record_keys",

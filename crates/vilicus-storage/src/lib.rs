@@ -22,12 +22,15 @@
 //! track, before the module's (AD-26). A write handle writes their rows with the Core's own
 //! statements only: the journal of each record a call changes and its retention purge
 //! ([`JournalEntry`], [`Handle::purge_journal`]), effect intents and their outcomes
-//! ([`EffectIntent`], AD-28), consumed events, and wrapped record keys, whose destruction shreds
-//! a record ([`Handle::destroy_wrapped_record_key`], D132).
+//! ([`EffectIntent`], AD-28), events and link requests with the state of each event's delivery
+//! to each consumer, its dead letters and the outbox's retention purge ([`EventIntent`],
+//! [`LinkIntent`], [`Handle::purge_outbox`], AD-10, AD-29), consumed events, and wrapped record
+//! keys, whose destruction shreds a record ([`Handle::destroy_wrapped_record_key`], D132).
 
 mod authorizer;
 mod core_schema;
 mod error;
+mod event;
 mod ffi;
 mod file;
 mod handle;
@@ -42,6 +45,10 @@ mod schema;
 pub use authorizer::{CORE_PRIVATE_TABLES, CORE_TABLES};
 pub use core_schema::{CORE_SCHEMA_VERSION, core_migrations};
 pub use error::{Error, Result, is_refusal};
+pub use event::{
+    DeadLetter, DeliveryRow, DeliveryState, EventIntent, EventRow, LinkIntent, LinkRow,
+    OutboxPurge, OutboxRow, OutboxState,
+};
 pub use file::{KeyEpoch, ModuleFile, Partition, read_epoch};
 pub use handle::{
     BUSY_TIMEOUT, CHECKPOINT_ATTEMPTS, Handle, Inspect, JOURNAL_SIZE_LIMIT, Migration,

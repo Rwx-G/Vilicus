@@ -180,6 +180,13 @@ pub enum Error {
     },
     /// A Core operation that runs its own transaction was called inside an open one.
     TransactionOpen,
+    /// An event without a topic, or a link request without a target module (AD-10, AD-29).
+    InvalidOutboxRow,
+    /// No event or link request of that id is in the file's outbox.
+    OutboxRowNotFound,
+    /// An event or a link request was closed, or a delivery recorded for it, once it was no
+    /// longer pending: an outbox row is closed once.
+    OutboxRowNotPending,
     /// A label to confirm is outside the form of reviewed-vocabulary labels (D104).
     InvalidVocabularyLabel,
     /// A file copy was asked for while the WAL still holds content (AD-23).
@@ -335,6 +342,13 @@ impl fmt::Display for Error {
             Self::TransactionOpen => {
                 formatter.write_str("a Core operation with its own transaction inside another")
             }
+            Self::InvalidOutboxRow => {
+                formatter.write_str("an event needs a topic and a link request a target module")
+            }
+            Self::OutboxRowNotFound => formatter.write_str("no such event or link request"),
+            Self::OutboxRowNotPending => {
+                formatter.write_str("the event or link request is no longer pending")
+            }
             Self::InvalidVocabularyLabel => {
                 formatter.write_str("a label outside the form of reviewed-vocabulary labels")
             }
@@ -385,6 +399,9 @@ impl fmt::Debug for Error {
             Self::InvalidWrappedKey => "InvalidWrappedKey",
             Self::DeletedNotCheckpointed { .. } => "DeletedNotCheckpointed",
             Self::TransactionOpen => "TransactionOpen",
+            Self::InvalidOutboxRow => "InvalidOutboxRow",
+            Self::OutboxRowNotFound => "OutboxRowNotFound",
+            Self::OutboxRowNotPending => "OutboxRowNotPending",
             Self::InvalidVocabularyLabel => "InvalidVocabularyLabel",
             Self::WalNotEmpty(_) => "WalNotEmpty",
             Self::CopyRaced(_) => "CopyRaced",

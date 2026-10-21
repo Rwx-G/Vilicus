@@ -19,10 +19,14 @@
 //!   the record's table, id and revisions, its before and after images and the provenance of the
 //!   write's inputs, written in the transaction of the write (AD-26, AD-28, FR-29). The unique
 //!   index on the call's key and the change's position holds every call to one set of rows;
-//! - `_outbox`, the event rows and effect intents a call commits with its writes (AD-10, AD-28),
-//!   with the call's key and request hash, the member to report an `unknown` outcome to, or the
-//!   adult to report it to first when no member is named; an effect intent is unique by its
-//!   effect's name and its business idempotency key;
+//! - `_outbox`, the effect intents, events and link requests a call commits with its writes
+//!   (AD-10, AD-28, AD-29), with the call's key and request hash and the member it names; an
+//!   effect intent also has the adult to report an `unknown` outcome to first when no member is
+//!   named, and is unique by its effect's name and its business idempotency key; an event has its
+//!   topic, payload version, emitting record and that record's provenance as of the emission, and
+//!   the emitting call's author; a link request has the linking record and its target;
+//! - `_deliveries`, where the delivery of each event of the file to each of its consumers stands:
+//!   the failed attempts, and whether it was delivered or moved to the dead letters (AD-29);
 //! - `_consumed`, the event ids a consumer recorded in the transaction of its effect (AD-10);
 //! - `_dead_letter`, the events a consumer kept failing (AD-29);
 //! - `_record_keys`, the wrapped record key of each record that has one (`doc/architecture.md`
@@ -89,10 +93,24 @@ pub(crate) const CORE_MIGRATIONS: &[FrozenMigration<'static>] = &[FrozenMigratio
         state TEXT NOT NULL,
         attempts INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        author BLOB,
+        version INTEGER,
+        record_id BLOB,
+        provenance BLOB,
+        target BLOB
     ) STRICT;
     CREATE INDEX _outbox_call ON _outbox (principal, source, call_id);
     CREATE UNIQUE INDEX _outbox_effect ON _outbox (name, idempotency_key);
+    CREATE INDEX _outbox_pending ON _outbox (state, seq);
+    CREATE TABLE _deliveries (
+        event_id BLOB NOT NULL,
+        consumer TEXT NOT NULL,
+        attempts INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (event_id, consumer)
+    ) STRICT, WITHOUT ROWID;
     CREATE TABLE _consumed (
         event_id BLOB NOT NULL,
         consumer TEXT NOT NULL,
@@ -110,7 +128,7 @@ pub(crate) const CORE_MIGRATIONS: &[FrozenMigration<'static>] = &[FrozenMigratio
         record_id BLOB NOT NULL PRIMARY KEY,
         wrapped_key BLOB NOT NULL
     ) STRICT, WITHOUT ROWID;",
-    sha256: sha256_hex("c5d7d5e932d2725faea9ef73c5b706bf09a8445a07e886ed1308ee5d97de2717"),
+    sha256: sha256_hex("725cc317db2d5c551461e7c761a4ff9a1f902b7aa6a0e8cdcbf2011dc449bca6"),
 }];
 
 /// The Core track's migrations with their frozen hashes, which the Core checks against the

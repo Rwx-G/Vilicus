@@ -5,8 +5,9 @@
 //! performs it after the commit; the outcome is recorded in the same row, in a transaction of its
 //! own. An intent is unique in its file by its effect's name and its idempotency key: the same
 //! request of the same caller is the earlier intent, any other request of that pair is a conflict.
-//! A `done` intent blocks a repeat only while its row is kept, which the outbox's retention
-//! (Story 3.8) decides. An intent is `pending` until an outcome is recorded, then `done`, `failed` or `unknown`.
+//! A `done` intent blocks a repeat only while its row is kept, until the outbox's retention purge
+//! ([`Handle::purge_outbox`]). An intent is `pending` until an outcome is recorded, then `done`,
+//! `failed` or `unknown`.
 //! Only a `failed` intent goes back to `pending`, keeping its id and key, so only the Core
 //! retries and always with the same key; an `unknown` one is reported to the member and never
 //! retried. A consumer of an event records the event id in `_consumed` in the transaction of its
@@ -27,7 +28,8 @@ use crate::journal::{
     CallKey, malformed, read_id, read_optional_id, read_time, require_transaction,
 };
 
-/// The `kind` of an effect intent row of `_outbox`; event rows (Story 3.8) have their own.
+/// The `kind` of an effect intent row of `_outbox`; events and link requests have their own
+/// (`event.rs`).
 const EFFECT_KIND: &str = "effect";
 
 /// Where an effect intent stands.

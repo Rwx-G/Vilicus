@@ -8,6 +8,7 @@ mod fts5;
 mod hostile;
 mod maintenance;
 mod migration_copy;
+mod outbox_events;
 mod replay;
 mod schema;
 mod setup;

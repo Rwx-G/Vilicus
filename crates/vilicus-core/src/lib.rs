@@ -10,9 +10,21 @@
 //! its declaration; [`record`] runs a module's writes through the typed record API, stamping each
 //! record's envelope, taint and data types, and holds every field a write gives to its
 //! declaration (FR-18, FR-58, AD-6, AD-7); [`bus`] delivers the events and link requests of a
-//! module file's outbox once its call committed (FR-24, AD-10, AD-27, AD-29).
+//! module file's outbox once its call committed (FR-24, AD-10, AD-27, AD-29). [`availability`]
+//! holds the state of every module file (AD-54), [`boundary`] runs every call of a module's code
+//! inside the fault boundary of AD-9, and [`handlers`] binds each module's code to its
+//! declaration.
+
+// AD-9, D131: a module's panic is caught at the boundary of its call and never unwinds into the
+// Core, which needs unwinding; a build that aborts on panic would take the Core down with any
+// module.
+#[cfg(not(panic = "unwind"))]
+compile_error!("vilicus-core needs panic = \"unwind\" (AD-9): a module's panic must be caught");
 
 pub mod alert;
+pub mod availability;
+pub mod boundary;
 pub mod bus;
+pub mod handlers;
 pub mod record;
 pub mod registry;

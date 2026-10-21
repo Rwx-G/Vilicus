@@ -13,6 +13,11 @@ license = "Apache-2.0"
 repository = "https://github.com/Rwx-G/Vilicus"
 publish = false
 
+# AD-9, D131: release builds unwind on panic, so the Core catches a module's panic at the boundary
+# of its call and a module never takes the Core down; vilicus-core refuses to compile otherwise.
+[profile.release]
+panic = "unwind"
+
 # Every crate inherits these lints except the crates where D140 allows unsafe code, listed once
 # under [unsafe_code] in ci/crate_graph.toml; ci/check_workspace.py fails when any other crate
 # stops inheriting them.

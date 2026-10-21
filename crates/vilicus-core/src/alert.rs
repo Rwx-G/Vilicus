@@ -1,6 +1,6 @@
-//! Typed alerts to the instance admin (FR-23, FR-24, FR-54, D84): what the Core reports when a
-//! module file cannot serve, when an event moves to the dead letters, or when a link request is
-//! refused. Each names the file by its module, partition and file name, and carries identifiers,
+//! Typed alerts to the instance admin (FR-23, FR-24, FR-54, D84, AD-9, AD-54): what the Core
+//! reports when a module file cannot serve, when a module faults, when an event moves to the dead
+//! letters, or when a link request is refused. Each names the file by its module, partition and file name, and carries identifiers,
 //! names from the declarations and versions only, never a value of the file (spine conventions,
 //! Logging).
 //! Delivering them, to the instance admin and, for a partition's file, to its members (AD-23),
@@ -10,6 +10,8 @@ use core::fmt;
 
 use vilicus_storage::{MigrationTrack, ModuleFile, Partition};
 use vilicus_types::{Id, ModuleName};
+
+use crate::availability::Fault;
 
 /// An alert to the instance admin.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +65,19 @@ pub enum InstanceAdminAlert {
         topic: String,
         /// The consumer, `<module>.<consumer>`.
         consumer: String,
+    },
+    /// A handler, undo handler or consumer of the module panicked or exceeded its time budget on
+    /// the file: its call was rolled back, and the module is faulted for the partition and
+    /// receives no further call there (AD-9, AD-54 `faulted`).
+    ModuleFaulted {
+        /// The module.
+        module: ModuleName,
+        /// The partition.
+        partition: Partition,
+        /// The file name, `<module>.<partition>.db`.
+        file_name: String,
+        /// What the module's code did.
+        fault: Fault,
     },
     /// A pending row of the file's outbox whose id does not decode: no delivery can be recorded
     /// for it, so it is closed `refused` rather than left to block the rows after it (AD-29).
@@ -202,6 +217,13 @@ impl fmt::Display for InstanceAdminAlert {
                 formatter,
                 "{file_name}: event {event} of {topic} failed every delivery to {consumer}; it is \
                  dead letter {dead_letter}, and later events proceed"
+            ),
+            Self::ModuleFaulted {
+                file_name, fault, ..
+            } => write!(
+                formatter,
+                "{file_name}: the module's code {fault}; its call was rolled back, and the module \
+                 is faulted for this partition and receives no further call there"
             ),
             Self::MalformedOutboxRow { file_name, seq, .. } => write!(
                 formatter,

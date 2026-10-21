@@ -456,7 +456,11 @@ fn a_changed_migration_fails_the_file_before_anything_runs() {
     let mut migrations = refrozen.migrations.to_vec();
     migrations[0] = frozen(format!("{} ", migrations[0].sql).leak());
     refrozen.migrations = migrations.leak();
-    for (module, version) in [(unfrozen, 2), (refrozen, 1)] {
+    let mut current = *shop(None, false);
+    let mut migrations = current.migrations.to_vec();
+    migrations[0] = frozen(format!("{} ", migrations[0].sql).leak());
+    current.migrations = migrations.leak();
+    for (module, version) in [(unfrozen, 2), (refrozen, 1), (current, 1)] {
         let outcomes = registry_of(vec![Box::leak(Box::new(module))])
             .migrate_files(&[target(&file)])
             .expect("run");
@@ -480,6 +484,11 @@ fn a_changed_migration_fails_the_file_before_anything_runs() {
             "{error:?}"
         );
         assert_eq!(disk(&file), before);
+        assert_eq!(
+            maintenance::failed_migration_mark(&file).expect("read"),
+            None,
+            "Story 3.9 review: a failure found before any copy is not marked"
+        );
     }
 }
 

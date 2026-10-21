@@ -321,7 +321,10 @@ impl Registry {
             Standing::Current => FileMigration::Current,
             Standing::NewerThanCode(alert) => FileMigration::NewerThanCode { alert },
             Standing::StillFailed(mark) => FileMigration::StillFailed { mark },
-            Standing::Failed(alert, error) => held(module, target.file, alert, error),
+            // A failure found before any copy (a changed migration, a file's record of frozen
+            // hashes, an open that fails) is met again before the mark is read, so it is not
+            // marked: only a migration that ran on a copy is held.
+            Standing::Failed(alert, error) => FileMigration::Failed { alert, error },
             Standing::Pending {
                 from, migrations, ..
             } => match self.migrate_on_copy(module, target, from, &migrations) {

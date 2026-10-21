@@ -19,6 +19,7 @@ missing_docs = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
+vilicus-types.workspace = true
 vilicus-proto.workspace = true
 vilicus-module-api.workspace = true
 vilicus-crypto.workspace = true

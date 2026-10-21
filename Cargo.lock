@@ -534,6 +534,7 @@ dependencies = [
  "vilicus-module-api",
  "vilicus-proto",
  "vilicus-storage",
+ "vilicus-types",
 ]
 
 [[package]]

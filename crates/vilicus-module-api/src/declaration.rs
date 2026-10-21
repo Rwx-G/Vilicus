@@ -63,8 +63,8 @@ const fn envelope(
 
 /// The record envelope every module table carries, in the order of AD-6. Ids are 16-byte UUIDv7
 /// blobs and times UTC integer milliseconds (spine conventions); `author` is empty for the
-/// principals the conventions name, so it may be `NULL`. How `source` and `data_types` are
-/// written in their `TEXT` columns is the typed record API's (Story 3.5).
+/// principals the conventions name, so it may be `NULL`. The Core stamps every column on every
+/// write of the typed record API ([`Records`](crate::Records)), in the stored forms of D146.
 pub const ENVELOPE: &[EnvelopeColumn] = &[
     envelope("id", SqlType::Blob, true, true),
     envelope("source", SqlType::Text, true, false),

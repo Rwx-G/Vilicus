@@ -13,12 +13,16 @@
 //! build time, and the Core's registry applies them again, then compares the declaration with the
 //! schema the migrations produce and the tools with `doc/capability-matrix.md`.
 //!
-//! A write gives each field a [`Value`], which [`Field::check_value`] holds to the field's
-//! declaration (FR-58, D98): the Core runs it on every write, and checks in the write transaction
-//! that a reviewed-vocabulary label is one an adult confirmed (D104).
+//! A module writes its records only through the typed record API, [`Records`] (AD-9): insert,
+//! update by id with the expected [`Rev`], delete by id. It gives field values and the ids of
+//! the records a write is derived from; the Core stamps the envelope and computes `taint` and
+//! `data_types` (AD-6, AD-7). A write gives each field a [`Value`], which [`Field::check_value`]
+//! holds to the field's declaration (FR-58, D98): the Core runs it on every write, and checks in
+//! the write transaction that a reviewed-vocabulary label is one an adult confirmed (D104).
 
 mod check;
 mod declaration;
+mod records;
 mod tool;
 mod value;
 
@@ -31,10 +35,11 @@ pub use declaration::{
     ENVELOPE, EnvelopeColumn, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table,
     Fts5Tokenizer, Migration, ModuleDeclaration, SqlType, Structured, Table,
 };
+pub use records::{Records, WriteError, Written};
 pub use tool::{Confirmation, MatrixRow, Tool};
 pub use value::{Value, ValueError, check_vocabulary_label, is_free_text_character};
 pub use vilicus_types::{
-    DataType, ExceptionClass, Tier, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS,
+    DataType, ExceptionClass, Id, Rev, Tier, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS,
     is_vocabulary_label, is_vocabulary_label_letter,
 };
 

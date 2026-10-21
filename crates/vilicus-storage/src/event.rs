@@ -538,8 +538,10 @@ impl Handle<Write> {
 
     /// Records, at `at` and in a transaction of its own, that `consumer` recorded `event`: after
     /// the consumer's own transaction committed, never inside it, since the two are in two files
-    /// (AD-10). Recording it again is harmless; a delivery is at least once. Fails with
-    /// [`Error::OutboxRowNotFound`] when the file holds no such event.
+    /// (AD-10). Recording it again is harmless; a delivery is at least once. A delivery moved to
+    /// the dead letters stays there, refused with [`Error::OutboxRowNotPending`]: only its replay
+    /// (`vilicus events replay`) takes it out. Fails with [`Error::OutboxRowNotFound`] when the
+    /// file holds no such event.
     pub fn record_delivered(
         &self,
         event: Id,
@@ -550,12 +552,17 @@ impl Handle<Write> {
             let mut recorded = None;
             handle::in_transaction(connection, || {
                 outbox_state(connection, event, EVENT_KIND)?.ok_or(Error::OutboxRowNotFound)?;
-                let attempts = delivery_of(connection, event, consumer)?
-                    .map_or(0, |delivery| delivery.attempts);
+                let earlier = delivery_of(connection, event, consumer)?;
+                if earlier
+                    .as_ref()
+                    .is_some_and(|delivery| delivery.state == DeliveryState::DeadLetter)
+                {
+                    return Err(Error::OutboxRowNotPending);
+                }
                 let delivery = DeliveryRow {
                     event,
                     consumer: consumer.to_owned(),
-                    attempts,
+                    attempts: earlier.map_or(0, |delivery| delivery.attempts),
                     state: DeliveryState::Delivered,
                     updated_at: at,
                 };

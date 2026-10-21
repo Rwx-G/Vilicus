@@ -235,6 +235,20 @@ fn a_failing_delivery_moves_to_the_dead_letters_at_its_last_attempt() {
         writer.record_failed_delivery(id(60), "meals.react", at(6), 5, id(91)),
         Err(Error::OutboxRowNotPending)
     ));
+    assert!(
+        matches!(
+            writer.record_delivered(id(60), "meals.react", at(6)),
+            Err(Error::OutboxRowNotPending)
+        ),
+        "a dead letter leaves the dead letters by its replay only"
+    );
+    assert_eq!(
+        writer
+            .delivery(id(60), "meals.react")
+            .expect("read")
+            .map(|delivery| delivery.state),
+        Some(DeliveryState::DeadLetter)
+    );
     assert_eq!(writer.dead_letters().expect("read").len(), 1);
 
     let other = writer

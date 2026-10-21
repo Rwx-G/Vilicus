@@ -99,6 +99,8 @@ pub enum Error {
     },
     /// The schema version `_meta` holds for a track is not a version number.
     MalformedSchemaVersion(MigrationTrack),
+    /// A label to confirm is outside the form of reviewed-vocabulary labels (D104).
+    InvalidVocabularyLabel,
     /// A file copy was asked for while the WAL still holds content (AD-23).
     WalNotEmpty(PathBuf),
     /// The file or its WAL changed while it was being copied: a connection was open.
@@ -188,6 +190,9 @@ impl fmt::Display for Error {
                     "the {track} schema version in _meta is malformed"
                 )
             }
+            Self::InvalidVocabularyLabel => {
+                formatter.write_str("a label outside the form of reviewed-vocabulary labels")
+            }
             Self::WalNotEmpty(path) => write!(formatter, "{} holds WAL content", path.display()),
             Self::CopyRaced(path) => write!(
                 formatter,
@@ -217,6 +222,7 @@ impl fmt::Debug for Error {
             Self::CheckpointIncomplete { .. } => "CheckpointIncomplete",
             Self::MigrationOutOfOrder { .. } => "MigrationOutOfOrder",
             Self::MalformedSchemaVersion(_) => "MalformedSchemaVersion",
+            Self::InvalidVocabularyLabel => "InvalidVocabularyLabel",
             Self::WalNotEmpty(_) => "WalNotEmpty",
             Self::CopyRaced(_) => "CopyRaced",
             Self::Sqlite(_) => "Sqlite",

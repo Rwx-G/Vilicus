@@ -23,7 +23,7 @@ use std::time::Duration;
 use rusqlite::config::DbConfig;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Params, Row, Statement};
-use vilicus_types::{Id, UtcMillis};
+use vilicus_types::{Id, UtcMillis, is_vocabulary_label};
 use zeroize::Zeroizing;
 
 use crate::authorizer::{self, Policy};
@@ -114,7 +114,8 @@ impl Inspect for Write {}
 /// the transaction of the migration, under the Core policy that module SQL never runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MigrationTrack {
-    /// The Core tables of the file (`_meta`, `_journal`, `_outbox`, `_consumed`, `_dead_letter`).
+    /// The Core tables of the file (`_meta`, `_vocabulary`, `_journal`, `_outbox`, `_consumed`,
+    /// `_dead_letter`).
     Core,
     /// The module's own tables.
     Module,
@@ -447,9 +448,8 @@ pub fn open<R: Role>(file: &ModuleFile, key: &[u8; 32]) -> Result<Handle<R>> {
 /// Creates `file` with its raw `key` and key epoch, and returns its write handle.
 ///
 /// The file is built under [`ModuleFile::staging_path`] with its Core tables, `_meta` and
-/// `_vocabulary`, and closed, then
-/// its sidecar is written, then it is renamed into place, so the final name exists only once the
-/// file and its sidecar are durable. A crash leaves a staging file, alone or with a sidecar: that
+/// `_vocabulary`, and closed, then its sidecar is written, then it is renamed into place, so the
+/// final name exists only once the file and its sidecar are durable. A crash leaves a staging file, alone or with a sidecar: that
 /// is an interrupted `create`, which never held module data, and the next `create` discards it.
 /// A sidecar with neither a file nor a staging file is not explained by `create`, and fails with
 /// [`Error::EpochSidecarWithoutFile`].
@@ -675,7 +675,9 @@ impl Handle<Write> {
 
     /// Records `label` as a confirmed label of the reviewed vocabulary `vocabulary` in this file,
     /// confirmed by the member `confirmed_by` at `confirmed_at` (D104). The Core checks the
-    /// label's form, and that the file's module declares the vocabulary, before it calls this.
+    /// label's form and that the file's module declares the vocabulary; this refuses a label
+    /// outside the form of [`vilicus_types::is_vocabulary_label`] again, with
+    /// [`Error::InvalidVocabularyLabel`], before any statement runs.
     ///
     /// `_vocabulary` is a Core table, written under the Core policy that module SQL never runs
     /// under, in one `BEGIN IMMEDIATE` transaction. A label confirmed again keeps its first
@@ -687,6 +689,9 @@ impl Handle<Write> {
         confirmed_by: Id,
         confirmed_at: UtcMillis,
     ) -> Result<()> {
+        if !is_vocabulary_label(label) {
+            return Err(Error::InvalidVocabularyLabel);
+        }
         let connection = self.connection();
         authorizer::install(connection, Policy::Core)?;
         let outcome = in_transaction(connection, || {
@@ -715,46 +720,46 @@ impl Handle<Write> {
     }
 }
 
-/// Runs `body` in a `BEGIN IMMEDIATE` transaction, committed when it succeeds and rolled back
-/// otherwise; the original error is returned even if the rollback fails too.
-fn in_transaction(connection: &Connection, body: impl FnOnce() -> Result<()>) -> Result<()> {
+/// Runs `body` in a `BEGIN IMMEDIATE` transaction, committed when it succeeds. When `body` or
+/// the `COMMIT` fails, the transaction is rolled back, so the connection never stays inside it,
+/// and the original error is returned even if the rollback fails too.
+pub(crate) fn in_transaction(
+    connection: &Connection,
+    body: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     connection.execute_batch("BEGIN IMMEDIATE")?;
-    match body() {
-        Ok(()) => connection.execute_batch("COMMIT").map_err(Error::from),
-        Err(error) => {
-            // SQLite ends the transaction with the connection either way.
-            let _ = connection.execute_batch("ROLLBACK");
-            Err(error)
-        }
+    let outcome = body().and_then(|()| connection.execute_batch("COMMIT").map_err(Error::from));
+    if outcome.is_err() {
+        // The rollback's own failure is not reported: the original error says why nothing was
+        // written. A COMMIT that failed on a deferred constraint leaves the transaction open,
+        // which this rollback ends.
+        let _ = connection.execute_batch("ROLLBACK");
     }
+    outcome
 }
 
-/// The epoch rows of `_meta` in one transaction; on any failure the transaction is rolled back
-/// and the original error returned, even if the rollback fails too.
+/// The epoch rows of `_meta` in one transaction, which ends rolled back on any failure.
 fn write_meta(connection: &Connection, epoch: KeyEpoch) -> Result<()> {
-    connection.execute_batch("BEGIN IMMEDIATE")?;
-    let updated = [
-        (META_PARTITION_ROOT_VERSION, epoch.partition_root_version),
-        (META_GENERATION, epoch.generation),
-    ]
-    .into_iter()
-    .try_fold(0, |total, (key, value)| {
-        connection
-            .execute(
-                "UPDATE _meta SET value = ?2 WHERE key = ?1",
-                rusqlite::params![key, value],
-            )
-            .map(|changed| total + changed)
-    });
-    let failure = match updated {
-        Ok(2) => return connection.execute_batch("COMMIT").map_err(Error::from),
-        Ok(_) => Error::MissingEpoch,
-        Err(error) => Error::from(error),
-    };
-    // The rollback's own failure is not reported: the original error says why the epoch was not
-    // written, and SQLite ends the transaction with the connection either way.
-    let _ = connection.execute_batch("ROLLBACK");
-    Err(failure)
+    in_transaction(connection, || {
+        let updated = [
+            (META_PARTITION_ROOT_VERSION, epoch.partition_root_version),
+            (META_GENERATION, epoch.generation),
+        ]
+        .into_iter()
+        .try_fold(0, |total, (key, value)| {
+            connection
+                .execute(
+                    "UPDATE _meta SET value = ?2 WHERE key = ?1",
+                    rusqlite::params![key, value],
+                )
+                .map(|changed| total + changed)
+        })?;
+        if updated == 2 {
+            Ok(())
+        } else {
+            Err(Error::MissingEpoch)
+        }
+    })
 }
 
 impl Handle<Migration> {

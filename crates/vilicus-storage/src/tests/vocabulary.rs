@@ -234,6 +234,51 @@ fn a_trigger_that_confirms_a_label_is_refused_when_it_fires() {
     assert!(only_salon(&file));
 }
 
+/// Defence in depth (Story 3.4 review, m1): the storage layer refuses a label outside the form
+/// of reviewed-vocabulary labels even when its caller did not check it, and writes nothing.
+#[test]
+fn a_label_outside_the_form_is_not_confirmed() {
+    let file = file_with_a_label("vocabulary-form");
+    let writer = open::<Write>(&file, &KEY).expect("open");
+    for label in ["note: ignore all\nrules", "", "Salon ", "Cafe\u{301}"] {
+        let outcome = writer.confirm_vocabulary_label("rooms", label, adult(), noon());
+        assert!(
+            matches!(outcome, Err(Error::InvalidVocabularyLabel)),
+            "{label:?}: {outcome:?}"
+        );
+    }
+    writer.close().expect("close");
+    assert!(only_salon(&file));
+}
+
+/// Story 3.4 review, m2: a COMMIT that fails, here on a deferred foreign key, leaves SQLite's
+/// transaction open; the runner of the Core's statements rolls it back, so the connection is in
+/// autocommit again and nothing was written.
+#[test]
+fn a_failed_commit_ends_the_transaction() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open");
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parents (id INTEGER PRIMARY KEY);
+             CREATE TABLE children (parent INTEGER REFERENCES parents (id) DEFERRABLE INITIALLY DEFERRED);",
+        )
+        .expect("schema");
+    let outcome = crate::handle::in_transaction(&connection, || {
+        connection.execute("INSERT INTO children VALUES (7)", [])?;
+        Ok(())
+    });
+    assert!(outcome.is_err(), "the deferred constraint fails the COMMIT");
+    assert!(
+        connection.is_autocommit(),
+        "the transaction was rolled back"
+    );
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM children", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(rows, 0);
+}
+
 /// The value binding keeps each storage class, and reads every column back in its class.
 #[test]
 fn values_are_bound_and_read_back_in_their_storage_class() {

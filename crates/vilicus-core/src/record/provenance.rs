@@ -135,7 +135,7 @@ pub(crate) fn stamp(
         Authority::Unapproved { author, .. } => *author,
     };
     let author = match stored {
-        Some(stored) if !rewrites_free_text(table, fields, &stored.held) => {
+        Some(stored) if new_free_text(table, fields, Some(stored)).is_empty() => {
             stored.provenance.author
         }
         _ => writer,
@@ -165,12 +165,12 @@ fn written_labels(
     }
     match &call.authority {
         Authority::OwnAction { member } => {
-            let given: Vec<&str> = free_texts(table, fields).collect();
+            let given = new_free_text(table, fields, stored);
             let text = if given.is_empty() {
                 TextTaint::Trusted
             } else if repeats_a_run(
                 &record_text(table, fields, stored),
-                &untrusted_text(inputs, *member),
+                &untrusted_text(inputs, stored, *member),
             ) {
                 TextTaint::External
             } else {
@@ -183,11 +183,11 @@ fn written_labels(
             written,
             drafts,
         } => {
-            let given: Vec<&str> = free_texts(table, fields).collect();
+            let given = new_free_text(table, fields, stored);
             let record = record_text(table, fields, stored);
             let text = if given.is_empty() {
                 TextTaint::Trusted
-            } else if repeats_a_run(&record, &untrusted_text(inputs, *member)) {
+            } else if repeats_a_run(&record, &untrusted_text(inputs, stored, *member)) {
                 TextTaint::External
             } else {
                 approved_text_taint(call.session, &given, &record, written, drafts)
@@ -195,7 +195,7 @@ fn written_labels(
             RecordLabels::of(Taint::Trusted, text)
         }
         Authority::Unapproved { acting_for, .. } => {
-            let gives_text = free_texts(table, fields).next().is_some();
+            let gives_text = !new_free_text(table, fields, stored).is_empty();
             let changed = stored.map(|stored| {
                 let record = &stored.provenance;
                 let counted = if gives_text {
@@ -245,13 +245,16 @@ fn consumes(call: &Call) -> bool {
     matches!(call.principal, Principal::AiTask | Principal::Plugin)
 }
 
-/// The free text of the inputs that are not `trusted` for `member`, each input's fields joined
-/// into one word sequence: text a member's write may not copy into a record stored `trusted`
-/// (`doc/architecture.md` section 5.4, rule 5). An input another member wrote counts, as it does
-/// for a derivation (AD-7).
-fn untrusted_text(inputs: &[RecordProvenance], member: Id) -> Vec<String> {
+/// The free text of the inputs, and of the record an update changes, that are not `trusted` for
+/// `member`, each record's fields joined into one word sequence: text a member's write may not
+/// copy into a record stored `trusted` (`doc/architecture.md` section 5.4, rule 5). A record
+/// another member wrote counts, as it does for a derivation (AD-7): an edit that writes new text
+/// into it makes the member its author, so 8 of the other member's words it keeps would read as
+/// the member's own.
+fn untrusted_text(inputs: &[RecordProvenance], stored: Option<&Stored>, member: Id) -> Vec<String> {
     inputs
         .iter()
+        .chain(stored.map(|stored| &stored.provenance))
         .filter(|input| input.derived_taint(Some(member)) != Taint::Trusted)
         .map(|input| input.free_text.join("\n"))
         .collect()
@@ -344,33 +347,31 @@ fn approved_text_taint(
     }
 }
 
-/// True when an update giving `fields` writes free text the record does not hold: a free-text
-/// value other than the field's stored one. Only then does the record take the writer as its
-/// author: a structured-only edit, or free text given unchanged, keeps the author of the text
-/// (D70), and any new text, even appended to the author's own words, is the writer's, so the
-/// author's leftover text reads as `member` to them, never theirs as the editor's.
-fn rewrites_free_text(table: &'static Table, fields: &[(&str, Value)], held: &[Value]) -> bool {
-    table.fields.iter().zip(held).any(|(field, stored)| {
-        matches!(field.kind, FieldKind::FreeText { .. })
-            && fields.iter().any(|(name, given)| {
-                *name == field.name && matches!(given, Value::Text(_)) && given != stored
-            })
-    })
-}
-
-/// The free-text values `fields` gives `table`; a name the table does not declare is the row
-/// writer's to refuse.
-fn free_texts<'a>(
+/// The free-text values `fields` gives `table` that the record does not already hold: every one
+/// on insert, and on update each value other than the field's stored one. Only a write giving
+/// some is judged as writing text: its labels are computed from it, and an update giving some
+/// takes the writer as the record's author. A structured-only edit, or free text given unchanged,
+/// keeps the author of the text (D70); any new text, even appended to the author's own words, is
+/// the writer's, so the author's leftover text reads as `member` to them.
+fn new_free_text<'a>(
     table: &'static Table,
     fields: &'a [(&str, Value)],
-) -> impl Iterator<Item = &'a str> {
-    fields.iter().filter_map(|(name, value)| {
-        let field = table.fields.iter().find(|field| field.name == *name)?;
-        match (field.kind, value) {
-            (FieldKind::FreeText { .. }, Value::Text(text)) => Some(text.as_str()),
-            _ => None,
-        }
-    })
+    stored: Option<&Stored>,
+) -> Vec<&'a str> {
+    fields
+        .iter()
+        .filter_map(|(name, value)| {
+            let index = table.fields.iter().position(|field| field.name == *name)?;
+            match (table.fields[index].kind, value) {
+                (FieldKind::FreeText { .. }, Value::Text(text))
+                    if stored.is_none_or(|stored| stored.held.get(index) != Some(value)) =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Content from outside the household: whatever a plugin or a device adapter writes is stored

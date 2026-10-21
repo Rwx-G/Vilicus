@@ -2232,8 +2232,10 @@ type Fields = Vec<(&'static str, Value)>;
 /// his title unchanged: Noé stays the author, and the note reads as `member` for Ella. Noé
 /// editing his own text stays the author. Ella replacing his title and body, keeping 8 of his
 /// words and appending her own, or approving an AI request that rewrites his title from a clean
-/// session, becomes the author, so Noé's leftover text reads as `member` to him. A structured-only
-/// rewrite of every value keeps the author (D70). `source` records the last writer.
+/// session, becomes the author, so Noé's leftover text reads as `member` to him; and when the
+/// record keeps 8 of his words, its free text is `external`, since it is no longer attributed to
+/// him. A structured-only rewrite of every value keeps the author (D70). `source` records the
+/// last writer.
 #[test]
 fn only_an_update_writing_new_free_text_takes_the_writer_as_author() {
     let module = notes_module();
@@ -2249,24 +2251,34 @@ fn only_an_update_writing_new_free_text_takes_the_writer_as_author() {
             "notes",
             &[
                 ("title", text(title)),
-                ("body", text("Six pommes, pas plus")),
+                (
+                    "body",
+                    text("Six pommes du verger, pas plus, pour la tarte de dimanche soir"),
+                ),
                 ("status", text("open")),
             ],
             &[],
         )
         .id
     };
-    let cases: Vec<(Call, Fields, Id)> = vec![
-        (own_action(ella()), vec![("status", text("done"))], noe()),
+    let cases: Vec<(Call, Fields, Id, &str)> = vec![
+        (
+            own_action(ella()),
+            vec![("status", text("done"))],
+            noe(),
+            "trusted",
+        ),
         (
             approved(Taint::External, &[], &[]),
             vec![("status", text("open"))],
             noe(),
+            "trusted",
         ),
         (
             own_action(ella()),
             vec![("title", text(title)), ("status", text("done"))],
             noe(),
+            "trusted",
         ),
         (
             own_action(ella()),
@@ -2276,16 +2288,19 @@ fn only_an_update_writing_new_free_text_takes_the_writer_as_author() {
                 ("body", Value::Null),
             ],
             noe(),
+            "trusted",
         ),
         (
             own_action(noe()),
             vec![("title", text("Les pommes de Noé"))],
             noe(),
+            "trusted",
         ),
         (
             own_action(ella()),
             vec![("title", text("Mes poires")), ("body", text("Quatre"))],
             ella(),
+            "trusted",
         ),
         (
             own_action(ella()),
@@ -2297,14 +2312,16 @@ fn only_an_update_writing_new_free_text_takes_the_writer_as_author() {
                 ("status", text("done")),
             ],
             ella(),
+            "external",
         ),
         (
             approved(Taint::Trusted, &[], &["Des poires"]),
             vec![("title", text("Des poires"))],
             ella(),
+            "external",
         ),
     ];
-    for (case, (by, fields, author)) in cases.into_iter().enumerate() {
+    for (case, (by, fields, author, text_taint)) in cases.into_iter().enumerate() {
         let note = noes_note(&mut stamper);
         call(&handle, module, &by, &mut stamper, |records| {
             records.update("notes", note, Rev::FIRST, &fields, &[])
@@ -2319,7 +2336,7 @@ fn only_an_update_writing_new_free_text_takes_the_writer_as_author() {
         );
         assert_eq!(
             stored_labels(&handle, "notes", note),
-            labels("trusted", "trusted"),
+            labels("trusted", text_taint),
             "case {case}"
         );
         let other = if author == noe() { ella() } else { noe() };

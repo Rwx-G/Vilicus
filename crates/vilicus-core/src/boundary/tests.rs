@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use vilicus_module_api::{
@@ -263,7 +263,7 @@ struct Fixture {
     registry: Registry,
     handlers: Handlers,
     states: ModuleStates,
-    clock: TestClock,
+    clock: Arc<TestClock>,
     stamper: RefCell<TestStamper>,
     tasks: Handle<Write>,
     notes: Handle<Write>,
@@ -292,7 +292,8 @@ impl Fixture {
             registry.modules()[0],
             Partition::Member(ella()),
         );
-        let states = ModuleStates::new();
+        let clock = Arc::new(TestClock::default());
+        let states = ModuleStates::with_clock(Arc::clone(&clock) as Arc<dyn MonotonicClock>);
         for handle in [&tasks, &notes, &ellas_tasks] {
             ready(&states, handle);
         }
@@ -300,7 +301,7 @@ impl Fixture {
             handlers: handlers(registry),
             registry,
             states,
-            clock: TestClock::default(),
+            clock,
             stamper: RefCell::new(TestStamper::at(noon())),
             tasks,
             notes,
@@ -311,7 +312,6 @@ impl Fixture {
     fn boundary(&self) -> Boundary<'_> {
         Boundary {
             states: &self.states,
-            clock: &self.clock,
             budget: BUDGET,
         }
     }
@@ -837,7 +837,6 @@ fn a_call_still_running_past_its_deadline_is_expired_by_the_supervisor() {
     let (release, wait_release) = mpsc::channel::<()>();
     let boundary = Boundary {
         states: &states,
-        clock: &clock,
         budget: BUDGET,
     };
     let mut stamper = TestStamper::at(noon());
@@ -860,12 +859,9 @@ fn a_call_still_running_past_its_deadline_is_expired_by_the_supervisor() {
             (result, rows(&tasks, "SELECT id FROM tasks"))
         });
         wait_started.recv().expect("the call started");
-        assert!(
-            states.expire_overdue(clock.now()).is_empty(),
-            "within its budget"
-        );
+        assert!(states.expire_overdue().is_empty(), "within its budget");
         clock.advance(BUDGET + Duration::from_millis(1));
-        let alerts = states.expire_overdue(clock.now());
+        let alerts = states.expire_overdue();
         assert_eq!(
             alerts,
             [InstanceAdminAlert::ModuleFaulted {
@@ -875,18 +871,13 @@ fn a_call_still_running_past_its_deadline_is_expired_by_the_supervisor() {
                 fault: Fault::TimeBudget,
             }]
         );
-        assert!(
-            states.expire_overdue(clock.now()).is_empty(),
-            "alerted once"
-        );
+        assert!(states.expire_overdue().is_empty(), "alerted once");
         assert_eq!(
             states.state(&name, Partition::Household),
             AvailabilityState::Faulted
         );
         assert!(
-            states
-                .begin_call(&name, Partition::Household, clock.now())
-                .is_err(),
+            states.begin_call(&name, Partition::Household).is_err(),
             "no other call starts on the file"
         );
         release.send(()).expect("the call waits");
@@ -1136,6 +1127,64 @@ fn a_panic_of_the_core_the_module_catches_still_rolls_the_call_back() {
         fixture
             .states
             .state(tasks.file().module(), Partition::Household),
+        AvailabilityState::Ready
+    );
+}
+
+/// Review item 3: the Core's own work before the module's code (the write lock, the call's
+/// deduplication, the call's start time) is not charged to the module: a Core that takes longer
+/// than the whole budget before the code starts faults nothing.
+#[test]
+fn the_cores_time_before_the_modules_code_is_not_charged_to_it() {
+    /// A clock that, at its first reading, before the module's code, moves the monotonic clock
+    /// past the budget.
+    struct Slow<'a> {
+        inner: TestStamper,
+        clock: &'a TestClock,
+        readings: u32,
+    }
+    impl Stamper for Slow<'_> {
+        fn now(&mut self) -> UtcMillis {
+            self.readings += 1;
+            if self.readings == 1 {
+                self.clock.advance(BUDGET + Duration::from_millis(1));
+            }
+            self.inner.now()
+        }
+        fn id_random(&mut self) -> [u8; 10] {
+            self.inner.id_random()
+        }
+    }
+    let fixture = Fixture::new("slow-core");
+    let module = fixture.registry.modules()[0];
+    let invocation = fixture.invocation();
+    let mut slow = Slow {
+        inner: TestStamper::at(noon()),
+        clock: &fixture.clock,
+        readings: 0,
+    };
+    let mut ran = false;
+    let result = fixture.boundary().run(
+        &fixture.tasks,
+        module,
+        &own_action(),
+        &invocation,
+        &mut slow,
+        |_| {
+            ran = true;
+            Ok(())
+        },
+    );
+    assert!(ran);
+    assert!(
+        slow.readings >= 1,
+        "the Core read its clock before the code"
+    );
+    assert!(matches!(result, Ok(CallResult::Committed(_))), "{result:?}");
+    assert_eq!(
+        fixture
+            .states
+            .state(fixture.tasks.file().module(), Partition::Household),
         AvailabilityState::Ready
     );
 }

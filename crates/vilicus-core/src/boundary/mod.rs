@@ -1,11 +1,14 @@
 //! The boundary of AD-9 around every call of module code: a tool handler, an undo handler or an
 //! event consumer, run on the writer thread of the module's file.
 //!
-//! [`Boundary::run`] admits a call only on a file that is ready (AD-54), registers it with its
-//! deadline, the handler time budget from now on the Core's monotonic clock, and runs the module's
-//! code inside [`run_call`]'s transaction and inside `catch_unwind`, with the thread marked as
-//! running module code. A panic of the module's code is caught there and rolls the transaction
-//! back; so does code that returns after its deadline, or after the supervisor expired it. Either
+//! [`Boundary::run`] admits a call only on a file that is ready (AD-54), registers it, and runs the
+//! module's code inside [`run_call`]'s transaction and inside `catch_unwind`, with the thread
+//! marked as running module code. The handler time budget runs on the availability states' clock
+//! from the moment the module's code starts to the moment it returns: the writes it makes through
+//! the Core's record port count, as part of its work, while the Core's own work before it (the
+//! write lock, the call's deduplication) and after it (the commit) does not, so a slow commit never
+//! faults a module. A panic of the module's code is caught there and rolls the transaction back;
+//! so does code that returns after its deadline, or after the supervisor expired it. Either
 //! way the module is marked faulted for the file's partition and receives no further call there,
 //! and the first fault returns a typed instance admin alert. Nothing of the module's code
 //! unwinds into the Core.
@@ -29,7 +32,7 @@ use vilicus_storage::{Handle, Write};
 use vilicus_types::{Id, ModuleName, Rev};
 
 use crate::alert::InstanceAdminAlert;
-use crate::availability::{CallTicket, Fault, ModuleStates, ModuleUnavailable, MonotonicClock};
+use crate::availability::{CallTicket, Fault, ModuleStates, ModuleUnavailable};
 use crate::record::{Call, CallResult, Invocation, RecordError, Stamper, run_call};
 
 thread_local! {
@@ -219,14 +222,12 @@ impl Drop for Registered<'_> {
 }
 
 /// The boundary of AD-9: the availability states the calls are admitted by and faults are
-/// recorded in, the Core's monotonic clock, and the time budget of one call.
+/// recorded in, whose clock the budgets run on, and the time budget of one call.
 #[derive(Clone, Copy)]
 pub struct Boundary<'a> {
     /// The availability states of the module files.
     pub states: &'a ModuleStates,
-    /// The Core's monotonic clock.
-    pub clock: &'a dyn MonotonicClock,
-    /// How long one call of module code may run
+    /// How long the module's code of one call may run
     /// ([`HANDLER_TIME_BUDGET`](vilicus_types::HANDLER_TIME_BUDGET) in the Core).
     pub budget: Duration,
 }
@@ -234,7 +235,7 @@ pub struct Boundary<'a> {
 impl Boundary<'_> {
     /// Runs `body`, the module's code for one call, as [`run_call`] runs it on `handle`, the write
     /// handle of `module`'s file, inside the boundary: refused before anything runs unless the
-    /// file is ready; the call registered until it ends, with its deadline; `body` run inside
+    /// file is ready; the call registered until it ends, with a deadline while `body` runs; `body` run inside
     /// `catch_unwind` with the thread marked. A panic of `body`, or `body` returning after the
     /// deadline or after the supervisor expired the call, rolls the call back and faults the
     /// module for the partition ([`HandlerError::Faulted`]); a refusal or an error of `body`
@@ -256,18 +257,18 @@ impl Boundary<'_> {
             return Err(HandlerError::WrongFile);
         }
         let partition = handle.file().partition();
-        let deadline = self.clock.now().saturating_add(self.budget);
         let ticket = self
             .states
-            .begin_call(&name, partition, deadline)
+            .begin_call(&name, partition)
             .map_err(HandlerError::Unavailable)?;
         let _registered = Registered {
             states: self.states,
-            ticket: Some(ticket),
+            ticket: Some(ticket.clone()),
         };
         let mut fault = None;
         let core_panicked = Cell::new(false);
         let result = run_call(handle, module, call, invocation, stamper, |records| {
+            let deadline = self.states.start_budget(&ticket, self.budget);
             let returned = {
                 let _module = Mark::set(true);
                 let mut port = CorePort {
@@ -276,6 +277,8 @@ impl Boundary<'_> {
                 };
                 catch_unwind(AssertUnwindSafe(|| body(&mut port)))
             };
+            let late = self.states.now() > deadline;
+            self.states.stop_budget(&ticket);
             match returned {
                 Err(payload) if core_panicked.get() => resume_unwind(payload),
                 Err(payload) => {
@@ -284,7 +287,7 @@ impl Boundary<'_> {
                     Err(WriteError::Failed)
                 }
                 Ok(_) if core_panicked.get() => resume_unwind(Box::new(CORE_PANIC_CAUGHT)),
-                Ok(_) if self.clock.now() > deadline => {
+                Ok(_) if late => {
                     fault = Some(Fault::TimeBudget);
                     Err(WriteError::Failed)
                 }

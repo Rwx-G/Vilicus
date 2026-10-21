@@ -14,17 +14,18 @@
 //! restarts. A failed migration lasts across starts through its mark beside the file, read by
 //! the migration runner ([`Registry::migrate_files`](crate::registry::Registry::migrate_files)).
 //!
-//! Each call of module code registers itself with its deadline while it runs ([`ModuleStates`]
-//! hands out a [`CallTicket`]); a file is put to re-keying or migrating only when no call runs on
-//! it, and no call starts on a file that is not ready, so the migration runner never meets a
-//! connection the Core opened for a call (AD-23, D149). [`ModuleStates::expire_overdue`] marks
-//! faulted, at the time it is given, every module whose call outlived its deadline, without
-//! waiting for the call to return: a handler that never returns keeps its writer thread, and the
-//! Core's other threads, files and partitions go on.
+//! Each call of module code is registered while it runs ([`ModuleStates`] hands out a
+//! [`CallTicket`]), with a deadline while the module's code runs; a file is put to re-keying or
+//! migrating only when no call runs on it, and no call starts on a file that is not ready, so the
+//! migration runner never meets a connection the Core opened for a call (AD-23, D149). The
+//! deadlines and their expiry read one clock, the states' own: [`ModuleStates::expire_overdue`]
+//! marks faulted every module whose code outlived its deadline, without waiting for it to return:
+//! a handler that never returns keeps its writer thread, and the Core's other threads, files and
+//! partitions go on.
 
 use core::fmt;
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use vilicus_storage::{ModuleFile, Partition};
@@ -37,7 +38,7 @@ use crate::registry::Registry;
 
 /// The Core's monotonic clock (AD-30): time elapsed since an origin of the clock's own, which a
 /// change of the wall clock does not move. The time budget of module code is measured on it.
-pub trait MonotonicClock: Sync {
+pub trait MonotonicClock: Send + Sync {
     /// The time elapsed since the clock's origin.
     fn now(&self) -> Duration;
 }
@@ -194,7 +195,7 @@ impl Stage {
 }
 
 /// A call of module code running on one file, registered until it ends.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CallTicket {
     module: ModuleName,
     partition: Partition,
@@ -214,7 +215,8 @@ struct Entry {
     stage: Stage,
     fault: Option<Fault>,
     deactivated: bool,
-    calls: Vec<(u64, Duration)>,
+    /// The calls running on the file, each with its deadline while the module's code runs.
+    calls: Vec<(u64, Option<Duration>)>,
 }
 
 impl Default for Entry {
@@ -247,10 +249,26 @@ struct Files {
 }
 
 /// The availability state of every module file of the instance, shared by the threads of the
-/// Core: the writer threads, the event bus, unlock and the supervisor that expires overdue calls.
-#[derive(Debug, Default)]
+/// Core: the writer threads, the event bus, unlock and the supervisor that expires overdue calls;
+/// with the Core's monotonic clock, which every deadline and its expiry read.
 pub struct ModuleStates {
     files: Mutex<Files>,
+    clock: Arc<dyn MonotonicClock>,
+}
+
+impl fmt::Debug for ModuleStates {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModuleStates")
+            .field("files", &self.files)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for ModuleStates {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The name of `module`'s file in `partition`, as the alerts carry it.
@@ -259,9 +277,22 @@ fn file_name(module: &ModuleName, partition: Partition) -> String {
 }
 
 impl ModuleStates {
-    /// No file known: every file is `locked`.
+    /// No file known: every file is `locked`; the host's monotonic clock.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_clock(Arc::new(SystemClock::new()))
+    }
+
+    /// No file known, with `clock` as the Core's monotonic clock.
+    pub fn with_clock(clock: Arc<dyn MonotonicClock>) -> Self {
+        Self {
+            files: Mutex::new(Files::default()),
+            clock,
+        }
+    }
+
+    /// The time on the states' clock.
+    pub fn now(&self) -> Duration {
+        self.clock.now()
     }
 
     /// The table, whatever a thread that panicked while holding it left: every change it makes
@@ -356,14 +387,13 @@ impl ModuleStates {
         Ok(())
     }
 
-    /// Starts a call of module code on `module`'s file in `partition`, due to end by `deadline`
-    /// on the Core's monotonic clock: refused with `module_unavailable` unless the file is
-    /// ready. The call is registered until [`end_call`](Self::end_call).
+    /// Starts a call of module code on `module`'s file in `partition`: refused with
+    /// `module_unavailable` unless the file is ready. The call is registered until
+    /// [`end_call`](Self::end_call), without a deadline until [`start_budget`](Self::start_budget).
     pub(crate) fn begin_call(
         &self,
         module: &ModuleName,
         partition: Partition,
-        deadline: Duration,
     ) -> Result<CallTicket, ModuleUnavailable> {
         let mut files = self.files();
         let id = files.next_call;
@@ -375,7 +405,7 @@ impl ModuleStates {
             return Err(unavailable);
         }
         if let Some(entry) = entry {
-            entry.calls.push((id, deadline));
+            entry.calls.push((id, None));
         }
         files.next_call = id.wrapping_add(1);
         Ok(CallTicket {
@@ -383,6 +413,31 @@ impl ModuleStates {
             partition,
             id,
         })
+    }
+
+    /// The module's code of the call `ticket` starts: its deadline is `budget` from now, and is
+    /// returned.
+    pub(crate) fn start_budget(&self, ticket: &CallTicket, budget: Duration) -> Duration {
+        let deadline = self.now().saturating_add(budget);
+        self.set_deadline(ticket, Some(deadline));
+        deadline
+    }
+
+    /// The module's code of the call `ticket` returned: the call has no deadline any more, so the
+    /// Core's own work after it, the commit included, never faults the module.
+    pub(crate) fn stop_budget(&self, ticket: &CallTicket) {
+        self.set_deadline(ticket, None);
+    }
+
+    fn set_deadline(&self, ticket: &CallTicket, deadline: Option<Duration>) {
+        if let Some(entry) = self
+            .files()
+            .entries
+            .get_mut(&(ticket.module.clone(), ticket.partition))
+            && let Some(call) = entry.calls.iter_mut().find(|(id, _)| *id == ticket.id)
+        {
+            call.1 = deadline;
+        }
     }
 
     /// Ends the call `ticket` registered.
@@ -431,14 +486,19 @@ impl ModuleStates {
         })
     }
 
-    /// Marks faulted every module with a call still running past its deadline at `now`, on the
-    /// Core's monotonic clock (AD-9), and returns an alert for each module newly faulted. The
-    /// call itself goes on until its code returns, then is rolled back; meanwhile no other call
-    /// starts on the file. The Core's supervisor calls it on a timer.
-    pub fn expire_overdue(&self, now: Duration) -> Vec<InstanceAdminAlert> {
+    /// Marks faulted every module whose code still runs past its deadline now, on the states'
+    /// clock (AD-9), and returns an alert for each module newly faulted. The call itself goes on
+    /// until its code returns, then is rolled back; meanwhile no other call starts on the file.
+    /// The Core's supervisor calls it on a timer.
+    pub fn expire_overdue(&self) -> Vec<InstanceAdminAlert> {
+        let now = self.now();
         let mut alerts = Vec::new();
         for ((module, partition), entry) in &mut self.files().entries {
-            if entry.fault.is_none() && entry.calls.iter().any(|(_, deadline)| now > *deadline) {
+            let overdue = entry
+                .calls
+                .iter()
+                .any(|(_, deadline)| deadline.is_some_and(|deadline| now > deadline));
+            if entry.fault.is_none() && overdue {
                 entry.fault = Some(Fault::TimeBudget);
                 alerts.push(InstanceAdminAlert::ModuleFaulted {
                     module: module.clone(),
@@ -548,32 +608,61 @@ mod tests {
         assert_eq!(states.fault(&tasks(), Partition::Home), None);
     }
 
-    /// A call is overdue only strictly past its deadline, and only while it runs.
+    /// A clock that moves only when a test moves it.
+    #[derive(Default)]
+    struct Manual(Mutex<Duration>);
+
+    impl Manual {
+        fn advance(&self, by: Duration) {
+            let mut now = self.0.lock().expect("the clock");
+            *now += by;
+        }
+    }
+
+    impl MonotonicClock for Manual {
+        fn now(&self) -> Duration {
+            *self.0.lock().expect("the clock")
+        }
+    }
+
+    /// A call is overdue only strictly past its deadline, only while its module's code runs, and
+    /// only while it is registered; expiry reads the states' own clock.
     #[test]
     fn only_a_call_still_running_past_its_deadline_is_expired() {
-        let states = ModuleStates::new();
+        let clock = Arc::new(Manual::default());
+        let states = ModuleStates::with_clock(Arc::clone(&clock) as Arc<dyn MonotonicClock>);
         ready(&states);
-        let deadline = Duration::from_secs(5);
+        let budget = Duration::from_secs(5);
         let ticket = states
-            .begin_call(&tasks(), Partition::Household, deadline)
+            .begin_call(&tasks(), Partition::Household)
             .expect("ready");
-        assert!(states.expire_overdue(deadline).is_empty());
-        states.end_call(ticket);
+        clock.advance(budget * 2);
         assert!(
-            states
-                .expire_overdue(deadline + Duration::from_millis(1))
-                .is_empty(),
-            "an ended call is not expired"
+            states.expire_overdue().is_empty(),
+            "no deadline before the module's code starts"
         );
+        let deadline = states.start_budget(&ticket, budget);
+        assert_eq!(deadline, budget * 3);
+        clock.advance(budget);
+        assert!(states.expire_overdue().is_empty(), "at its deadline");
+        clock.advance(Duration::from_millis(1));
+        states.stop_budget(&ticket);
+        assert!(
+            states.expire_overdue().is_empty(),
+            "the module's code returned: the Core's work after it is not counted"
+        );
+        states.end_call(ticket);
         let running = states
-            .begin_call(&tasks(), Partition::Household, deadline)
+            .begin_call(&tasks(), Partition::Household)
             .expect("ready");
-        assert_eq!(
-            states
-                .expire_overdue(deadline + Duration::from_millis(1))
-                .len(),
-            1
-        );
+        states.start_budget(&running, budget);
+        let ended = states
+            .begin_call(&tasks(), Partition::Household)
+            .expect("ready");
+        states.start_budget(&ended, budget);
+        states.end_call(ended);
+        clock.advance(budget + Duration::from_millis(1));
+        assert_eq!(states.expire_overdue().len(), 1);
         states.end_call(running);
         assert_eq!(
             states.state(&tasks(), Partition::Household),

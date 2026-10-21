@@ -207,15 +207,6 @@ fn new_file(
     file
 }
 
-/// A monotonic clock that never moves: no call of these tests nears its time budget.
-struct Still;
-
-impl MonotonicClock for Still {
-    fn now(&self) -> Duration {
-        Duration::ZERO
-    }
-}
-
 /// The files of one partition as the Core holds them: every handle, and the availability state
 /// of each file, ready but for the modules locked.
 struct Files {
@@ -225,7 +216,15 @@ struct Files {
 
 impl Files {
     fn new(handles: Vec<Handle<Write>>, locked: Vec<&'static str>) -> Self {
-        let states = ModuleStates::new();
+        Self::on_clock(handles, locked, ModuleStates::new())
+    }
+
+    /// The files of `handles`, their states held by `states`, ready but for the modules locked.
+    fn on_clock(
+        handles: Vec<Handle<Write>>,
+        locked: Vec<&'static str>,
+        states: ModuleStates,
+    ) -> Self {
         for handle in &handles {
             if !locked.contains(&handle.file().module().as_str()) {
                 states
@@ -244,7 +243,6 @@ impl Files {
     fn boundary(&self) -> Boundary<'_> {
         Boundary {
             states: &self.states,
-            clock: &Still,
             budget: HANDLER_TIME_BUDGET,
         }
     }
@@ -2305,11 +2303,15 @@ fn a_consumer_running_past_its_budget_faults_its_module() {
         slow: Some(std::sync::Arc::clone(&clock)),
         ..Code::default()
     };
-    let boundary = Boundary {
-        states: &files.states,
-        clock: &*clock,
-        budget: HANDLER_TIME_BUDGET,
-    };
+    let files = Files::on_clock(
+        files.handles,
+        Vec::new(),
+        ModuleStates::with_clock(
+            std::sync::Arc::clone(&clock) as std::sync::Arc<dyn MonotonicClock>
+        ),
+    );
+    let handle = files.of("notes");
+    let boundary = files.boundary();
     let mut links = no_links(&files);
     let report = deliver_outbox(
         &registry,

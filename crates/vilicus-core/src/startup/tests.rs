@@ -5,7 +5,6 @@
 
 use std::cell::RefCell;
 use std::path::Path;
-use std::time::Duration;
 
 use vilicus_module_api::{
     Consumer, DataType, Event, Field, FieldKind, ModuleDeclaration, Records, Table, Topic, Value,
@@ -22,7 +21,7 @@ use super::{
     bring_up, bring_up_with_space,
 };
 use crate::alert::InstanceAdminAlert;
-use crate::availability::{ModuleStates, MonotonicClock, Stage};
+use crate::availability::{ModuleStates, Stage};
 use crate::boundary::Boundary;
 use crate::bus::{ConsumerCode, DeliveryOutcome, Link, LinkTable};
 use crate::record::tests::{KEY, create_sql, noon, scratch_dir};
@@ -160,15 +159,6 @@ fn add_note(registry: &Registry, file: &ModuleFile, stamper: &mut TestStamper) -
     }
 }
 
-/// A monotonic clock that never moves.
-struct Still;
-
-impl MonotonicClock for Still {
-    fn now(&self) -> Duration {
-        Duration::ZERO
-    }
-}
-
 /// A link table with nothing to register.
 struct NoLinks;
 
@@ -278,7 +268,6 @@ fn targets<'a>(files: &'a [ModuleFile]) -> Vec<FileToMigrate<'a>> {
 fn boundary(states: &ModuleStates) -> Boundary<'_> {
     Boundary {
         states,
-        clock: &Still,
         budget: HANDLER_TIME_BUDGET,
     }
 }
@@ -645,7 +634,7 @@ fn a_file_with_a_call_still_running_is_not_migrated() {
         .set_stage(&tasks, Partition::Household, Stage::Ready)
         .expect("no call runs");
     let ticket = states
-        .begin_call(&tasks, Partition::Household, Duration::from_secs(5))
+        .begin_call(&tasks, Partition::Household)
         .expect("ready");
     states.lock_partition(Partition::Household);
     states.unlock_partition(&partitioned.registry, Partition::Household);

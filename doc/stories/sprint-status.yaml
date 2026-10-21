@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-16-2026 18:30
-last_updated: 10-20-2026 22:00
+last_updated: 10-21-2026 12:00
 project: Vilicus
 project_key: NOKEY
 tracking_system: file-system
@@ -65,8 +65,8 @@ development_status:
   2-7-coverage-guided-fuzzing-of-vilicus-proto: done
   epic-2-retrospective: optional
 
-  epic-3: backlog
-  3-1-sqlcipher-storage-layer-and-connection-authorizer: ready-for-dev
+  epic-3: in-progress
+  3-1-sqlcipher-storage-layer-and-connection-authorizer: review
   3-2-module-registry-and-record-envelope: ready-for-dev
   3-3-tool-declarations-and-capability-matrix-check: ready-for-dev
   3-4-structured-field-validation-and-reviewed-vocabularies: ready-for-dev

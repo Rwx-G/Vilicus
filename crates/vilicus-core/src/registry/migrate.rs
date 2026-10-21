@@ -12,7 +12,7 @@
 
 use core::fmt;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use vilicus_module_api::ModuleDeclaration;
 use vilicus_storage::maintenance::{self, ColdCopy, MigrationCopy, SchemaVersions, VerifiedBackup};
@@ -214,6 +214,17 @@ impl Registry {
         &self,
         files: &[FileToMigrate<'_>],
     ) -> Result<Vec<FileMigration>, MigrationRunError> {
+        self.migrate_files_with_space(files, &maintenance::available_space)
+    }
+
+    /// [`migrate_files`](Self::migrate_files), with the free space of each data directory read
+    /// by `available_space`: `statvfs` in production, a fixed value in the tests, which the free
+    /// space of a shared disk would make depend on whatever else runs.
+    pub(crate) fn migrate_files_with_space(
+        &self,
+        files: &[FileToMigrate<'_>],
+        available_space: &dyn Fn(&Path) -> Result<u64, vilicus_storage::Error>,
+    ) -> Result<Vec<FileMigration>, MigrationRunError> {
         let modules = files
             .iter()
             .map(|target| {
@@ -227,7 +238,7 @@ impl Registry {
             .zip(&modules)
             .map(|(target, module)| standing(module, target))
             .collect();
-        check_space(files, &standings)?;
+        check_space(files, &standings, available_space)?;
         Ok(files
             .iter()
             .zip(modules)
@@ -417,6 +428,7 @@ fn file_bytes(file: &ModuleFile) -> Result<u64, MigrationError> {
 fn check_space(
     files: &[FileToMigrate<'_>],
     standings: &[Standing],
+    available_space: &dyn Fn(&Path) -> Result<u64, vilicus_storage::Error>,
 ) -> Result<(), MigrationRunError> {
     let mut largest: BTreeMap<PathBuf, u64> = BTreeMap::new();
     for (target, standing) in files.iter().zip(standings) {
@@ -428,8 +440,7 @@ fn check_space(
         }
     }
     for (directory, bytes) in largest {
-        let available =
-            maintenance::available_space(&directory).map_err(MigrationRunError::Storage)?;
+        let available = available_space(&directory).map_err(MigrationRunError::Storage)?;
         let required = bytes.saturating_mul(2);
         if available < required {
             return Err(MigrationRunError::InsufficientSpace {

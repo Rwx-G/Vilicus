@@ -464,8 +464,9 @@ fn a_changed_migration_fails_the_file_before_anything_runs() {
 }
 
 /// AC6 (AD-23): the run does not start, and touches no file, unless the data directory has at
-/// least twice the size of the largest file it would copy; a file grown, sparse, to the free
-/// space is one the directory cannot hold twice.
+/// least twice the size of the largest file it would copy, the file and its WAL. The free space
+/// is a fixed value the test gives the runner: read from the shared disk, it moves with every
+/// test that runs beside this one.
 #[test]
 fn a_run_without_twice_the_largest_file_free_does_not_start() {
     let v1 = shop(None, false);
@@ -473,26 +474,39 @@ fn a_run_without_twice_the_largest_file_free_does_not_start() {
     let dir = scratch_dir("migrate-space");
     let small = create_at(v1, &dir, Partition::Member(uuid(1)));
     let large = create_at(v1, &dir, Partition::Household);
-    let available = vilicus_storage::maintenance::available_space(&dir).expect("statvfs");
-    let grown = (available / 2 + 4096).next_multiple_of(4096);
-    fs::OpenOptions::new()
-        .write(true)
-        .open(large.path())
-        .expect("open")
-        .set_len(grown)
-        .expect("grow the file, sparse");
+    let length = |file: &ModuleFile| {
+        fs::metadata(file.path()).map_or(0, |metadata| metadata.len())
+            + fs::metadata(file.wal_path()).map_or(0, |metadata| metadata.len())
+    };
+    let largest = length(&small).max(length(&large));
+    let registry = registry_of(vec![v2]);
     let small_before = disk(&small);
-    let outcome = registry_of(vec![v2]).migrate_files(&[target(&small), target(&large)]);
+    let large_before = disk(&large);
+    for available in [0, largest, 2 * largest - 1] {
+        let outcome = registry
+            .migrate_files_with_space(&[target(&small), target(&large)], &|_| Ok(available));
+        assert!(
+            matches!(
+                &outcome,
+                Err(MigrationRunError::InsufficientSpace { required, available: seen, directory })
+                    if *required == 2 * largest && *seen == available && *directory == dir
+            ),
+            "{available}: {outcome:?}"
+        );
+        assert_eq!(disk(&small), small_before);
+        assert_eq!(disk(&large), large_before);
+        assert_eq!(versions(&small).module, 1);
+    }
+    let outcome = registry
+        .migrate_files_with_space(&[target(&small), target(&large)], &|_| Ok(2 * largest))
+        .expect("twice the largest file is enough");
     assert!(
-        matches!(
-            &outcome,
-            Err(MigrationRunError::InsufficientSpace { required, .. }) if *required >= 2 * grown
-        ),
+        outcome
+            .iter()
+            .all(|file| matches!(file, FileMigration::Migrated { .. })),
         "{outcome:?}"
     );
-    assert_eq!(disk(&small), small_before);
-    assert_eq!(versions(&small).module, 1);
-    assert_eq!(fs::metadata(large.path()).expect("metadata").len(), grown);
+    assert_eq!(versions(&small).module, 2);
 }
 
 /// AC3 through the runner: a file with three cold copies none of which a verified backup covers

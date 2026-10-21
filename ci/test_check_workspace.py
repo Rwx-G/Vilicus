@@ -269,6 +269,8 @@ class HandWrittenEdgeTest(WorkspaceTestCase):
         ("vilicus-gateway", "vilicus-storage"),
         ("vilicus-mod-sample", "vilicus-core"),
         ("vilicus-mod-sample", "vilicus-proto"),
+        ("vilicus-mod-sample", "vilicus-storage"),
+        ("vilicus-mod-reference", "vilicus-mod-sample"),
         ("vilicus-plugin-sdk", "vilicus-core"),
         ("vilicus-audit", "vilicus-storage"),
         ("vilicus-egress", "vilicus-core"),
@@ -301,6 +303,19 @@ class HandWrittenEdgeTest(WorkspaceTestCase):
                     self.full_graph()
                     self.workspace.depend(source, target, kind)
                     self.assert_names_edge(self.workspace.check(), source, target)
+
+    def test_a_module_depending_on_another_module_fails(self) -> None:
+        """Story 3.2, AC6 (I6, AD-5): a module reaches another module's storage or table types only
+        through that module's crate, which no kind of dependency may name."""
+        for source, target in (("vilicus-mod-sample", "vilicus-mod-other"), ("vilicus-mod-other", "vilicus-mod-sample")):
+            for kind in ("normal", "build", "dev"):
+                with self.subTest(edge=f"{source} -> {target}", kind=kind):
+                    self.setUp()
+                    self.full_graph()
+                    self.workspace.add("vilicus-mod-other")
+                    self.workspace.depend("vilicus-mod-other", "vilicus-module-api")
+                    self.workspace.depend(source, target, kind)
+                    self.assert_single(self.workspace.check(), f"forbidden edge {source} -> {target} ({kind} dependency")
 
     def test_dev_dependency_on_a_test_crate_only_from_crates_that_reach_the_core(self) -> None:
         for source in (*self.DEV_DEPENDENCY_ON_TESTING_ALLOWED, *self.DEV_DEPENDENCY_ON_TESTING_FORBIDDEN):

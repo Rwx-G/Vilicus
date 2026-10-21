@@ -129,9 +129,14 @@ impl fmt::Display for KeyEpoch {
 }
 
 /// The `_meta` keys of the two epoch values; `_meta` is a key-value table, so the module and
-/// Core schema versions of AD-26 join it later as rows, without a schema change.
+/// Core schema versions of AD-26 are rows too, without a schema change.
 pub(crate) const META_PARTITION_ROOT_VERSION: &str = "partition_root_version";
 pub(crate) const META_GENERATION: &str = "generation";
+
+/// The `_meta` keys of the schema version of each migration track (AD-26); a file without the row
+/// is at version 0, before its first migration.
+pub(crate) const META_CORE_SCHEMA_VERSION: &str = "core_schema_version";
+pub(crate) const META_MODULE_SCHEMA_VERSION: &str = "module_schema_version";
 
 const SIDECAR_HEADER: &str = "vilicus key epoch 1";
 

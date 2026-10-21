@@ -4,6 +4,7 @@ use core::fmt;
 use std::path::PathBuf;
 
 use crate::file::KeyEpoch;
+use crate::handle::MigrationTrack;
 
 /// Prefix of the message SQLite gives when the authorizer denies a function call.
 const DENIED_FUNCTION_MESSAGE: &str = "not authorized to use function: ";
@@ -86,6 +87,18 @@ pub enum Error {
         /// Frames copied back at the last attempt.
         checkpointed: i32,
     },
+    /// A versioned migration is not the next one of its track: migrations apply forward only, one
+    /// version after the other (AD-23, D21).
+    MigrationOutOfOrder {
+        /// The track of the migration.
+        track: MigrationTrack,
+        /// The schema version `_meta` holds for that track.
+        current: u32,
+        /// The version of the migration refused.
+        version: u32,
+    },
+    /// The schema version `_meta` holds for a track is not a version number.
+    MalformedSchemaVersion(MigrationTrack),
     /// A file copy was asked for while the WAL still holds content (AD-23).
     WalNotEmpty(PathBuf),
     /// The file or its WAL changed while it was being copied: a connection was open.
@@ -161,6 +174,20 @@ impl fmt::Display for Error {
                 formatter,
                 "TRUNCATE checkpoint incomplete after every retry ({checkpointed} of {log} frames)"
             ),
+            Self::MigrationOutOfOrder {
+                track,
+                current,
+                version,
+            } => write!(
+                formatter,
+                "{track} migration {version} does not follow schema version {current}"
+            ),
+            Self::MalformedSchemaVersion(track) => {
+                write!(
+                    formatter,
+                    "the {track} schema version in _meta is malformed"
+                )
+            }
             Self::WalNotEmpty(path) => write!(formatter, "{} holds WAL content", path.display()),
             Self::CopyRaced(path) => write!(
                 formatter,
@@ -188,6 +215,8 @@ impl fmt::Debug for Error {
             Self::MissingEpoch => "MissingEpoch",
             Self::AlreadyExists(_) => "AlreadyExists",
             Self::CheckpointIncomplete { .. } => "CheckpointIncomplete",
+            Self::MigrationOutOfOrder { .. } => "MigrationOutOfOrder",
+            Self::MalformedSchemaVersion(_) => "MalformedSchemaVersion",
             Self::WalNotEmpty(_) => "WalNotEmpty",
             Self::CopyRaced(_) => "CopyRaced",
             Self::Sqlite(_) => "Sqlite",

@@ -6,6 +6,7 @@ mod engine;
 mod hostile;
 mod maintenance;
 mod replay;
+mod schema;
 mod setup;
 
 use std::fs;

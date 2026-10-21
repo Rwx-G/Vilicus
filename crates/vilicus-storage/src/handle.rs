@@ -27,7 +27,10 @@ use zeroize::Zeroizing;
 use crate::authorizer::{self, Policy};
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::file::{self, KeyEpoch, META_GENERATION, META_PARTITION_ROOT_VERSION, ModuleFile};
+use crate::file::{
+    self, KeyEpoch, META_CORE_SCHEMA_VERSION, META_GENERATION, META_MODULE_SCHEMA_VERSION,
+    META_PARTITION_ROOT_VERSION, ModuleFile,
+};
 
 /// `PRAGMA journal_size_limit` on every connection: after a WAL restart, the first commit cuts
 /// the WAL to what it wrote, so stale frames do not outlive the restart even when a TRUNCATE
@@ -89,6 +92,48 @@ impl Role for Write {
 }
 impl Role for Read {
     const KIND: RoleKind = RoleKind::Read;
+}
+
+/// The roles whose handles read the file's schema and schema versions: [`Read`] and [`Write`].
+/// A [`Migration`] handle is closed to every statement outside its runner, so it has none of these
+/// methods:
+///
+/// ```compile_fail,E0599
+/// fn read(handle: &vilicus_storage::Handle<vilicus_storage::Migration>) {
+///     let _ = handle.schema();
+/// }
+/// ```
+pub trait Inspect: Role {}
+impl Inspect for Read {}
+impl Inspect for Write {}
+
+/// One of the two migration tracks of a module file (AD-26): the Core's tables first, then the
+/// module's. Each track has its own schema version in `_meta`, which only the runner writes, in
+/// the transaction of the migration, under the Core policy that module SQL never runs under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MigrationTrack {
+    /// The Core tables of the file (`_meta`, `_journal`, `_outbox`, `_consumed`, `_dead_letter`).
+    Core,
+    /// The module's own tables.
+    Module,
+}
+
+impl MigrationTrack {
+    fn meta_key(self) -> &'static str {
+        match self {
+            Self::Core => META_CORE_SCHEMA_VERSION,
+            Self::Module => META_MODULE_SCHEMA_VERSION,
+        }
+    }
+}
+
+impl core::fmt::Display for MigrationTrack {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::Core => "Core",
+            Self::Module => "module",
+        })
+    }
 }
 
 /// The setups of the storage layer: the three roles, and the Core maintenance connection, which
@@ -503,7 +548,7 @@ impl<R: Role> Handle<R> {
         })
     }
 
-    fn connection(&self) -> &Connection {
+    pub(crate) fn connection(&self) -> &Connection {
         self.connection
             .as_ref()
             .expect("a handle holds its connection until it is closed or dropped")
@@ -586,8 +631,8 @@ impl Handle<Write> {
 
     /// Writes a new key epoch (AD-5), in three durable steps: the pending sidecar
     /// `<file>.epoch.next`, then `_meta` in one transaction, then the pending sidecar renamed over
-    /// `<file>.epoch`. `_meta` is written under the Core-only epoch policy, which writes nothing
-    /// but the Core tables; module SQL never can. A failure before the rename removes the pending
+    /// `<file>.epoch`. `_meta` is written under the Core policy, which writes nothing but the Core
+    /// tables; module SQL never can. A failure before the rename removes the pending
     /// sidecar again; a crash leaves it in place, and every later open fails with
     /// [`Error::EpochTransitionPending`] until the Core resolves it (Story 3.1, Implementation
     /// Notes, the recovery rule).
@@ -605,7 +650,7 @@ impl Handle<Write> {
 
     fn update_meta(&self, epoch: KeyEpoch) -> Result<()> {
         let connection = self.connection();
-        authorizer::install(connection, Policy::Epoch)?;
+        authorizer::install(connection, Policy::Core)?;
         let outcome = write_meta(connection, epoch);
         let restored = authorizer::install(connection, Policy::Write).map_err(Error::from);
         outcome.and(restored)
@@ -646,27 +691,98 @@ impl Handle<Migration> {
     /// refuses transaction control; on any error the transaction is rolled back and nothing is
     /// written. On every exit the connection is left closed to every statement.
     pub fn apply_migration(&mut self, sql: &str) -> Result<()> {
+        self.run(sql, None)
+    }
+
+    /// Applies migration `version` of `track` like [`apply_migration`](Self::apply_migration) and
+    /// records `version` as the track's schema version in `_meta`, in the same transaction, so the
+    /// schema and its version never disagree (AD-26). Forward only and in order: `version` must
+    /// follow the recorded one by exactly one, the first migration being 1, or the call fails with
+    /// [`Error::MigrationOutOfOrder`] before the SQL runs. The version is written under the Core
+    /// policy, never by the migration SQL, which cannot reach `_meta`.
+    pub fn apply_versioned_migration(
+        &mut self,
+        track: MigrationTrack,
+        version: u32,
+        sql: &str,
+    ) -> Result<()> {
+        self.run(sql, Some((track, version)))
+    }
+
+    fn run(&mut self, sql: &str, version: Option<(MigrationTrack, u32)>) -> Result<()> {
         let connection = self
             .connection
             .as_mut()
             .expect("a handle holds its connection until it is closed or dropped");
-        let outcome = run_migration(connection, sql);
+        let outcome = run_migration(connection, sql, version);
         let closed = authorizer::install(connection, Policy::Closed).map_err(Error::from);
         outcome.and(closed)
     }
 }
 
-fn run_migration(connection: &mut Connection, sql: &str) -> Result<()> {
+impl<R: Inspect> Handle<R> {
+    /// The schema version `_meta` records for `track`; 0 before the track's first migration.
+    pub fn schema_version(&self, track: MigrationTrack) -> Result<u32> {
+        read_schema_version(self.connection(), track)
+    }
+}
+
+fn read_schema_version(connection: &Connection, track: MigrationTrack) -> Result<u32> {
+    match connection.query_row(
+        "SELECT value FROM _meta WHERE key = ?1",
+        [track.meta_key()],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(stored) => u32::try_from(stored).map_err(|_| Error::MalformedSchemaVersion(track)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn run_migration(
+    connection: &mut Connection,
+    sql: &str,
+    version: Option<(MigrationTrack, u32)>,
+) -> Result<()> {
     authorizer::remove(connection)?;
     let transaction = connection.transaction()?;
-    authorizer::install(&transaction, Policy::Migration)?;
-    let applied = transaction.execute_batch(sql);
+    let applied = migrate_in_transaction(&transaction, sql, version);
     authorizer::remove(&transaction)?;
     match applied {
         Ok(()) => Ok(transaction.commit()?),
         Err(error) => {
             transaction.rollback()?;
-            Err(error.into())
+            Err(error)
         }
     }
+}
+
+/// The body of the runner's transaction: the order check with no authorizer (a Core statement),
+/// the migration SQL under the migration policy, then the version row under the Core policy.
+fn migrate_in_transaction(
+    transaction: &Connection,
+    sql: &str,
+    version: Option<(MigrationTrack, u32)>,
+) -> Result<()> {
+    if let Some((track, version)) = version {
+        let current = read_schema_version(transaction, track)?;
+        if current.checked_add(1) != Some(version) {
+            return Err(Error::MigrationOutOfOrder {
+                track,
+                current,
+                version,
+            });
+        }
+    }
+    authorizer::install(transaction, Policy::Migration)?;
+    transaction.execute_batch(sql)?;
+    if let Some((track, version)) = version {
+        authorizer::install(transaction, Policy::Core)?;
+        transaction.execute(
+            "INSERT INTO _meta (key, value) VALUES (?1, ?2) \
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![track.meta_key(), version],
+        )?;
+    }
+    Ok(())
 }

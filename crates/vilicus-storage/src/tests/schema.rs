@@ -1,0 +1,367 @@
+//! Story 3.2: the versioned migrations of the two tracks, written by the runner in the migration's
+//! own transaction and never by module SQL (AD-26), and the schema the module registry reads
+//! through a read or write handle (AD-9).
+
+use super::{EPOCH, KEY, module_file, raw_connection, scratch_dir};
+use crate::error::Error;
+use crate::{
+    ColumnInfo, Inspect, Migration, MigrationTrack, ModuleFile, Read, TableKind, Write, create,
+    open,
+};
+
+/// A module file as `create` leaves it: `_meta` with the key epoch, nothing else.
+fn new_file(label: &str) -> ModuleFile {
+    let file = module_file(&scratch_dir(label));
+    create(&file, &KEY, EPOCH)
+        .expect("create")
+        .close()
+        .expect("close");
+    file
+}
+
+fn versions(file: &ModuleFile) -> (u32, u32) {
+    let reader = open::<Read>(file, &KEY).expect("open");
+    let versions = (
+        reader.schema_version(MigrationTrack::Core).expect("core"),
+        reader
+            .schema_version(MigrationTrack::Module)
+            .expect("module"),
+    );
+    reader.close().expect("close");
+    versions
+}
+
+fn table_names(file: &ModuleFile) -> Vec<String> {
+    let reader = open::<Read>(file, &KEY).expect("open");
+    let names = reader
+        .schema()
+        .expect("schema")
+        .tables
+        .into_iter()
+        .map(|table| table.name)
+        .filter(|name| !name.starts_with("sqlite_"))
+        .collect();
+    reader.close().expect("close");
+    names
+}
+
+fn migrate(file: &ModuleFile, track: MigrationTrack, version: u32, sql: &str) -> crate::Result<()> {
+    let mut handle = open::<Migration>(file, &KEY).expect("open");
+    let outcome = handle.apply_versioned_migration(track, version, sql);
+    handle.close().expect("close");
+    outcome
+}
+
+#[test]
+fn a_new_file_is_at_version_zero_on_both_tracks() {
+    assert_eq!(versions(&new_file("version-zero")), (0, 0));
+}
+
+#[test]
+fn versioned_migrations_apply_in_order_and_record_their_version() {
+    let file = new_file("version-order");
+    migrate(
+        &file,
+        MigrationTrack::Module,
+        1,
+        "CREATE TABLE one (x INTEGER);",
+    )
+    .expect("first");
+    assert_eq!(versions(&file), (0, 1));
+    migrate(
+        &file,
+        MigrationTrack::Module,
+        2,
+        "CREATE TABLE two (x INTEGER);",
+    )
+    .expect("second");
+    assert_eq!(versions(&file), (0, 2));
+    migrate(
+        &file,
+        MigrationTrack::Core,
+        1,
+        "CREATE TABLE core_one (x INTEGER);",
+    )
+    .expect("the Core track counts on its own");
+    assert_eq!(versions(&file), (1, 2));
+
+    for (version, current) in [(2, 2), (1, 2), (4, 2), (0, 2)] {
+        let outcome = migrate(
+            &file,
+            MigrationTrack::Module,
+            version,
+            "CREATE TABLE out_of_order (x INTEGER);",
+        );
+        assert!(
+            matches!(
+                outcome,
+                Err(Error::MigrationOutOfOrder { track: MigrationTrack::Module, current: found, version: refused })
+                    if found == current && refused == version
+            ),
+            "version {version}: {outcome:?}"
+        );
+    }
+    assert_eq!(versions(&file), (1, 2));
+    assert!(
+        !table_names(&file).contains(&"out_of_order".to_owned()),
+        "an out-of-order migration ran its SQL"
+    );
+}
+
+/// A migration that fails or is refused leaves its version, as it leaves its schema: the version
+/// row is written in the migration's own transaction.
+#[test]
+fn a_failed_migration_keeps_the_previous_version() {
+    let file = new_file("version-failed");
+    migrate(
+        &file,
+        MigrationTrack::Module,
+        1,
+        "CREATE TABLE one (x INTEGER);",
+    )
+    .expect("first");
+    for sql in [
+        "CREATE TABLE two (x INTEGER); ATTACH DATABASE 'other.db' AS other;",
+        "CREATE TABLE two (x INTEGER); CREATE TABLE one (y INTEGER);",
+    ] {
+        assert!(
+            migrate(&file, MigrationTrack::Module, 2, sql).is_err(),
+            "{sql}"
+        );
+        assert_eq!(versions(&file), (0, 1), "{sql}");
+        assert!(!table_names(&file).contains(&"two".to_owned()), "{sql}");
+    }
+}
+
+/// Module SQL cannot write a schema version, its own or the Core's, in any form.
+#[test]
+fn migration_sql_cannot_write_a_schema_version() {
+    let file = new_file("version-forged");
+    for sql in [
+        "INSERT INTO _meta (key, value) VALUES ('module_schema_version', 9)",
+        "REPLACE INTO _meta (key, value) VALUES ('core_schema_version', 9)",
+        "UPDATE _meta SET value = 9 WHERE key = 'generation'",
+    ] {
+        for track in [MigrationTrack::Module, MigrationTrack::Core] {
+            let outcome = migrate(&file, track, 1, sql);
+            assert!(
+                outcome.as_ref().is_err_and(Error::is_refusal),
+                "{sql}: {outcome:?}"
+            );
+        }
+    }
+    assert_eq!(versions(&file), (0, 0));
+}
+
+#[test]
+fn a_malformed_schema_version_is_a_typed_error() {
+    let file = new_file("version-malformed");
+    raw_connection(&file.path())
+        .execute_batch("INSERT INTO _meta (key, value) VALUES ('module_schema_version', -1)")
+        .expect("plant");
+    let reader = open::<Read>(&file, &KEY).expect("open");
+    assert!(matches!(
+        reader.schema_version(MigrationTrack::Module),
+        Err(Error::MalformedSchemaVersion(MigrationTrack::Module))
+    ));
+}
+
+const ITEMS: &str = "CREATE TABLE items (
+    id BLOB NOT NULL PRIMARY KEY,
+    label TEXT NOT NULL,
+    quantity INTEGER,
+    total INTEGER GENERATED ALWAYS AS (quantity * 2) VIRTUAL
+) STRICT;
+CREATE INDEX items_label ON items (label);
+CREATE TABLE loose (x INTEGER PRIMARY KEY, y) WITHOUT ROWID;
+CREATE VIEW labels AS SELECT label FROM items;
+CREATE TRIGGER items_touch AFTER INSERT ON items BEGIN SELECT 1; END;";
+
+fn column(
+    name: &str,
+    declared_type: &str,
+    not_null: bool,
+    primary_key: u32,
+    hidden: i64,
+) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_owned(),
+        declared_type: declared_type.to_owned(),
+        not_null,
+        primary_key,
+        hidden,
+    }
+}
+
+fn check_schema<R: Inspect>(file: &ModuleFile) {
+    let handle = open::<R>(file, &KEY).expect("open");
+    let schema = handle
+        .schema()
+        .expect("the schema reads under the role's authorizer");
+    handle.close().expect("close");
+
+    let items = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "items")
+        .expect("items");
+    assert_eq!(items.kind, TableKind::Ordinary);
+    assert!(items.strict && !items.without_rowid);
+    assert_eq!(
+        items.columns,
+        [
+            column("id", "BLOB", true, 1, 0),
+            column("label", "TEXT", true, 0, 0),
+            column("quantity", "INTEGER", false, 0, 0),
+            column("total", "INTEGER", false, 0, 2),
+        ]
+    );
+    let loose = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "loose")
+        .expect("loose");
+    assert!(!loose.strict && loose.without_rowid);
+    assert_eq!(loose.columns[1], column("y", "", false, 0, 0));
+    let view = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "labels")
+        .expect("view");
+    assert_eq!(view.kind, TableKind::View);
+    assert!(view.columns.is_empty());
+    let meta = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "_meta")
+        .expect("_meta");
+    assert!(meta.strict && meta.without_rowid);
+
+    let objects: Vec<(&str, &str, &str)> = schema
+        .objects
+        .iter()
+        .map(|object| {
+            (
+                object.kind.as_str(),
+                object.name.as_str(),
+                object.table.as_str(),
+            )
+        })
+        .collect();
+    for expected in [
+        ("index", "items_label", "items"),
+        ("table", "items", "items"),
+        ("table", "_meta", "_meta"),
+        ("trigger", "items_touch", "items"),
+        ("view", "labels", "labels"),
+    ] {
+        assert!(objects.contains(&expected), "{expected:?} in {objects:?}");
+    }
+    let index_sql = schema
+        .objects
+        .iter()
+        .find(|object| object.name == "items_label")
+        .and_then(|object| object.sql.as_deref());
+    assert_eq!(index_sql, Some("CREATE INDEX items_label ON items (label)"));
+}
+
+#[test]
+fn read_and_write_handles_read_the_schema() {
+    let file = new_file("schema");
+    migrate(&file, MigrationTrack::Module, 1, ITEMS).expect("migrate");
+    check_schema::<Read>(&file);
+    check_schema::<Write>(&file);
+}
+
+/// FTS5 tables cannot be created by a migration before Story 3.7; the file here is set up
+/// without the authorizer, as that story's migrations will. The registry reads the virtual table,
+/// its shadow tables and its `secure-delete` option through a read handle.
+#[test]
+fn fts5_tables_and_their_options_are_read() {
+    let file = new_file("schema-fts5");
+    raw_connection(&file.path())
+        .execute_batch(
+            "CREATE VIRTUAL TABLE notes USING fts5(body, content='', tokenize='porter');
+             INSERT INTO notes (notes, rank) VALUES ('secure-delete', 1);
+             CREATE VIRTUAL TABLE plain USING fts5(body);
+             CREATE VIRTUAL TABLE texty USING fts5(body);
+             INSERT INTO texty_config (k, v) VALUES ('secure-delete', 'on');",
+        )
+        .expect("create the FTS5 tables without an authorizer");
+    let reader = open::<Read>(&file, &KEY).expect("open");
+    let schema = reader.schema().expect("schema");
+    let kind = |name: &str| {
+        schema
+            .tables
+            .iter()
+            .find(|table| table.name == name)
+            .map(|table| table.kind.clone())
+    };
+    assert_eq!(kind("notes"), Some(TableKind::Virtual));
+    for shadow in ["notes_data", "notes_idx", "notes_config", "notes_docsize"] {
+        assert_eq!(kind(shadow), Some(TableKind::Shadow), "{shadow}");
+    }
+    assert_eq!(
+        kind("notes_content"),
+        None,
+        "a contentless table keeps no content"
+    );
+    let sql = schema
+        .objects
+        .iter()
+        .find(|object| object.name == "notes")
+        .and_then(|object| object.sql.clone());
+    assert_eq!(
+        sql.as_deref(),
+        Some("CREATE VIRTUAL TABLE notes USING fts5(body, content='', tokenize='porter')")
+    );
+    assert_eq!(
+        reader.fts5_option("notes", "secure-delete").expect("read"),
+        Some(1)
+    );
+    assert_eq!(
+        reader.fts5_option("plain", "secure-delete").expect("read"),
+        None
+    );
+    assert_eq!(
+        reader.fts5_option("texty", "secure-delete").expect("read"),
+        None,
+        "only an integer value counts"
+    );
+}
+
+/// A finding for Story 3.7: SQLite checks a column added to a `STRICT` table with
+/// `pragma_quick_check`, a pragma the migration authorizer refuses, so a migration cannot add a
+/// column to a `STRICT` table; it can to a table that is not `STRICT`.
+#[test]
+fn a_column_cannot_be_added_to_a_strict_table_under_the_migration_authorizer() {
+    let file = new_file("strict-add-column");
+    migrate(
+        &file,
+        MigrationTrack::Module,
+        1,
+        "CREATE TABLE strict_items (id BLOB NOT NULL PRIMARY KEY) STRICT;
+         CREATE TABLE loose_items (id BLOB NOT NULL PRIMARY KEY);",
+    )
+    .expect("create");
+    let outcome = migrate(
+        &file,
+        MigrationTrack::Module,
+        2,
+        "ALTER TABLE strict_items ADD COLUMN label TEXT;",
+    );
+    assert!(
+        outcome.as_ref().is_err_and(Error::is_refusal),
+        "{outcome:?}"
+    );
+    migrate(
+        &file,
+        MigrationTrack::Module,
+        2,
+        "ALTER TABLE loose_items ADD COLUMN label TEXT;",
+    )
+    .expect("a table that is not STRICT takes a new column");
+    raw_connection(&file.path())
+        .execute_batch("ALTER TABLE strict_items ADD COLUMN label TEXT;")
+        .expect("the same statement runs without the authorizer");
+}

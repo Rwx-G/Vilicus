@@ -9,7 +9,7 @@
 //!
 //! The Core tables of a module file ([`CORE_TABLES`], AD-26) are the Core's: no module SQL,
 //! write or migration, and no trigger body, which SQLite authorizes when it fires, may write,
-//! drop, alter, index or attach a trigger to them. Only [`Policy::Epoch`], which the Core installs
+//! drop, alter, index or attach a trigger to them. Only [`Policy::Core`], which the Core installs
 //! around its own statements, writes `_meta`.
 
 use rusqlite::Connection;
@@ -29,16 +29,17 @@ pub(crate) enum Policy {
     /// (AD-9) needs one snapshot to see one state. A snapshot held long keeps deleted rows in the
     /// WAL, which `Handle::checkpoint_truncate` then reports as incomplete.
     Read,
-    /// The Core's own update of the key epoch in `_meta`, around fixed statements only: rows of
-    /// [`CORE_TABLES`] and the transaction that holds them, nothing else.
-    Epoch,
+    /// The Core's own fixed statements on [`CORE_TABLES`]: the key epoch and the schema versions
+    /// in `_meta`, and the transaction that holds them, nothing else.
+    Core,
 }
 
 /// Tables the Core creates in every module file (AD-26) and that module SQL never changes.
 /// Compared ignoring ASCII case; the authorizer receives the table name without its schema, so
 /// `main._meta` is matched too. `_journal`, `_outbox`, `_consumed` and `_dead_letter` join this
-/// list with the stories that create them (3.6, 3.8).
-pub(crate) const CORE_TABLES: &[&str] = &["_meta"];
+/// list with the stories that create them (3.6, 3.8). The module registry reads it to tell the
+/// Core's tables from a module's in a file's schema.
+pub const CORE_TABLES: &[&str] = &["_meta"];
 
 /// Virtual table modules reviewed as usable by module SQL under some policy: `fts5`, whose tables
 /// a module migration may create once Story 3.7 applies D127. Today every `CREATE VIRTUAL TABLE`
@@ -66,8 +67,12 @@ pub(crate) const DENIED_MODULES: &[&str] = &[
 
 /// Read-only schema introspection pragmas, allowed under every policy but [`Policy::Closed`].
 /// Compared ignoring ASCII case, because the authorizer receives the pragma name as written.
-/// `temp_store` is not here, so temporary data stays in memory (D132).
+/// `temp_store` is not here, so temporary data stays in memory (D132). `table_list` names the
+/// tables of the connection's own schemas with their kind (ordinary, virtual, shadow, view) and
+/// their `STRICT` flag, which the module registry compares with its declarations (AD-9); it
+/// reads no file path, unlike `database_list`.
 pub(crate) const INTROSPECTION_PRAGMAS: &[&str] = &[
+    "table_list",
     "table_info",
     "table_xinfo",
     "index_list",
@@ -262,7 +267,7 @@ fn function_allowed(policy: Policy, function_name: &str) -> bool {
 
 /// Row writes: SQLite's internal tables (`sqlite_` prefix) are refused, except
 /// [`MIGRATION_INTERNAL_TABLES`] under the migration policy; [`CORE_TABLES`] are written under
-/// [`Policy::Epoch`] only, which writes nothing else.
+/// [`Policy::Core`] only, which writes nothing else.
 fn row_write_allowed(policy: Policy, table_name: &str) -> bool {
     let internal = table_name
         .get(..7)
@@ -271,7 +276,7 @@ fn row_write_allowed(policy: Policy, table_name: &str) -> bool {
     match policy {
         Policy::Migration => !core && (!internal || listed(MIGRATION_INTERNAL_TABLES, table_name)),
         Policy::Write => !core && !internal,
-        Policy::Epoch => core,
+        Policy::Core => core,
         Policy::Read | Policy::Closed => false,
     }
 }
@@ -297,7 +302,7 @@ pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorizat
             // The migration runner owns the transaction; migration SQL that commits, rolls back
             // or opens a savepoint would split the migration into parts that apply on their own.
             AuthAction::Transaction { .. } => {
-                matches!(policy, Policy::Write | Policy::Read | Policy::Epoch)
+                matches!(policy, Policy::Write | Policy::Read | Policy::Core)
             }
             AuthAction::Savepoint { .. } => matches!(policy, Policy::Write | Policy::Read),
             AuthAction::CreateTable { table_name }
@@ -333,7 +338,8 @@ pub(crate) fn install(connection: &Connection, policy: Policy) -> rusqlite::Resu
 }
 
 /// Removes the authorizer; only the migration runner does, around its own transaction control.
-/// The epoch update swaps to [`Policy::Epoch`] instead, so even its statements stay confined.
+/// The Core's own writes to `_meta` swap to [`Policy::Core`] instead, so even its statements stay
+/// confined.
 pub(crate) fn remove(connection: &Connection) -> rusqlite::Result<()> {
     connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
 }
@@ -347,7 +353,7 @@ mod tests {
         Policy::Migration,
         Policy::Write,
         Policy::Read,
-        Policy::Epoch,
+        Policy::Core,
     ];
 
     fn decide(policy: Policy, action: AuthAction<'_>) -> Authorization {
@@ -424,10 +430,7 @@ mod tests {
             ),
             (Policy::Write, [true, false, true, false, false, true, true]),
             (Policy::Read, [true, false, false, false, false, true, true]),
-            (
-                Policy::Epoch,
-                [true, false, false, false, false, true, true],
-            ),
+            (Policy::Core, [true, false, false, false, false, true, true]),
         ];
         for (policy, expected) in expectations {
             let actions = [
@@ -463,9 +466,9 @@ mod tests {
     }
 
     /// M1 of the Story 3.1 review: the Core tables are out of reach of every module policy, in
-    /// any case spelling, and only the epoch policy writes them, and nothing else.
+    /// any case spelling, and only the Core policy writes them, and nothing else.
     #[test]
-    fn core_tables_are_written_only_under_the_epoch_policy() {
+    fn core_tables_are_written_only_under_the_core_policy() {
         for name in ["_meta", "_META", "_Meta"] {
             let actions = [
                 AuthAction::Insert { table_name: name },
@@ -521,7 +524,7 @@ mod tests {
             ] {
                 let label = format!("{action:?}");
                 assert_eq!(
-                    decide(Policy::Epoch, action),
+                    decide(Policy::Core, action),
                     Authorization::Allow,
                     "{label}"
                 );
@@ -542,11 +545,7 @@ mod tests {
             AuthAction::CreateTable { table_name: "t" },
         ] {
             let label = format!("{action:?}");
-            assert_eq!(
-                decide(Policy::Epoch, action),
-                Authorization::Deny,
-                "{label}"
-            );
+            assert_eq!(decide(Policy::Core, action), Authorization::Deny, "{label}");
         }
     }
 

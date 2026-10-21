@@ -2,7 +2,7 @@
 title: 'Tool declarations and capability matrix check'
 epic: 3
 story: 3
-status: draft
+status: review
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-22, FR-60, FR-21, I13, I18, AD-9, AD-48, D46, DC-13]
@@ -52,3 +52,129 @@ So that no tool exists without a reviewed row, no tier 2 action ships in V0.1 an
 - `doc/ai-safety.md` I13, I18, section 3.1
 - `doc/capability-matrix.md` Legend, section 12
 - `doc/decisions.md` D46
+
+## Implementation Notes
+
+**What was built**
+- `crates/vilicus-module-api/` (no new dependency):
+  - `src/tool.rs`: a module declares each tool as a `Tool`, plain `'static` data in its `ModuleDeclaration`:
+    - `name`, an identifier unique in the module; the registry names it `<module>.<name>`;
+    - `arguments`, the tool's schema: `Field`s under the rules of a table's fields (structured or free text with a maximum length, no envelope or rowid name);
+    - `tier` (`vilicus_types::Tier`), `network_effect: bool` (mandatory: a struct literal without it does not compile), `exception_class: Option<ExceptionClass>` (at most one, from the closed set of `vilicus-types`);
+    - `confirmation: Confirmation` (`None` or `Light`, named as the matrix's Confirmation column, `Confirmation::ALL`);
+    - `crosses_partitions: bool`, true for a write that moves or copies a record into another partition;
+    - `undo_handler: Option<&'static str>`, the name of the module's undo handler;
+    - `matrix_row: MatrixRow { section, action }`: the section number as its heading writes it (`2`, `10a`) and the Action cell, exactly.
+  - `ModuleDeclaration` gains `matrix_sections` (the matrix sections the module implements) and `tools`, and `tool(name)`.
+  - `src/check.rs`, the `const fn` rules `validate` and `assert_valid` apply, in this order for each tool:
+    - name and arguments (identifier grammar, field rules, unique);
+    - tier H refused (`HumanOnlyTool`, I18, AD-8);
+    - `crosses_partitions` refused at every tier (`CrossPartitionTool`, FR-21, D46);
+    - with an exception class: tier 1 only (`ExceptionClassOutsideTier1`), a network effect required (`ExceptionClassWithoutNetworkEffect`), light confirmation for `reversible_external_state` and `own_account_delivery` (`ExceptionClassWithoutLightConfirmation`), an undo handler (`ExceptionClassWithoutUndoHandler`) (I13, AD-48);
+    - without one: a network effect below tier 2 refused (`NetworkEffectBelowTier2`, I13);
+    - tier 2 refused (`Tier2BeforeNativeApp`, D46, FR-60);
+    - light confirmation outside tier 1 refused; an undo handler on a tier 0 tool refused, its name an identifier;
+    - the row's section is one the module claims, and its action text is one a matrix cell can hold (not empty, no white space at either end, no `|`, no control character);
+    - the module's sections follow the section grammar (`is_matrix_section`, at most `MATRIX_SECTION_MAX_LEN`) and are claimed once; tool names are unique.
+  - `compile_fail` examples: a tool without `network_effect` (E0063), an exception class outside the set (E0599), a tier H tool and a tier 2 tool in a `const` item (E0080).
+- `crates/vilicus-core/src/registry/`:
+  - `mod.rs`: `Registry::tools()` is the registry's exported tool table (`RegisteredTool { module, tool }`, `qualified_name()`); `Registry::new` also refuses two modules claiming one matrix section (`RegistryError::DuplicateMatrixSection`).
+  - `matrix/mod.rs`, the capability matrix check:
+    - `CapabilityMatrix::parse(text)` reads `doc/capability-matrix.md`, or a fixture in its format: each `## <number>. <title>` heading opens a section, each table whose first header cell is `Action` is a table of actions with `Tier` and `Confirmation` columns, other tables (caps, review log) are not read. A table of actions it cannot read is a `MatrixError` naming the line: a row not framed by `|`, a header without its separator, a missing column, another cell count, an empty or repeated Action in a section, two sections of one number, a table of actions outside a numbered section.
+    - `MatrixEntry::row_tier()` reads the Tier cell: `0` and `1` are `Registrable`; `2` and `2 (D<n>)` `Irreversible`; `H` `HumanOnly`; `n/a` `NotApplicable`; anything else `NotOneTier`. `tool_confirmation()` reads the first term of the Confirmation cell (before a comma, a semicolon or ` (`) as one of `Confirmation::ALL`, or none.
+    - `differences(&registry)` lists, in both directions: `SectionMissing` (a claimed section the matrix lacks), `ToolWithoutRow`, `RowNotATool` (a tool naming an H, `n/a`, tier 2 or `NotOneTier` row), `TierMismatch`, `ConfirmationMismatch`, `RowWithoutTool` (a `0` or `1` row of a claimed section that no tool of the module names) and `RowWithoutOneTier` (a claimed row whose tier the check cannot read). Each names the tool or the module, the section and the row.
+    - `CapabilityMatrix::check(text, &registry)` is the gate's entry point: `Ok`, or `MatrixCheckError` listing every difference one per line, or the reading error.
+- `crates/vilicus/src/registry.rs` (`#[cfg(test)] mod registry;` in `main.rs`): the binary's registry, `const REGISTRY: Registry = Registry::new(&[])`, V0.1 shipping no module, and `the_shipped_tool_table_matches_the_capability_matrix`, which runs `CapabilityMatrix::check` on `doc/capability-matrix.md`.
+- No new package, no change to `Cargo.lock`, `ci/`, the workflow or `doc/capability-matrix.md`: the document reads back as it is.
+
+**Decisions and why** (choices the documents leave open; drafted texts under Open points)
+- *The check is Rust, run by `cargo test`*, not a Python script under `ci/`. The tool table is `const` Rust data; a Python check would need an export format and a Rust program to write it, two surfaces to keep in step. A Rust test reads the matrix directly, and Story 3.10's testbed calls the same `CapabilityMatrix::check` on its fixture. It runs in `build-and-test`, the job that already runs the workspace tests; no job was added. What it gives up: a step named after the gate in the workflow; a failure is a test named after it instead.
+- *Row identity is section number plus Action text*, exactly as written. A module claims whole sections, and one section belongs to one module, which the registry enforces. The row direction of AC2 is read as: every row of a claimed section whose Tier cell is `0` or `1` needs a tool. Tier 2 rows (marked `D46` or `D69`, or not, like the out-of-scope payment row), H rows and `n/a` rows never do. A claimed row of no single tier (`0 or 1`, `per manifest`, `1; H when ...`) is a difference, because the check cannot tell whether it needs a tool. What it gives up: a section shared by several modules (10c today) must be split before the first of them ships, and a mixed-tier row must become rows of one tier each.
+- *Tier and confirmation are compared*, AD-9's "any difference": a tool's tier is its row's exactly, and its confirmation is the first term of the row's Confirmation cell (`light, in the app` is light). A row whose confirmation no tool can declare (`spoken`, `provider policy`, `light to grant ...; none to revoke`) cannot be claimed by a tool. Exception classes and network effects are not in a matrix column, so they are not compared: the declaration rules hold them.
+- *Fields beyond AD-9's list*: `confirmation` (AD-48 and I13 require light confirmation of two classes, which a declaration must state to be checked), `crosses_partitions` (FR-21 at build time: a tool says whether it writes into another partition, and saying so is refused before the native app), `undo_handler` (I13 requires one per exception-class tool) and `matrix_sections` on the module (the row direction of AC2).
+- *A network effect is any outbound effect, a device command included*: `restorable_physical` is one of I13's exceptions to the outbound-effect rule, so its tools declare `network_effect` like the other two classes. A class without a network effect is refused, since a class only ever excuses one.
+- *Light confirmation is tier 1 only, and a read names no undo handler*: the Legend gives light confirmation to tier 1 rows and signed to tier 2, and a read changes nothing. `Confirmation` has no `Signed` member while no tier 2 tool can be registered (D46); it joins with the native app.
+- *Undo handlers are named, not bound*: no handler signature exists before the typed record API and the handler boundary (Stories 3.5, 3.9). A name is what the declaration can carry now; binding it to the module's function, and refusing a name with no function, is Story 3.9's.
+- *The binary's registry is compiled with its tests only*, until `main` starts the Core with it. Naming `vilicus_core` in the executable links SQLCipher and the system `libcrypto` into it (observed: 160 `sqlite3_` text symbols and a `libcrypto.so.3` dependency in the debug build), which nothing in V0.1's binary uses yet and which the VM smoke test would then need on the guest. CI builds and runs the test target on every change, so a shipped module the registry refuses still fails CI, and every module crate also checks its own declaration in its build (`assert_valid`). What it gives up: a plain `cargo build -p vilicus` does not evaluate the registry; it will once the Core runs from `main`.
+
+**Files**
+- `crates/vilicus-module-api/src/`: `tool.rs` (new), `check.rs`, `declaration.rs`, `lib.rs`, `tests.rs`
+- `crates/vilicus-core/src/registry/`: `mod.rs`, `matrix/mod.rs` and `matrix/tests.rs` (new), `tests.rs` (the new fields in its declarations)
+- `crates/vilicus/src/`: `main.rs`, `registry.rs` (new)
+- `doc/stories/sprint-status.yaml` (3.3 `review`)
+
+**Deviations**
+- *AC1, "a tool without `network_effect` fails the build"*: the field has no default, so such a declaration does not compile (`compile_fail`, E0063), which is earlier than registration, as Story 3.2 did for data types.
+- *AC2, "the CI matrix check"*: a Rust test, not a separate job (Decisions). V0.1 ships no module, so on `doc/capability-matrix.md` the shipped check proves the document reads back and that no tool exists; the comparison in both directions is exercised on a fixture and, with probe modules, on every section of the real document.
+- *AC3, cross-partition writes*: a static check sees what the declaration says. A tool that declares `crosses_partitions` is refused at every tier; a handler that writes into another partition without declaring it is refused at run time by partition isolation (Story 10.4), not by this check.
+- *AC4, "has no undo handler"*: checked as "names none"; the name is bound to a function in Story 3.9.
+- *AC4, I13's "takes no destination argument"* for `own_account_delivery`: not checked. Nothing in a field's declaration says that it is a destination; the Core resolves the destination from the member's account, and the pipeline (Epic 10) must refuse an argument that would carry one.
+- *AC5, "none of them is reachable as a tool"*: a tier H tool does not build, and a tool naming an H or `n/a` row of the matrix, at any tier it can declare, fails the matrix check. A tool that performs an H action while naming a tier 1 row of its own module cannot be detected statically; the review of the module's rows covers it (`doc/capability-matrix.md`, section 12, point 2).
+
+**Open points**
+- *Design documents* (coordinator):
+  - Drafted decision, D145 "Tool declarations and the capability matrix check": "Amends AD-9 and AD-48. Context: story 3.3 builds the tool declarations and the capability matrix check. Decision: a tool declares, as `const` data in `vilicus-module-api`, its name, its schema (arguments under the field rules of FR-58), its tier, a mandatory `network_effect`, at most one exception class, its confirmation (none or light), whether it crosses partitions, the name of its undo handler and its matrix row, named by section number and Action text; a module claims the matrix sections it implements, and one section belongs to one module. The build refuses a tier H tool, a tier 2 tool and a tool crossing partitions before the native app, a network effect below tier 2 without an exception class, an exception class outside tier 1, without a network effect or without an undo handler, and a `reversible_external_state` or `own_account_delivery` tool without light confirmation; light confirmation is tier 1 only. The capability matrix check is a Rust test over the registry's tool table and `doc/capability-matrix.md` (a fixture under `testing/` for the testbed): it fails on a tool without its row, on a tool naming a row of tier H, `n/a`, tier 2 or no single tier, on a tier or confirmation different from the row's, and on a row of a claimed section at tier 0 or 1 without a tool or of no single tier. Consequences: a matrix section shared by several modules, and a row of mixed tier, are split before their module ships; a device command is a network effect, so `restorable_physical` tools declare one."
+  - AD-9: the tool fields as above (confirmation, partition effect, undo handler name, claimed sections) and "the capability matrix check (AD-9)" of the CI list being the test `the_shipped_tool_table_matches_the_capability_matrix`.
+  - AD-48: a class requires a network effect; light confirmation is tier 1 only.
+  - `doc/capability-matrix.md`, section 12: "the module registry loads tool definitions from the same table in code" reads as the tool table compared with the matrix, which is what is built; no row changed.
+- *Rows the check cannot assign to a tool today* (found by running it on every section): no single tier: `Act on a message from a bound sender on a secondary channel` (8), `Call a plugin write operation` (10), `Turn a camera off` and `Change a mode that concerns a safety-relevant device` (10a), `Run a scheduled task`, `Create or validate a playbook` and `Run a playbook step` (10b); a confirmation no tool declares: `Approve an elevated tier 1 request by voice` and `Call a remote AI provider with household data` (1), `Compute travel time with an external routing provider` (4), `Grant or revoke a standing approval for own-account delivery by a playbook` (10b). Section 10c holds rows of several activatable modules. Each needs a matrix change before its module ships; none ships in V0.1.
+- *Story 3.9*: bind each `undo_handler` name to the module's function and refuse a name with none.
+- *Story 3.10*: the testbed's `const` registry with the reference module, which claims the sections of a fixture under `testing/` (a tier 0 and a tier 1 row), checked by `CapabilityMatrix::check`; `doc/capability-matrix.md` gets no reference row.
+- *Epic 10*: the pipeline (Story 10.3) reads tier, confirmation and exception class from the declaration, so the policy engine and the matrix agree through this check; `own_account_delivery` destinations (above); the Core's own tools (section 1 rows such as `Read own profile and permissions`, Story 10.7's undo) join the tool table, with section 1 claimed by the Core; plugin manifests declare `network_effect` for the kill switch (AD-11), in their own form.
+- *The binary*: when `main` starts the Core, `crates/vilicus/src/registry.rs` leaves `#[cfg(test)]`, and SQLCipher and `libcrypto` are linked into `vilicus` from then on.
+
+## Result
+
+All commands ran on 2026-10-21 in `rust:1.99-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a` (Docker Desktop on Windows), `rustc 1.99.0 (b940084d7 2026-09-28)`, with cargo-deny 0.20.2, cargo-vet 0.10.2 and cargo-audit 0.22.2. The gates ran on a fresh clone of the branch at `c3ad292`, made inside the container, with an empty target directory. Mutations ran on another clone with its own target directory, never on the working tree. Each intermediate commit (`11d2470`, `dabfd78`) builds, passes clippy and passes the module API, Core and binary tests.
+
+Gates, as `.github/workflows/ci.yml` runs them:
+- `python3 -m unittest discover -s ci`: `Ran 211 tests`, `OK` (unchanged).
+- `python3 ci/check_workspace.py`: `workspace checks passed: 19 crates`.
+- `python3 ci/check_supply_chain.py`: `supply-chain checks passed: 93 packages`; `--vendor`: `vendor check passed`.
+- `python3 ci/check_sqlcipher_source.py`: `sqlcipher source check passed: 3 files match SHA256SUMS`.
+- `python3 ci/check_packaging.py`: `packaging check passed: 1 release artefacts, none built from or linking the 6 never-packaged crates`.
+- `python3 ci/release_gates.py check`: `release gates declared: 2 package, 1 testbed`.
+- System OpenSSL: `libssl-dev` `3.5.7-1~deb13u3`, `pkg-config` `3.5.7`.
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --frozen --config ci/cargo-vendored.toml -- -D warnings`, `cargo build --workspace --frozen --config ci/cargo-vendored.toml`: exit 0.
+- `cargo test --workspace --frozen --config ci/cargo-vendored.toml`: 283 passed, none failed (255 before the story): `vilicus-module-api` 25 (15 before) and 7 examples (3 before), `vilicus-core` 39 (26 before) and 1 example, `vilicus` 1 (0 before).
+- `cargo deny --locked check`: `advisories ok, bans ok, licenses ok, sources ok`.
+- `cargo vet --locked`: `Vetting Succeeded (16 fully audited, 4 partially audited, 54 exempted)`, unchanged.
+- `cargo audit --json`, judged by `python3 ci/check_audit_report.py ci/audit-exceptions.toml`: `audit report passed: no vulnerability, 1 warning(s), each a listed exception`.
+- `cargo tree --workspace -e features -i rusqlite`: `load_extension` appears nowhere (0 lines).
+- The `vilicus` executable links no SQLCipher: 0 `sqlite3_` text symbols, no `libcrypto` in `ldd`.
+- The fuzz coverage check is not concerned: `vilicus-proto` is unchanged.
+
+| Criterion | Result | Tests and observed outcome |
+|---|---|---|
+| AC1 (FR-22, AD-9) | **Pass** | `a_declaration_with_tools_that_meet_every_rule_is_accepted`: a module whose tools carry name, schema, tier, network effect, exception class, confirmation and matrix row is accepted, and each field reads back. The `assert_valid` examples: the valid example builds a module with a tool in a `const` item; a tool without `network_effect` does not compile (`compile_fail`, E0063); an exception class outside the closed set does not compile (`compile_fail`, E0599). `tool_names_arguments_and_undo_handlers_are_checked` (names, duplicate tools, arguments under the field rules, envelope names refused for each `ENVELOPE` column), `matrix_sections_and_rows_are_checked`, `every_tool_error_names_its_rule_and_its_tool`. Registry: `Registry::tools()` lists the tool table (`a_registry_that_matches_the_matrix_has_no_difference`). |
+| AC2 (FR-22, I13, I18) | **Pass** | The gate: `vilicus` `registry::tests::the_shipped_tool_table_matches_the_capability_matrix` (no shipped module in V0.1). On the fixture: `a_tool_without_a_row_and_a_row_without_a_tool_are_each_named` (a misnamed row gives `ToolWithoutRow` and `RowWithoutTool`, each named in the check's message; two missing tools give two named rows); `a_section_the_matrix_lacks_is_named`; `a_tool_takes_its_rows_tier_and_confirmation`; `claimed_rows_need_a_tool_and_one_tier` (a section no module claims needs no tool); `two_modules_cannot_claim_one_section`; `an_unreadable_matrix_is_refused` (eleven malformed forms, each with its line); `tier_and_confirmation_cells_read_as_the_legend_writes_them`. On `doc/capability-matrix.md`: `the_capability_matrix_document_reads_back`; `every_document_section_needs_a_tool_for_each_tool_row` claims each section in turn with one tool per row a tool can implement, gets no difference except the rows the check cannot assign (Open points), then removes each tool in turn and gets its row named. |
+| AC3 (FR-60, FR-21, D46, DC-13) | **Pass** | `a_tier_2_tool_is_refused_before_the_native_app` (with and without a network effect); `a_cross_partition_tool_is_refused_at_every_tier` (tiers 0, 1 and 2); the `assert_valid` example of a tier 2 tool in a `const` item (`compile_fail`, E0080). A tool naming a tier 2 row of the matrix is a `RowNotATool` difference (`a_tool_cannot_implement_a_row_that_is_not_a_tools`). How the static check sees a cross-partition write: Deviations. |
+| AC4 (I13, AD-48) | **Pass** | `a_network_effect_needs_tier_2_or_an_exception_class_at_tier_1`: a network effect at tier 0 or 1 without a class is refused; each class at tier 0 or 2 is refused; each class without a network effect is refused; each class at tier 1 with a network effect, light confirmation and an undo handler is accepted. `exception_classes_require_their_confirmation_and_an_undo_handler` reads AD-48's sentence in the spine to know which classes require light confirmation, checks that it places every class of `ExceptionClass::ALL`, then: without light confirmation, `reversible_external_state` and `own_account_delivery` are refused and `restorable_physical` accepted; without an undo handler, every class is refused. `confirmation_and_undo_handler_follow_the_tier`. |
+| AC5 (I13, AD-48 / I18, AD-8) | **Pass** | `a_tier_h_tool_is_refused` (with and without a network effect, each class); the `assert_valid` example of a tier H tool in a `const` item (`compile_fail`, E0080). `no_h_action_of_the_document_is_reachable_as_a_tool`: for every H and `n/a` row of `doc/capability-matrix.md`, a tool of tier 0 or 1 naming it is a `RowNotATool` difference, and a tool of tier H naming it is refused by `Registry::new` with `HumanOnlyTool`; it also checks that the actions AC5 names (pairing, recovery, token creation, provider configuration, plugin install, plugin rights) are such rows. `a_tool_cannot_implement_a_row_that_is_not_a_tools` on the fixture. |
+
+Mutations, each on the clone, with the file restored after each, the module API, Core and binary tests rerun with `--no-fail-fast`. The unmutated clone passed the same tests in the same setup. Each mutation made the named tests fail, 33 of 33 (31 by a script over the source, 2 on the binary by hand):
+- **Declaration rules (`vilicus-module-api`):**
+  - tier H accepted: `a_tier_h_tool_is_refused`, the tier H `compile_fail` example (which then builds), and `no_h_action_of_the_document_is_reachable_as_a_tool` (Core);
+  - tier 2 accepted: `a_tier_2_tool_is_refused_before_the_native_app` and the tier 2 `compile_fail` example;
+  - `crosses_partitions` accepted: `a_cross_partition_tool_is_refused_at_every_tier`;
+  - a network effect below tier 2 without a class, a class outside tier 1, a class without a network effect, each accepted: `a_network_effect_needs_tier_2_or_an_exception_class_at_tier_1`;
+  - light confirmation not required, undo handler not required, each: `exception_classes_require_their_confirmation_and_an_undo_handler`;
+  - light confirmation outside tier 1, an undo handler on a read, each accepted: `confirmation_and_undo_handler_follow_the_tier`;
+  - a row outside the module's sections, an invalid action text, unchecked section numbers, each: `matrix_sections_and_rows_are_checked`;
+  - arguments unchecked, duplicate tools accepted, each: `tool_names_arguments_and_undo_handlers_are_checked`.
+- **Registry and matrix check (`vilicus-core`):**
+  - one section claimed by two modules: `two_modules_cannot_claim_one_section`;
+  - a tool without its row not reported: `a_tool_without_a_row_and_a_row_without_a_tool_are_each_named`, `a_section_the_matrix_lacks_is_named`;
+  - a row without a tool not reported: the same first test, `claimed_rows_need_a_tool_and_one_tier`, `every_document_section_needs_a_tool_for_each_tool_row`;
+  - H, `n/a` and tier 2 rows taken as tool rows: `a_tool_cannot_implement_a_row_that_is_not_a_tools`, `no_h_action_of_the_document_is_reachable_as_a_tool`;
+  - `H` read as tier 1, `n/a` read as tier 0, each: nine matrix tests, `no_h_action_of_the_document_is_reachable_as_a_tool` among them;
+  - tier unchecked, confirmation unchecked, each: `a_tool_takes_its_rows_tier_and_confirmation`;
+  - a missing section not reported: `a_section_the_matrix_lacks_is_named`;
+  - a row of no single tier not reported: `claimed_rows_need_a_tool_and_one_tier`, `every_document_section_needs_a_tool_for_each_tool_row`;
+  - any confirmation cell starting with `none` or `light` read as that confirmation: `tier_and_confirmation_cells_read_as_the_legend_writes_them`;
+  - a repeated action, a repeated section, a missing Tier column, an unchecked cell count, each accepted by the reader: `an_unreadable_matrix_is_refused`.
+- **The shipped check (`vilicus`):**
+  - `doc/capability-matrix.md` with its section 2 Tier header renamed: `the_shipped_tool_table_matches_the_capability_matrix` fails with the reading error;
+  - a probe module in `REGISTRY` (the binary given a dependency on `vilicus-module-api`, built `--offline` since `Cargo.lock` then changes) claiming section 2 with one tool on a misnamed row: the same test fails and names the tool without its row and each of the five tier 0 and 1 rows of section 2 without a tool;
+  - the same module with a tier H tool: the binary's test build stops (E0080, `a tool is tier H, which is never a tool`); the plain `cargo build -p vilicus` passes, the registry being compiled with the tests only (Decisions).
+- Not shown by a mutation: that `network_effect` has no default, which is a property of the type; the E0063 `compile_fail` example shows it.

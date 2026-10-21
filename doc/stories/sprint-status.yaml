@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-16-2026 18:30
-last_updated: 10-21-2026 12:00
+last_updated: 10-21-2026 18:00
 project: Vilicus
 project_key: NOKEY
 tracking_system: file-system
@@ -68,7 +68,7 @@ development_status:
   epic-3: in-progress
   3-1-sqlcipher-storage-layer-and-connection-authorizer: done
   3-2-module-registry-and-record-envelope: done
-  3-3-tool-declarations-and-capability-matrix-check: ready-for-dev
+  3-3-tool-declarations-and-capability-matrix-check: review
   3-4-structured-field-validation-and-reviewed-vocabularies: ready-for-dev
   3-5-typed-record-writes-with-taint-and-data-type-stamping: ready-for-dev
   3-6-core-journal-tables-and-caller-idempotency: ready-for-dev

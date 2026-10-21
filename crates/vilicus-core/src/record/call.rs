@@ -1,16 +1,19 @@
 //! One call of a module through the typed record API (AD-9): every write of the call in one
 //! `BEGIN IMMEDIATE` transaction on the module file's write handle, each stamped by the Core and
 //! journaled in the same transaction (AD-26), the call deduplicated by its caller's `call_id`
-//! (AD-28), its effect intents written to the outbox and the event it consumes recorded with it.
+//! (AD-28), its effect intents, events and link requests written to the outbox (AD-10, AD-29)
+//! and the event it consumes recorded with it.
 
 use vilicus_module_api::{
     FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written, is_identifier,
+    topic_module,
 };
 use vilicus_storage::{
-    AuthorityKind, CallKey, EffectIntent, Handle, JournalEntry, JournalRow, SqlValue, Write,
+    AuthorityKind, CallKey, EffectIntent, EventIntent, Handle, JournalEntry, JournalRow,
+    LinkIntent, SqlValue, Write,
 };
 use vilicus_types::{
-    CallId, DataType, EffectiveTaint, Id, Principal, Rev, Source, Taint, UtcMillis,
+    CallId, DataType, EffectiveTaint, Id, ModuleName, Principal, Rev, Source, Taint, UtcMillis,
 };
 
 use super::envelope::{self, data_types_text};
@@ -265,6 +268,7 @@ pub fn run_call<T>(
             started,
             stamper,
             changes: Vec::new(),
+            removed: Vec::new(),
             effects: Vec::new(),
             refusal: None,
         };
@@ -376,6 +380,16 @@ fn journaled_authority(authority: &Authority) -> (AuthorityKind, Option<Id>) {
     }
 }
 
+/// The author of the call's writes, as the conventions give it: the member who made or approved
+/// them, or the author an unapproved call names (the validating adult of a rule, the emitting
+/// call's author for an event, the member an AI task acts for).
+fn call_author(authority: &Authority) -> Option<Id> {
+    match *authority {
+        Authority::OwnAction { member } | Authority::Approved { member, .. } => Some(member),
+        Authority::Unapproved { author, .. } => author,
+    }
+}
+
 /// Whom an `unknown` outcome of the call's effect is reported to: the member the journal names;
 /// when it names none (a rule, an event, an adapter, a display, a plugin acting for nobody), every
 /// adult of the household, the call's author first when it has one, the adult who validated the
@@ -445,6 +459,9 @@ struct CallRecords<'a> {
     started: UtcMillis,
     stamper: &'a mut dyn Stamper,
     changes: Vec<RecordChange>,
+    /// The provenance of each record the call deleted, read before the delete: what an event
+    /// about the deletion carries.
+    removed: Vec<RecordProvenance>,
     effects: Vec<RequestedEffect>,
     /// The first refused write of the call, which ends it.
     refusal: Option<RecordError>,
@@ -482,6 +499,19 @@ impl Records for CallRecords<'_> {
         payload: &[u8],
     ) -> Result<Id, WriteError> {
         self.attempt(|records| records.request(effect, idempotency_key, payload))
+    }
+
+    fn emit(&mut self, topic: &str, record: Id, payload: &[u8]) -> Result<Id, WriteError> {
+        self.attempt(|records| records.emit_event(topic, record, payload))
+    }
+
+    fn request_link(
+        &mut self,
+        record: Id,
+        target_module: &str,
+        target: Id,
+    ) -> Result<Id, WriteError> {
+        self.attempt(|records| records.link(record, target_module, target))
     }
 }
 
@@ -639,6 +669,9 @@ impl CallRecords<'_> {
             .next()
             .ok_or(RecordError::RecordNotFound { table: table.name })?;
         let rev = stored_rev(table, row.into_iter().next().map(from_stored))?;
+        if let Some(provenance) = self.read_in_table(table, id)? {
+            self.removed.push(provenance);
+        }
         let before = journal::image(self.handle, table, id)?;
         self.handle
             .execute_values(&format!("DELETE FROM {} WHERE id = ?1", table.name), &key)?;
@@ -700,6 +733,9 @@ impl CallRecords<'_> {
         idempotency_key: &[u8],
         payload: &[u8],
     ) -> Result<Id, RecordError> {
+        if self.call.principal == Principal::Event {
+            return Err(RecordError::NotInConsumer);
+        }
         if !is_identifier(effect) || idempotency_key.is_empty() {
             return Err(RecordError::InvalidEffect);
         }
@@ -732,6 +768,101 @@ impl CallRecords<'_> {
             });
         }
         Ok(intent.id)
+    }
+
+    /// Writes an event of `topic` about `record` to the outbox (AD-10, AD-29): the topic is one the
+    /// module declares, so the emitter is the module whose call this is, and the payload version
+    /// is the topic's current one. The event carries the provenance of `record` as the call leaves
+    /// it, raised to what the call itself derives from ([`provenance::call_floor`]), without its
+    /// free text, and the call's author and member: what a consumer's call derives from (AD-27,
+    /// D147). A consumer's call emits nothing.
+    fn emit_event(&mut self, topic: &str, record: Id, payload: &[u8]) -> Result<Id, RecordError> {
+        if self.call.principal == Principal::Event {
+            return Err(RecordError::NotInConsumer);
+        }
+        let declared = self
+            .module
+            .topic(topic)
+            .ok_or_else(|| match topic_module(topic) {
+                Some(emitter) if emitter != self.module.name => RecordError::ForeignTopic,
+                _ => RecordError::UnknownTopic,
+            })?;
+        let mut provenance = self.changed_record(record)?;
+        let floor = provenance::call_floor(self.call);
+        provenance.labels = provenance.labels.most_restrictive(floor);
+        provenance.free_text = Vec::new();
+        let encoded = journal::encode_inputs(std::slice::from_ref(&provenance), &[])?;
+        let now = self.stamper.now();
+        let id =
+            Id::new_v7(now, self.stamper.id_random()).map_err(|_| RecordError::InvalidEvent)?;
+        let (_, member) = journaled_authority(&self.call.authority);
+        self.handle.append_event(&EventIntent {
+            call: self.key,
+            request_hash: self.request_hash.as_ref().map(<[u8; 32]>::as_slice),
+            id,
+            topic: declared.name,
+            version: declared.version,
+            record,
+            provenance: &encoded,
+            author: call_author(&self.call.authority),
+            member,
+            payload,
+            created_at: self.started,
+        })?;
+        Ok(id)
+    }
+
+    /// Writes a request to link `record`, which the call inserted or updated, to `target` of
+    /// `target_module` (AD-10). The Core registers it after the commit, in the link table of the
+    /// partition, once it finds `target` in that module's file of the same partition.
+    fn link(&mut self, record: Id, target_module: &str, target: Id) -> Result<Id, RecordError> {
+        if !ModuleName::is_valid(target_module) || target_module == self.module.name {
+            return Err(RecordError::InvalidLink);
+        }
+        let kept = self
+            .changes
+            .iter()
+            .rev()
+            .find(|change| change.id == record)
+            .is_some_and(|change| change.after.is_some());
+        if !kept {
+            return Err(RecordError::UnchangedRecord);
+        }
+        let now = self.stamper.now();
+        let id = Id::new_v7(now, self.stamper.id_random()).map_err(|_| RecordError::InvalidLink)?;
+        let (_, member) = journaled_authority(&self.call.authority);
+        self.handle.append_link(&LinkIntent {
+            call: self.key,
+            request_hash: self.request_hash.as_ref().map(<[u8; 32]>::as_slice),
+            id,
+            record,
+            target_module,
+            target,
+            member,
+            created_at: self.started,
+        })?;
+        Ok(id)
+    }
+
+    /// The provenance of `record`, which the call changed, as the call leaves it: read from the
+    /// file when the record is there, or as it was read before the call deleted it.
+    fn changed_record(&self, record: Id) -> Result<RecordProvenance, RecordError> {
+        let change = self
+            .changes
+            .iter()
+            .rev()
+            .find(|change| change.id == record)
+            .ok_or(RecordError::UnchangedRecord)?;
+        let found = if change.after.is_some() {
+            self.read_in_file(record)?
+        } else {
+            self.removed
+                .iter()
+                .rev()
+                .find(|removed| removed.id == record)
+                .cloned()
+        };
+        found.ok_or(RecordError::UnchangedRecord)
     }
 
     /// The provenance of each input, each id once: the snapshot the call carries when the id is
@@ -794,26 +925,41 @@ impl CallRecords<'_> {
     /// it, its free text included.
     fn read_in_file(&self, id: Id) -> Result<Option<RecordProvenance>, RecordError> {
         for table in self.module.tables {
-            let columns: Vec<&str> = PROVENANCE_COLUMNS
-                .into_iter()
-                .chain(table.fields.iter().map(|field| field.name))
-                .collect();
-            let rows = self.handle.query_values(
-                &format!(
-                    "SELECT {} FROM {} WHERE id = ?1",
-                    columns.join(", "),
-                    table.name
-                ),
-                &[SqlValue::Blob(id.to_bytes().to_vec())],
-            )?;
-            if let Some(row) = rows.into_iter().next() {
-                let mut values = row.into_iter().map(from_stored);
-                let mut provenance = provenance_of(table, id, &mut values)?;
-                provenance.free_text = free_text_of(table, values);
+            if let Some(provenance) = self.read_in_table(table, id)? {
                 return Ok(Some(provenance));
             }
         }
         Ok(None)
+    }
+
+    /// The provenance of the record `id` of `table`, its free text included, if the table holds
+    /// it.
+    fn read_in_table(
+        &self,
+        table: &'static Table,
+        id: Id,
+    ) -> Result<Option<RecordProvenance>, RecordError> {
+        let columns: Vec<&str> = PROVENANCE_COLUMNS
+            .into_iter()
+            .chain(table.fields.iter().map(|field| field.name))
+            .collect();
+        let rows = self.handle.query_values(
+            &format!(
+                "SELECT {} FROM {} WHERE id = ?1",
+                columns.join(", "),
+                table.name
+            ),
+            &[SqlValue::Blob(id.to_bytes().to_vec())],
+        )?;
+        match rows.into_iter().next() {
+            Some(row) => {
+                let mut values = row.into_iter().map(from_stored);
+                let mut provenance = provenance_of(table, id, &mut values)?;
+                provenance.free_text = free_text_of(table, values);
+                Ok(Some(provenance))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -975,8 +1121,14 @@ fn write_error(error: &RecordError) -> WriteError {
         RecordError::TooManyInputs { table } => WriteError::TooManyInputs { table },
         RecordError::InvalidEffect => WriteError::InvalidEffect,
         RecordError::EffectConflict => WriteError::EffectConflict,
+        RecordError::UnknownTopic => WriteError::UnknownTopic,
+        RecordError::ForeignTopic => WriteError::ForeignTopic,
+        RecordError::UnchangedRecord => WriteError::UnchangedRecord,
+        RecordError::InvalidLink => WriteError::InvalidLink,
+        RecordError::NotInConsumer => WriteError::NotInConsumer,
         RecordError::IdChanged { .. }
         | RecordError::InvalidJournal
+        | RecordError::InvalidEvent
         | RecordError::CallIdReused
         | RecordError::InvalidEnvelope { .. }
         | RecordError::UnknownVocabulary { .. }

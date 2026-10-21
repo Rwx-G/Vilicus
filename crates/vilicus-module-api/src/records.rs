@@ -9,6 +9,10 @@
 //!
 //! A module never performs an outbound effect: it requests one, with a business idempotency key
 //! derived from the effect's parameters, and the Core performs it after the call commits (AD-28).
+//! Nor does it reach another module's file: it emits an event about a record it changed, which
+//! the Core delivers to the consumers the topic allows once the call commits, or requests a link
+//! from such a record to a record of another module, which the Core registers in the link table
+//! of the partition after the commit (AD-10, AD-29).
 //!
 //! A module's code holds a `&mut dyn Records` for the duration of one call:
 //!
@@ -84,6 +88,27 @@ pub trait Records {
         effect: &str,
         idempotency_key: &[u8],
         payload: &[u8],
+    ) -> Result<Id, WriteError>;
+
+    /// Emits an event of `topic`, one of the module's own topics, about `record`, a record this
+    /// call inserted, updated or deleted, with `payload` encoded at the topic's current version
+    /// (AD-29). The event is written in the call's transaction and delivered after the commit;
+    /// it is never delivered when the call is rolled back. The Core stamps the emitter, the
+    /// payload version and the provenance of `record` as the call leaves it, which every write of
+    /// a consumer derives from (AD-27). A topic of another module is
+    /// [`WriteError::ForeignTopic`]. Returns the id of the event.
+    fn emit(&mut self, topic: &str, record: Id, payload: &[u8]) -> Result<Id, WriteError>;
+
+    /// Requests a link from `record`, a record this call inserted or updated, to the record
+    /// `target` of the module `target_module` in the same partition (AD-10). The request is
+    /// written in the call's transaction; the Core registers the link in the partition's link
+    /// table after the commit, never in this transaction, and only when `target` is a record of
+    /// that module in the same partition. Returns the id of the request.
+    fn request_link(
+        &mut self,
+        record: Id,
+        target_module: &str,
+        target: Id,
     ) -> Result<Id, WriteError>;
 }
 
@@ -182,6 +207,18 @@ pub enum WriteError {
     /// An effect request of a name and key the file holds for another request: one key names one
     /// effect, with one payload, of one caller.
     EffectConflict,
+    /// An event of a topic the module does not declare.
+    UnknownTopic,
+    /// An event of a topic of another module: the Core stamps the real emitter, and a claim of
+    /// another is refused (D20).
+    ForeignTopic,
+    /// An event or a link request about a record this call did not change.
+    UnchangedRecord,
+    /// A link request to a module that is not a module name, or to the module itself.
+    InvalidLink,
+    /// A consumer's call requested an outbound effect or emitted an event: a write in reaction to
+    /// an event is at most tier 1 (AD-27, D20), and an event does not trigger another.
+    NotInConsumer,
     /// An earlier write of this call was refused; the call is rolled back.
     CallRefused,
     /// The Core could not complete the write; the call is rolled back.
@@ -239,6 +276,17 @@ impl fmt::Display for WriteError {
             }
             Self::EffectConflict => {
                 formatter.write_str("an effect of that name and key exists for another request")
+            }
+            Self::UnknownTopic => formatter.write_str("the module declares no such topic"),
+            Self::ForeignTopic => formatter.write_str("a topic of another module"),
+            Self::UnchangedRecord => {
+                formatter.write_str("an event or a link about a record the call did not change")
+            }
+            Self::InvalidLink => {
+                formatter.write_str("a link needs another module's name as its target module")
+            }
+            Self::NotInConsumer => {
+                formatter.write_str("a consumer of an event requests no effect and emits no event")
             }
             Self::CallRefused => formatter.write_str("an earlier write of this call was refused"),
             Self::Failed => formatter.write_str("the write failed and the call was rolled back"),

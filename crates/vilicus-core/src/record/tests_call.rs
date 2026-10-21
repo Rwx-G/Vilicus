@@ -71,17 +71,17 @@ pub(super) fn notes_module() -> &'static ModuleDeclaration {
     )
 }
 
-pub(super) fn member_id(last: u8) -> Id {
+pub(crate) fn member_id(last: u8) -> Id {
     let mut random = [0x3c; 10];
     random[9] = last;
     Id::new_v7(noon(), random).expect("after the epoch")
 }
 
-pub(super) fn ella() -> Id {
+pub(crate) fn ella() -> Id {
     member_id(1)
 }
 
-pub(super) fn noe() -> Id {
+pub(crate) fn noe() -> Id {
     member_id(2)
 }
 
@@ -90,17 +90,17 @@ pub(super) fn task() -> Id {
 }
 
 /// A clock that moves only when a test moves it, and distinct random bits for each new id.
-pub(super) struct TestStamper {
+pub(crate) struct TestStamper {
     now: UtcMillis,
     issued: u32,
 }
 
 impl TestStamper {
-    pub(super) fn at(now: UtcMillis) -> Self {
+    pub(crate) fn at(now: UtcMillis) -> Self {
         Self { now, issued: 0 }
     }
 
-    pub(super) fn later(&mut self, millis: i64) {
+    pub(crate) fn later(&mut self, millis: i64) {
         self.now = UtcMillis::from_millis(self.now.as_millis() + millis).expect("in range");
     }
 }

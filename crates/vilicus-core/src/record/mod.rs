@@ -59,9 +59,9 @@ mod provenance;
 #[cfg(test)]
 mod inspect;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
-mod tests_call;
+pub(crate) mod tests_call;
 #[cfg(test)]
 mod tests_deletion;
 #[cfg(test)]
@@ -87,6 +87,7 @@ pub use effect::{
 };
 #[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
+pub(crate) use journal::decode_provenance;
 pub use journal::{
     INPUT_COLUMNS, JournaledInput, Row, decode_inputs, decode_row, journal_retention,
     purge_expired_journal,
@@ -223,6 +224,20 @@ pub enum RecordError {
     /// A call whose principal, `source` and `call_id` name an earlier call of the file that
     /// carried another request hash: the call id is reused for another request.
     CallIdReused,
+    /// An event of a topic the module does not declare (AD-29).
+    UnknownTopic,
+    /// An event of a topic of another module: the Core stamps the real emitter, and a claim of
+    /// another is refused (D20).
+    ForeignTopic,
+    /// An event or a link request about a record the call did not change.
+    UnchangedRecord,
+    /// A link request whose target module is not a module name, or is the module itself (AD-10).
+    InvalidLink,
+    /// A consumer's call requested an outbound effect or emitted an event: a write in reaction to
+    /// an event is at most tier 1 (AD-27, D20), and an event does not trigger another.
+    NotInConsumer,
+    /// An event's provenance in the outbox does not decode.
+    InvalidEvent,
     /// The module's code ended the call with its own error; the call was rolled back.
     Aborted(WriteError),
     /// The storage layer failed; the transaction was rolled back.
@@ -307,6 +322,18 @@ impl fmt::Display for RecordError {
                 formatter.write_str("an effect of that name and key exists for another request")
             }
             Self::CallIdReused => formatter.write_str("the call id names another request"),
+            Self::UnknownTopic => formatter.write_str("the module declares no such topic"),
+            Self::ForeignTopic => formatter.write_str("a topic of another module"),
+            Self::UnchangedRecord => {
+                formatter.write_str("an event or a link about a record the call did not change")
+            }
+            Self::InvalidLink => {
+                formatter.write_str("a link needs another module's name as its target module")
+            }
+            Self::NotInConsumer => {
+                formatter.write_str("a consumer of an event requests no effect and emits no event")
+            }
+            Self::InvalidEvent => formatter.write_str("an event of the outbox is malformed"),
             Self::Aborted(error) => write!(formatter, "the module ended the call: {error}"),
             Self::Storage(error) => write!(formatter, "{error}"),
         }

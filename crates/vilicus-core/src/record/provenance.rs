@@ -239,6 +239,22 @@ pub(crate) fn floor(call: &Call, inputs: &[RecordProvenance]) -> Vec<DataType> {
     )
 }
 
+/// The labels at least of everything `call` emits (AD-7, D20): `external` for content from
+/// outside the household (a plugin, a device adapter), whatever it emits about; otherwise its
+/// session taint and, for an AI or plugin session, the taint of what it consumed. An event about
+/// a record carries the most restrictive of these and of the record's own labels.
+pub(crate) fn call_floor(call: &Call) -> RecordLabels {
+    if is_outside_content(call.principal) {
+        return RecordLabels::EXTERNAL;
+    }
+    let taint = if consumes(call) {
+        most_restrictive(call.session, stored_taint(call.consumed.taint))
+    } else {
+        call.session
+    };
+    RecordLabels::of(taint, taint.into())
+}
+
 /// True for the principals whose session's consumption every write of theirs holds (AD-7): an AI
 /// task and a plugin, whose inputs are declared by code the model or the plugin drives.
 fn consumes(call: &Call) -> bool {

@@ -24,7 +24,10 @@ use std::time::Duration;
 
 use vilicus_module_api::{ENVELOPE, Table, Value};
 use vilicus_storage::{Handle, JournalPurge, Partition, SqlValue, Write};
-use vilicus_types::{HOME_JOURNAL_RETENTION, Id, UNDO_JOURNAL_RETENTION, UtcMillis};
+use vilicus_types::{
+    DataType, HOME_JOURNAL_RETENTION, Id, RecordLabels, Taint, TextTaint, UNDO_JOURNAL_RETENTION,
+    UtcMillis,
+};
 
 use super::envelope::data_types_text;
 use super::provenance::RecordProvenance;
@@ -293,6 +296,46 @@ pub fn decode_inputs(bytes: &[u8]) -> Result<Vec<JournaledInput>, RecordError> {
     }
     reader.finish()?;
     Ok(inputs)
+}
+
+/// The provenance of an event's emitting record, as the outbox keeps it in the encoding of the
+/// inputs (one input): the snapshot a consumer's call carries as its implicit input (AD-27,
+/// D147), without free text. Anything else is [`RecordError::InvalidEvent`].
+pub(crate) fn decode_provenance(bytes: &[u8]) -> Result<RecordProvenance, RecordError> {
+    let invalid = |_| RecordError::InvalidEvent;
+    let [input] = <[JournaledInput; 1]>::try_from(decode_inputs(bytes).map_err(invalid)?)
+        .map_err(|_| RecordError::InvalidEvent)?;
+    let taint = Taint::ALL
+        .iter()
+        .copied()
+        .find(|taint| taint.as_str() == input.taint);
+    let text_taint = TextTaint::ALL
+        .iter()
+        .copied()
+        .find(|text_taint| text_taint.as_str() == input.text_taint);
+    let labels = taint
+        .zip(text_taint)
+        .and_then(|(taint, text_taint)| RecordLabels::new(taint, text_taint))
+        .ok_or(RecordError::InvalidEvent)?;
+    let data_types = input
+        .data_types
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            DataType::ALL
+                .iter()
+                .copied()
+                .find(|data_type| data_type.as_str() == name)
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(RecordError::InvalidEvent)?;
+    Ok(RecordProvenance {
+        id: input.id,
+        labels,
+        author: input.author,
+        data_types,
+        free_text: Vec::new(),
+    })
 }
 
 /// How long journal entries are kept in a partition (AD-26, D113): 30 days in personal and

@@ -42,11 +42,11 @@ fn update(
 }
 
 /// Test key only; the Core derives one key per file.
-pub(super) const KEY: [u8; 32] = [0x4d; 32];
+pub(crate) const KEY: [u8; 32] = [0x4d; 32];
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
-pub(super) fn scratch_dir(label: &str) -> PathBuf {
+pub(crate) fn scratch_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "vilicus-core-record-{}-{}-{label}",
         std::process::id(),
@@ -114,7 +114,7 @@ const PLACE_FIELDS: &[Field] = &[
 
 /// The `CREATE TABLE` statement a declaration implies, without `STRICT`: field validation is the
 /// only guard on these tables, as on a table a later migration adds a column to.
-pub(super) fn create_sql(table: &Table) -> String {
+pub(crate) fn create_sql(table: &Table) -> String {
     let columns: Vec<String> = ENVELOPE
         .iter()
         .map(|column| {
@@ -213,7 +213,7 @@ pub(super) fn adult() -> Id {
         .expect("test id")
 }
 
-pub(super) fn noon() -> UtcMillis {
+pub(crate) fn noon() -> UtcMillis {
     UtcMillis::parse_rfc3339("2026-10-21T12:00:00Z").expect("valid")
 }
 
@@ -316,7 +316,7 @@ pub(super) fn content(handle: &Handle<Write>) -> Vec<Vec<Vec<SqlValue>>> {
 
 /// A connection to `file` keyed with [`KEY`] and nothing else: no setup, no authorizer. Test code
 /// only, to read what no handle reads.
-pub(super) fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
+pub(crate) fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
     let connection =
         rusqlite::Connection::open(file.path()).expect("open without the storage layer");
     let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -327,7 +327,7 @@ pub(super) fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
 }
 
 /// Every row `sql` returns on a raw connection, each column in its storage class.
-pub(super) fn raw_rows(connection: &rusqlite::Connection, sql: &str) -> Vec<Vec<SqlValue>> {
+pub(crate) fn raw_rows(connection: &rusqlite::Connection, sql: &str) -> Vec<Vec<SqlValue>> {
     let mut statement = connection.prepare(sql).expect("prepare");
     let columns = statement.column_count();
     statement

@@ -9,8 +9,10 @@
 //! [`registry`] holds the modules compiled into the binary and checks every module file against
 //! its declaration; [`record`] runs a module's writes through the typed record API, stamping each
 //! record's envelope, taint and data types, and holds every field a write gives to its
-//! declaration (FR-18, FR-58, AD-6, AD-7).
+//! declaration (FR-18, FR-58, AD-6, AD-7); [`bus`] delivers the events and link requests of a
+//! module file's outbox once its call committed (FR-24, AD-10, AD-27, AD-29).
 
 pub mod alert;
+pub mod bus;
 pub mod record;
 pub mod registry;

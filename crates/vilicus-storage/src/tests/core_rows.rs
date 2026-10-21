@@ -753,3 +753,22 @@ fn a_panic_under_the_core_policy_restores_the_role_policy() {
         "{refused:?}"
     );
 }
+
+/// D148: module SQL reads no Core table but `_meta` and `_vocabulary`, so every other Core table,
+/// one a later story adds included, is private, and the refusals above cover it.
+#[test]
+fn every_core_table_but_meta_and_vocabulary_is_private() {
+    let readable = ["_meta", "_vocabulary"];
+    for table in CORE_TABLES {
+        assert_eq!(
+            CORE_PRIVATE_TABLES.contains(table),
+            !readable.contains(table),
+            "{table}"
+        );
+    }
+    assert!(
+        CORE_PRIVATE_TABLES
+            .iter()
+            .all(|table| CORE_TABLES.contains(table))
+    );
+}

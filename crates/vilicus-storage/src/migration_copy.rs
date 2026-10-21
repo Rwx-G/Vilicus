@@ -321,7 +321,7 @@ pub fn copy_for_migration(
             core: handle::read_schema_version(&connection, MigrationTrack::Core)?,
             module: handle::read_schema_version(&connection, MigrationTrack::Module)?,
         };
-        handle::checkpoint_until_empty(file, &connection).map(|_| from)
+        handle::checkpoint_until_empty(file, &connection, None).map(|_| from)
     });
     let closed = handle::checkpoint_and_close(connection);
     let from = read.and_then(|from| closed.map(|()| from))?;

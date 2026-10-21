@@ -52,8 +52,9 @@ pub use event::{
 };
 pub use file::{KeyEpoch, ModuleFile, Partition, read_epoch};
 pub use handle::{
-    BUSY_TIMEOUT, CHECKPOINT_ATTEMPTS, Handle, Inspect, JOURNAL_SIZE_LIMIT, Migration,
-    MigrationTrack, Read, Role, RoleKind, Settings, Write, create, open,
+    BUSY_TIMEOUT, CHECKPOINT_ATTEMPTS, CheckpointRetryObserver, Handle, Inspect,
+    JOURNAL_SIZE_LIMIT, Migration, MigrationTrack, Read, Role, RoleKind, Settings, Write, create,
+    open,
 };
 pub use journal::{AuthorityKind, CallKey, JournalEntry, JournalPurge, JournalRow};
 pub use migration::FrozenMigration;

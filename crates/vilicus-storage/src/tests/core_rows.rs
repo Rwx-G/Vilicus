@@ -6,15 +6,14 @@
 
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use vilicus_types::{EffectOutcome, Id, Principal, Rev, Source, UtcMillis};
 
 use super::{EPOCH, KEY, create_module_file, raw_connection, scratch_dir};
 use crate::error::Error;
 use crate::{
-    AuthorityKind, CHECKPOINT_ATTEMPTS, CORE_PRIVATE_TABLES, CORE_TABLES, CallKey, EffectIntent,
-    EffectState, JournalEntry, Migration, ModuleFile, Read, Write, create, open,
+    AuthorityKind, CORE_PRIVATE_TABLES, CORE_TABLES, CallKey, EffectIntent, EffectState,
+    JournalEntry, Migration, ModuleFile, Read, Write, create, open,
 };
 
 /// The statements module SQL might run against the Core table `table`, whose first column is
@@ -296,10 +295,17 @@ fn the_purge_deletes_the_rows_before_the_cutoff_and_empties_the_wal() {
 
 /// AC8 of Story 3.6, at the storage layer: a reader holding a snapshot keeps the purge's TRUNCATE
 /// checkpoint busy; the purge retries, and completes once the reader ends within the attempts.
-/// A reader that outlasts them makes the purge fail rather than claim the rows are gone.
+/// A reader that outlasts them makes the purge fail rather than claim the rows are gone. The
+/// reader ends once the purge reports a busy attempt, or after the purge returned, never on a
+/// timer.
 #[test]
 fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
-    let writer = new_writer("journal-purge-reader");
+    let mut writer = new_writer("journal-purge-reader");
+    let (busy, retried) = mpsc::channel::<()>();
+    writer.observe_checkpoint_retries(Box::new(move |_| {
+        // The reader of the first purge waits for one; later sends find no receiver.
+        let _ = busy.send(());
+    }));
     let source = Source::Member(id(1));
     let call = CallKey {
         principal: Principal::Member,
@@ -323,7 +329,7 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
         writer.execute_batch("COMMIT").expect("commit");
     }
 
-    let hold_reader = |hold: Duration| {
+    let hold_reader = |release: mpsc::Receiver<()>| {
         let file = file.clone();
         let (ready, started) = mpsc::channel();
         let reader = thread::spawn(move || {
@@ -333,7 +339,7 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
                 .query_row("SELECT count(*) FROM _meta", [], |row| row.get(0))
                 .expect("take a snapshot");
             ready.send(()).expect("signal");
-            thread::sleep(hold);
+            release.recv().expect("released");
             reader.execute_batch("COMMIT").expect("end the snapshot");
             reader.close().expect("close");
         });
@@ -341,7 +347,7 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
         reader
     };
 
-    let reader = hold_reader(Duration::from_millis(250));
+    let reader = hold_reader(retried);
     let purge = writer
         .purge_journal(at(1))
         .expect("completes once the reader ends");
@@ -362,8 +368,10 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
         ))
         .expect("journal");
     writer.execute_batch("COMMIT").expect("commit");
-    let reader = hold_reader(Duration::from_millis(u64::from(CHECKPOINT_ATTEMPTS) * 400));
+    let (end, ended) = mpsc::channel();
+    let reader = hold_reader(ended);
     let outlasted = writer.purge_journal(at(1));
+    end.send(()).expect("the reader waits");
     reader.join().expect("reader");
     assert!(
         matches!(
@@ -686,6 +694,7 @@ fn a_shredding_whose_checkpoint_failed_is_finished_by_its_retry() {
         .store_wrapped_record_key(id(81), b"wrapped key bytes")
         .expect("store");
     let (ready, started) = mpsc::channel();
+    let (end, ended) = mpsc::channel::<()>();
     let reader = thread::spawn(move || {
         let reader = open::<Read>(&file, &KEY).expect("open reader");
         reader.execute_batch("BEGIN").expect("begin");
@@ -693,12 +702,13 @@ fn a_shredding_whose_checkpoint_failed_is_finished_by_its_retry() {
             .query_row("SELECT count(*) FROM _meta", [], |row| row.get(0))
             .expect("take a snapshot");
         ready.send(()).expect("signal");
-        thread::sleep(Duration::from_millis(u64::from(CHECKPOINT_ATTEMPTS) * 400));
+        ended.recv().expect("released once the shredding returned");
         reader.execute_batch("COMMIT").expect("end the snapshot");
         reader.close().expect("close");
     });
     started.recv().expect("the reader holds its snapshot");
     let failed = writer.destroy_wrapped_record_key(id(81));
+    end.send(()).expect("the reader waits");
     assert!(
         matches!(
             failed,

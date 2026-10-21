@@ -6,7 +6,6 @@
 
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use vilicus_module_api::{DataType, Field, FieldKind, ModuleDeclaration, Structured, Table, Value};
 use vilicus_storage::{Handle, MigrationTrack, ModuleFile, Partition, Read, Write};
@@ -305,15 +304,21 @@ fn the_home_partition_keeps_its_journal_a_day() {
 /// AC8 (E17, gate E17-2): a reader holding an old snapshot keeps the purge's TRUNCATE checkpoint
 /// busy; the purge retries it, and once the reader ends the WAL is empty and no deleted value
 /// remains. A reader that outlasts every attempt makes the purge fail, its deleted values still
-/// in the WAL, until the next checkpoint after the reader ends.
+/// in the WAL, until the next checkpoint after the reader ends. The reader ends once the purge
+/// reports a busy attempt, or once the purge returned, never on a timer.
 #[test]
 fn the_purge_checkpoint_waits_for_a_reader_and_completes_once_it_ends() {
     let module = vault();
-    for (hold, completes) in [
-        (Duration::from_millis(300), true),
-        (Duration::from_secs(4), false),
-    ] {
-        let (file, handle) = open_in(module, Partition::Household, "retention-reader");
+    for completes in [true, false] {
+        let (file, mut handle) = open_in(module, Partition::Household, "retention-reader");
+        let (end, ended) = mpsc::channel::<()>();
+        if completes {
+            let busy = end.clone();
+            handle.observe_checkpoint_retries(Box::new(move |_| {
+                // The reader waits for the first; later sends find no receiver.
+                let _ = busy.send(());
+            }));
+        }
         let start = noon();
         let mut clock = Clock::at(start);
         let recent = UtcMillis::from_millis(start.as_millis() + 29 * DAY).expect("in range");
@@ -328,7 +333,7 @@ fn the_purge_checkpoint_waits_for_a_reader_and_completes_once_it_ends() {
                 .query_row("SELECT count(*) FROM secrets", [], |row| row.get(0))
                 .expect("take a snapshot");
             ready.send(()).expect("signal");
-            thread::sleep(hold);
+            ended.recv().expect("released");
             reader.execute_batch("COMMIT").expect("end the snapshot");
             reader.close().expect("close the reader");
         });
@@ -357,6 +362,7 @@ fn the_purge_checkpoint_waits_for_a_reader_and_completes_once_it_ends() {
                 workload.expired.found_in(&still.wal) > 0,
                 "while the reader holds its snapshot, deleted values stay in the WAL"
             );
+            end.send(()).expect("the reader waits");
             reader.join().expect("reader");
             handle
                 .checkpoint_truncate()

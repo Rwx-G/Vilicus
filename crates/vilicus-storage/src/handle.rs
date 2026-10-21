@@ -388,9 +388,18 @@ pub(crate) fn wal_of_is_empty(wal: &Path) -> Result<bool> {
     }
 }
 
+/// What a handle calls after each TRUNCATE checkpoint attempt that stayed busy or left WAL
+/// content, with the attempt's number from 1, before it pauses and tries again.
+pub type CheckpointRetryObserver = Box<dyn Fn(u32) + Send>;
+
 /// TRUNCATE checkpoints through the C API until one reports not busy and the WAL is empty
 /// (D132, E17), at most [`CHECKPOINT_ATTEMPTS`] times; returns the number of attempts made.
-pub(crate) fn checkpoint_until_empty(file: &ModuleFile, connection: &Connection) -> Result<u32> {
+/// `observer` hears of each attempt that must be retried.
+pub(crate) fn checkpoint_until_empty(
+    file: &ModuleFile,
+    connection: &Connection,
+    observer: Option<&CheckpointRetryObserver>,
+) -> Result<u32> {
     let mut last = None;
     for attempt in 0..CHECKPOINT_ATTEMPTS {
         if attempt > 0 {
@@ -399,6 +408,9 @@ pub(crate) fn checkpoint_until_empty(file: &ModuleFile, connection: &Connection)
         let frames = ffi::checkpoint_truncate(connection)?;
         if !frames.busy && wal_is_empty(file)? {
             return Ok(attempt + 1);
+        }
+        if let Some(observer) = observer {
+            observer(attempt + 1);
         }
         last = Some(frames);
     }
@@ -413,7 +425,12 @@ pub(crate) fn checkpoint_until_empty(file: &ModuleFile, connection: &Connection)
 /// failure after every attempt carries the `deleted` rows the caller committed, since they are
 /// gone from the tables yet maybe still in the WAL.
 pub(crate) fn checkpoint_after_delete(handle: &Handle<Write>, deleted: usize) -> Result<u32> {
-    checkpoint_until_empty(handle.file(), handle.connection()).map_err(|error| match error {
+    checkpoint_until_empty(
+        handle.file(),
+        handle.connection(),
+        handle.checkpoint_retries.as_ref(),
+    )
+    .map_err(|error| match error {
         Error::CheckpointIncomplete { log, checkpointed } => Error::DeletedNotCheckpointed {
             deleted,
             log,
@@ -464,6 +481,7 @@ pub struct Handle<R: Role> {
     file: ModuleFile,
     epoch: KeyEpoch,
     settings: Settings,
+    checkpoint_retries: Option<CheckpointRetryObserver>,
     role: PhantomData<R>,
 }
 
@@ -606,6 +624,7 @@ impl<R: Role> Handle<R> {
             file: file.clone(),
             epoch,
             settings,
+            checkpoint_retries: None,
             role: PhantomData,
         })
     }
@@ -738,6 +757,13 @@ impl<R: Role> Drop for Handle<R> {
 }
 
 impl Handle<Write> {
+    /// Has `observer` called after each TRUNCATE checkpoint attempt of this handle that stays
+    /// busy or leaves WAL content, before the handle pauses and tries again: how the Core sees,
+    /// and a test waits for, a deletion's checkpoint held up by a reader (D132), without a timer.
+    pub fn observe_checkpoint_retries(&mut self, observer: CheckpointRetryObserver) {
+        self.checkpoint_retries = Some(observer);
+    }
+
     /// Checkpoints the WAL into the file with `sqlite3_wal_checkpoint_v2` in TRUNCATE mode, which
     /// the authorizer does not see, retried until it reports not busy and the WAL is empty
     /// (D132): the step after a deletion that must be real. `PRAGMA wal_checkpoint` is refused
@@ -745,7 +771,12 @@ impl Handle<Write> {
     /// ends, so a deletion that must be real needs short-lived readers; while one is open this
     /// returns [`Error::CheckpointIncomplete`] rather than claim the rows are gone.
     pub fn checkpoint_truncate(&self) -> Result<()> {
-        checkpoint_until_empty(&self.file, self.connection()).map(drop)
+        checkpoint_until_empty(
+            &self.file,
+            self.connection(),
+            self.checkpoint_retries.as_ref(),
+        )
+        .map(drop)
     }
 
     /// Writes a new key epoch (AD-5), in three durable steps: the pending sidecar

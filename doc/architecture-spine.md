@@ -454,7 +454,8 @@ Events to a consumer that is not ready stay in the source outbox and do not coun
 | tokio | 1.53.2 |
 | axum / hyper | 0.8.9 / 1.12.0 |
 | rustls (aws-lc-rs provider) / tokio-rustls | 0.23.46 / 0.26.6 |
-| rusqlite with `bundled-sqlcipher` | 0.40.2 (SQLCipher 4.14.0) |
+| rusqlite with `sqlcipher` (links the SQLCipher of `vilicus-storage`, D143) | 0.40.2 |
+| SQLCipher (vendored amalgamation, built by `vilicus-storage`, D143) | 4.19.0 (tag v4.19.0) |
 | webauthn-rs | 0.5.5 (feature `danger-allow-state-serialisation`, for the step-up challenge only) |
 | argon2 | 0.6.0, pinned exactly, without the `parallel` feature |
 | aws-lc-rs (AES-256-GCM, HKDF) | as pulled by rustls 0.23.46 |
@@ -618,7 +619,6 @@ ci/                        # Debian 13 VM harness for systemd-level tests
 
 - **Approved dependencies still to choose.** The passphrase-strength library (D113) and the S3-compatible client (AD-31, D106): approved by the owner; each package is chosen in its first story and added to the Stack with a pinned version.
 - **Public-key authentication construction** (AD-36): the principle is fixed by D74; the exact construction and the first member's case are settled by the key prototype, whose encodings are fixed in `doc/key-management.md` section 2 (D119, passed); the internal review and cross-test of the `hpke` crate (AD-18, D61) passed except their CI job (D120), and a member's first receipt of the household key is confirmed (D121); confirming a new HK version after a rotation is open (R55). **Inbox key authentication** (AD-37) is settled with the home milestone, when sealed inboxes ship, and does not gate V0.1 (D107).
-- **SQLCipher version.** The bundled 4.14.0 against a pinned self-built 4.19.x, after reading the changelog for security fixes; decided before V0.1 ships.
 - **Alignment controller.** Out of V0.1 (PRD 6.1); it plugs into AD-11 and AD-8. Delegation sub-keys, also out of V0.1, are bound by AD-43.
 - **Android app internals.** A native Kotlin app for pairing and signed confirmation after V0.1 (PRD section 6.2, step 8); whether the rest of its UI is native or the web client in a shell is decided when that milestone is planned. AD-13, AD-14 and AD-20 bind what it must respect.
 - **Desktop client.** After V1 (architecture section 15 and E7 mention Tauri).

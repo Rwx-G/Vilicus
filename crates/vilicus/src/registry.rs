@@ -11,11 +11,19 @@
 //! which CI builds and runs on every change: naming the Core in the binary itself links
 //! SQLCipher, and with it the system `libcrypto`, into an executable that does not use them yet.
 
+use vilicus_core::handlers::Handlers;
 use vilicus_core::registry::Registry;
 
 /// The modules the binary ships.
 pub(crate) const REGISTRY: Registry = match Registry::new(&[]) {
     Ok(registry) => registry,
+    Err(error) => panic!("{}", error.rule()),
+};
+
+/// The code of the modules the binary ships, bound to their declarations (AD-9): a module whose
+/// tool, undo handler or consumer has no function stops the build.
+pub(crate) const HANDLERS: Handlers = match Handlers::new(REGISTRY, &[]) {
+    Ok(handlers) => handlers,
     Err(error) => panic!("{}", error.rule()),
 };
 
@@ -25,7 +33,18 @@ mod tests {
 
     use vilicus_core::registry::CapabilityMatrix;
 
-    use super::REGISTRY;
+    use super::{HANDLERS, REGISTRY};
+
+    /// Story 3.9: the handler table binds the code of every module the binary ships.
+    #[test]
+    fn the_handler_table_binds_every_shipped_module() {
+        assert_eq!(HANDLERS.registry().modules(), REGISTRY.modules());
+        for module in REGISTRY.modules() {
+            if !module.tools.is_empty() || !module.consumers.is_empty() {
+                assert!(HANDLERS.code(module.name).is_some(), "{}", module.name);
+            }
+        }
+    }
 
     /// The capability matrix check of AD-9 on the shipped binary (Story 3.3, AC2): its tool table
     /// and `doc/capability-matrix.md` agree in both directions, and the matrix reads back.

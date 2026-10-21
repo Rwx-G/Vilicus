@@ -7,6 +7,7 @@
 //! in the executable links SQLCipher, and with it the system `libcrypto`, into an executable that
 //! does not use them yet.
 
+use vilicus_core::handlers::Handlers;
 use vilicus_core::registry::Registry;
 
 /// The modules the testbed links.
@@ -15,9 +16,16 @@ pub(crate) const REGISTRY: Registry = match Registry::new(&[]) {
     Err(error) => panic!("{}", error.rule()),
 };
 
+/// The code of the modules the testbed links, bound to their declarations (AD-9): a module whose
+/// tool, undo handler or consumer has no function stops the build.
+pub(crate) const HANDLERS: Handlers = match Handlers::new(REGISTRY, &[]) {
+    Ok(handlers) => handlers,
+    Err(error) => panic!("{}", error.rule()),
+};
+
 #[cfg(test)]
 mod tests {
-    use super::REGISTRY;
+    use super::{HANDLERS, REGISTRY};
 
     /// Test key only; the Core derives one key per file.
     const KEY: [u8; 32] = [0x7e; 32];
@@ -27,6 +35,17 @@ mod tests {
     /// their declarations; every one is refused and the file is unchanged afterwards. The labels
     /// of reviewed vocabularies are confirmed by the fuzz test in the files it creates, the only
     /// way a label is confirmed in V0.1 (AC5).
+    /// Story 3.9: the handler table binds the code of every module the testbed links.
+    #[test]
+    fn the_handler_table_binds_every_linked_module() {
+        assert_eq!(HANDLERS.registry().modules(), REGISTRY.modules());
+        for module in REGISTRY.modules() {
+            if !module.tools.is_empty() || !module.consumers.is_empty() {
+                assert!(HANDLERS.code(module.name).is_some(), "{}", module.name);
+            }
+        }
+    }
+
     #[test]
     fn every_registered_write_path_refuses_values_outside_its_declaration() {
         let tables: usize = REGISTRY

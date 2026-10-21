@@ -272,6 +272,8 @@ GATE_JOBS = {
     "lint": (
         "Format and lint",
         (
+            "dpkg -s libssl-dev | grep -E '^(Status|Version):'",
+            "pkg-config --modversion openssl",
             "cargo fmt --all --check",
             "cargo clippy --workspace --all-targets --frozen --config ci/cargo-vendored.toml -- -D warnings",
         ),
@@ -279,6 +281,8 @@ GATE_JOBS = {
     "build-and-test": (
         "Build and test",
         (
+            "dpkg -s libssl-dev | grep -E '^(Status|Version):'",
+            "pkg-config --modversion openssl",
             "cargo build --workspace --frozen --config ci/cargo-vendored.toml",
             "cargo test --workspace --frozen --config ci/cargo-vendored.toml",
         ),
@@ -322,6 +326,8 @@ VM_JOB = (
     "Debian 13 VM smoke test (AD-33)",
     "sudo python3 ci/vm_harness.py check-kvm",
     (
+        "dpkg -s libssl-dev | grep -E '^(Status|Version):'",
+        "pkg-config --modversion openssl",
         "python3 ci/release_gates.py build",
         "python3 ci/vm_harness.py up",
         "python3 ci/vm_harness.py copy target/debug/vilicus",

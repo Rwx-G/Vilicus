@@ -61,6 +61,12 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup toolchain install
+      # D143: vilicus-storage compiles SQLCipher against the system OpenSSL headers and links its
+      # libcrypto; the runner image provides them, and this step makes that dependency explicit.
+      - name: Check the system OpenSSL that SQLCipher builds against (D143)
+        run: |
+          dpkg -s libssl-dev | grep -E '^(Status|Version):'
+          pkg-config --modversion openssl
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
@@ -78,6 +84,12 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup toolchain install
+      # D143: vilicus-storage compiles SQLCipher against the system OpenSSL headers and links its
+      # libcrypto; the runner image provides them, and this step makes that dependency explicit.
+      - name: Check the system OpenSSL that SQLCipher builds against (D143)
+        run: |
+          dpkg -s libssl-dev | grep -E '^(Status|Version):'
+          pkg-config --modversion openssl
       - name: Build
         run: cargo build --workspace --frozen --config ci/cargo-vendored.toml
       - name: Test
@@ -287,6 +299,12 @@ jobs:
         run: rustup toolchain install
       # One build per artefact of ci/release_gates.py, the shipped vilicus first, then the testbed
       # (vilicus-testbed and the test doubles), so that they never share a build.
+      # D143: vilicus-storage compiles SQLCipher against the system OpenSSL headers and links its
+      # libcrypto; the runner image provides them, and this step makes that dependency explicit.
+      - name: Check the system OpenSSL that SQLCipher builds against (D143)
+        run: |
+          dpkg -s libssl-dev | grep -E '^(Status|Version):'
+          pkg-config --modversion openssl
       - name: Build the package and testbed artefacts
         run: python3 ci/release_gates.py build
       - name: Boot the Debian 13 VM

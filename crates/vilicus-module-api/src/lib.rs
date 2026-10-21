@@ -18,8 +18,8 @@ mod declaration;
 mod tool;
 
 pub use check::{
-    DeclarationError, FTS5_RESERVED_COLUMNS, IDENTIFIER_MAX_LEN, IdentifierKind,
-    MATRIX_SECTION_MAX_LEN, ROWID_NAMES, is_identifier, is_matrix_section,
+    CORE_MATRIX_SECTION, DeclarationError, FTS5_RESERVED_COLUMNS, IDENTIFIER_MAX_LEN,
+    IdentifierKind, MATRIX_SECTION_MAX_LEN, ROWID_NAMES, is_identifier, is_matrix_section,
 };
 pub use declaration::{
     ENVELOPE, EnvelopeColumn, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table,

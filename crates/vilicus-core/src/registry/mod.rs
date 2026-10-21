@@ -53,7 +53,7 @@ use vilicus_types::ModuleName;
 
 pub use matrix::{
     CapabilityMatrix, MatrixCheckError, MatrixDifference, MatrixEntry, MatrixError, MatrixSection,
-    RegisteredTool, RowTier,
+    RegisteredTool, RowClass, RowTier,
 };
 pub use schema::SchemaError;
 

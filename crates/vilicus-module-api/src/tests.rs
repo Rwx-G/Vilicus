@@ -1060,6 +1060,12 @@ fn matrix_sections_and_rows_are_checked() {
         Err(DeclarationError::DuplicateMatrixSection { section: "6" })
     );
     assert_eq!(
+        sections(vec!["6", "10a", CORE_MATRIX_SECTION]).validate(),
+        Err(DeclarationError::CoreMatrixSection {
+            section: CORE_MATRIX_SECTION
+        })
+    );
+    assert_eq!(
         sections(vec!["6"]).validate(),
         Err(DeclarationError::MatrixRowOutsideModuleSections {
             tool: LIGHT_TOOL.name,
@@ -1105,6 +1111,18 @@ fn every_tool_error_names_its_rule_and_its_tool() {
         .to_string(),
         "a tool's matrix row is in a section its module does not claim: set_light (section 10a)"
     );
+}
+
+/// Review of Story 3.3, minor 3: the section no module may claim is the matrix's Core section.
+#[test]
+fn the_core_matrix_section_is_the_core_and_administration_section() {
+    let matrix = read_doc("capability-matrix.md");
+    let heading = format!("## {CORE_MATRIX_SECTION}. ");
+    let title = matrix
+        .lines()
+        .find_map(|line| line.strip_prefix(heading.as_str()))
+        .expect("the Core section heading");
+    assert_eq!(title, "Core and administration");
 }
 
 /// Review of Story 3.3, M2: a read that only fetches declares no network effect and registers at

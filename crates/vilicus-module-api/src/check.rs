@@ -31,6 +31,10 @@ pub const ROWID_NAMES: &[&str] = &["rowid", "oid", "_rowid_"];
 /// one too, the hidden column that takes its special commands.
 pub const FTS5_RESERVED_COLUMNS: &[&str] = &["rank", "rowid"];
 
+/// The capability matrix section of the Core and its administration (`doc/capability-matrix.md`,
+/// section 1), which no module may claim.
+pub const CORE_MATRIX_SECTION: &str = "1";
+
 /// Longest capability matrix section number accepted.
 pub const MATRIX_SECTION_MAX_LEN: usize = 8;
 
@@ -194,6 +198,12 @@ pub enum DeclarationError {
         /// The section refused.
         section: &'static str,
     },
+    /// The module claims the Core's capability matrix section, [`CORE_MATRIX_SECTION`]: its rows
+    /// are the Core's own actions, never a module's.
+    CoreMatrixSection {
+        /// The section.
+        section: &'static str,
+    },
     /// The module claims a capability matrix section twice.
     DuplicateMatrixSection {
         /// The section claimed twice.
@@ -307,6 +317,9 @@ impl DeclarationError {
                 "a capability matrix section is not a section number"
             }
             Self::DuplicateMatrixSection { .. } => "a capability matrix section is claimed twice",
+            Self::CoreMatrixSection { .. } => {
+                "a module claims the Core's capability matrix section"
+            }
             Self::DuplicateTool { .. } => "two tools share a name",
             Self::HumanOnlyTool { .. } => "a tool is tier H, which is never a tool",
             Self::Tier2BeforeNativeApp { .. } => {
@@ -375,7 +388,9 @@ impl fmt::Display for DeclarationError {
             }
             Self::ReservedName { table, name } => write!(formatter, ": {table}.{name}"),
             Self::EmptyMigration { version } => write!(formatter, ": version {version}"),
-            Self::InvalidMatrixSection { section } | Self::DuplicateMatrixSection { section } => {
+            Self::InvalidMatrixSection { section }
+            | Self::DuplicateMatrixSection { section }
+            | Self::CoreMatrixSection { section } => {
                 write!(formatter, ": {section:?}")
             }
             Self::DuplicateTool { tool }
@@ -552,13 +567,13 @@ impl ModuleDeclaration {
     /// use vilicus_module_api::{Confirmation, MatrixRow, ModuleDeclaration, Tier, Tool};
     ///
     /// const MODULE: ModuleDeclaration = ModuleDeclaration {
-    ///     name: "devices",
+    ///     name: "plugins",
     ///     tables: &[],
     ///     fts5_tables: &[],
     ///     migrations: &[],
-    ///     matrix_sections: &["1"],
+    ///     matrix_sections: &["10"],
     ///     tools: &[Tool {
-    ///         name: "pair_device",
+    ///         name: "install_plugin",
     ///         arguments: &[],
     ///         tier: Tier::HumanOnly,
     ///         network_effect: false,
@@ -566,7 +581,7 @@ impl ModuleDeclaration {
     ///         confirmation: Confirmation::None,
     ///         crosses_partitions: false,
     ///         undo_handler: None,
-    ///         matrix_row: MatrixRow { section: "1", action: "Pair a device" },
+    ///         matrix_row: MatrixRow { section: "10", action: "Install or enable a plugin" },
     ///     }],
     /// };
     /// const _: () = MODULE.assert_valid();
@@ -696,6 +711,9 @@ const fn validate_matrix_sections(sections: &[&'static str]) -> Result<(), Decla
         let section = sections[index];
         if !is_matrix_section(section) {
             return Err(DeclarationError::InvalidMatrixSection { section });
+        }
+        if same(section, CORE_MATRIX_SECTION) {
+            return Err(DeclarationError::CoreMatrixSection { section });
         }
         let mut other = index + 1;
         while other < sections.len() {

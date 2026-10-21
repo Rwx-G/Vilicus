@@ -3,14 +3,16 @@
 //!
 //! A tool names its row by section number and Action cell ([`MatrixRow`]); a module claims the
 //! sections it implements. The check fails on a tool whose row is absent, is not a tool's row
-//! (tier H, `n/a`, tier 2 before the native app, or a cell that names no single tier), or gives
-//! another tier or confirmation than the tool declares; and on a row of a claimed section that a
-//! tool could implement but none does. The matrix is the design's statement of every action
+//! (tier H, `n/a`, tier 2 before the native app, or a cell that names no single tier), has an
+//! unsettled exception class, or gives another tier, confirmation, exception class or network
+//! effect than the tool declares; and on a row of a claimed section that a tool could implement
+//! but none does, or that the check cannot assign. Several tools may implement one row; each is
+//! compared with it. The matrix is the design's statement of every action
 //! (`doc/capability-matrix.md`, section 12); a binary checks its registry against it in a test,
 //! and the testbed against its own fixture.
 //!
 //! The reader accepts only the plain table forms the matrix uses: anything it does not recognise
-//! in a table of actions is a refusal, never a guess.
+//! in a table of actions, or in a numbered section, is a refusal, never a guess.
 
 #[cfg(test)]
 mod tests;
@@ -18,7 +20,7 @@ mod tests;
 use core::fmt;
 
 use vilicus_module_api::{
-    Confirmation, MatrixRow, ModuleDeclaration, Tier, Tool, is_matrix_section,
+    Confirmation, ExceptionClass, MatrixRow, ModuleDeclaration, Tier, Tool, is_matrix_section,
 };
 
 use super::Registry;
@@ -30,6 +32,12 @@ const ACTION_COLUMN: &str = "Action";
 const TIER_COLUMN: &str = "Tier";
 /// The column holding a row's confirmation.
 const CONFIRMATION_COLUMN: &str = "Confirmation";
+/// The column holding a row's exception class.
+const EXCEPTION_CLASS_COLUMN: &str = "Exception class";
+/// The Exception class cell of a row with no class.
+const NO_CLASS: &str = "none";
+/// The Exception class cell of a row whose class the design has not settled.
+const UNSETTLED_CLASS: &str = "unsettled";
 
 /// `doc/capability-matrix.md`, or a fixture in its format, read back: its numbered sections and
 /// the rows of their tables of actions.
@@ -45,6 +53,8 @@ pub struct MatrixSection {
     pub number: String,
     /// The title after it: `Home automation`.
     pub title: String,
+    /// True when the section holds a table of actions; a module can claim only such a section.
+    pub has_actions: bool,
     /// The rows of its tables of actions, in order.
     pub rows: Vec<MatrixEntry>,
 }
@@ -58,6 +68,8 @@ pub struct MatrixEntry {
     pub tier: String,
     /// The Confirmation cell, as written.
     pub confirmation: String,
+    /// The Exception class cell, as read.
+    pub class: RowClass,
     /// The line of the row in the document, from 1.
     pub line: usize,
 }
@@ -78,6 +90,43 @@ pub enum RowTier {
     NotOneTier,
 }
 
+/// A row's Exception class cell: `none`, a member of the closed set of I13, or `unsettled`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowClass {
+    /// `none`: the row's tool declares no class, so it changes no state outside the instance
+    /// below tier 2.
+    None,
+    /// The row's tool declares this class, and with it a network effect.
+    Class(ExceptionClass),
+    /// `unsettled`: the design has not settled the row's class, so no tool can implement it.
+    Unsettled,
+}
+
+impl RowClass {
+    /// Reads an Exception class cell; `None` for any other text.
+    fn read(cell: &str) -> Option<Self> {
+        match cell {
+            NO_CLASS => Some(Self::None),
+            UNSETTLED_CLASS => Some(Self::Unsettled),
+            _ => ExceptionClass::ALL
+                .iter()
+                .copied()
+                .find(|class| class.as_str() == cell)
+                .map(Self::Class),
+        }
+    }
+}
+
+impl fmt::Display for RowClass {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str(NO_CLASS),
+            Self::Class(class) => formatter.write_str(class.as_str()),
+            Self::Unsettled => formatter.write_str(UNSETTLED_CLASS),
+        }
+    }
+}
+
 impl MatrixEntry {
     /// The row's tier, as the check reads its Tier cell.
     pub fn row_tier(&self) -> RowTier {
@@ -95,20 +144,20 @@ impl MatrixEntry {
     /// cell (`light, in the app` reads as light); `None` when that term is not a tool's
     /// confirmation (`signed`, `step-up`, `spoken`, `provider policy`, `light to grant`).
     pub fn tool_confirmation(&self) -> Option<Confirmation> {
-        let first = self
-            .confirmation
-            .split([',', ';'])
-            .next()
-            .unwrap_or_default();
-        let first = first
-            .split_once(" (")
-            .map_or(first, |(term, _)| term)
-            .trim();
-        Confirmation::ALL
-            .iter()
-            .copied()
-            .find(|confirmation| confirmation.as_str() == first)
+        tool_confirmation(&self.confirmation)
     }
+}
+
+fn tool_confirmation(cell: &str) -> Option<Confirmation> {
+    let first = cell.split([',', ';']).next().unwrap_or_default();
+    let first = first
+        .split_once(" (")
+        .map_or(first, |(term, _)| term)
+        .trim();
+    Confirmation::ALL
+        .iter()
+        .copied()
+        .find(|confirmation| confirmation.as_str() == first)
 }
 
 /// `2 (D<digits>)`: a tier 2 row marked with the decision that keeps it unregistered.
@@ -128,9 +177,30 @@ pub enum MatrixError {
         /// The line.
         line: usize,
     },
-    /// The line after a table header is not its separator row.
+    /// The line after a table header is not its separator row, or there is none: a lone table
+    /// row reads as a header.
     MissingSeparator {
         /// The line.
+        line: usize,
+    },
+    /// A separator row has another number of cells than its header.
+    SeparatorCellCount {
+        /// The line.
+        line: usize,
+    },
+    /// A table row in a numbered section does not start at the line's first character.
+    IndentedTableRow {
+        /// The line.
+        line: usize,
+    },
+    /// A table-like line sits in a fenced code block of a numbered section.
+    TableInFence {
+        /// The line.
+        line: usize,
+    },
+    /// A table has a `Tier` column but its first column is not exactly `Action`.
+    MisplacedActionColumn {
+        /// The line of its header.
         line: usize,
     },
     /// A table of actions sits outside a numbered section.
@@ -152,6 +222,24 @@ pub enum MatrixError {
     },
     /// A row's Action cell is empty.
     EmptyAction {
+        /// The line.
+        line: usize,
+    },
+    /// A row's Exception class cell is not `none`, `unsettled` or a member of the closed set.
+    UnknownExceptionClass {
+        /// The line.
+        line: usize,
+        /// The cell.
+        value: String,
+    },
+    /// A row with an exception class is not tier 1 (AD-48).
+    ExceptionClassOutsideTier1 {
+        /// The line.
+        line: usize,
+    },
+    /// A `reversible_external_state` or `own_account_delivery` row does not require light
+    /// confirmation (I13, AD-48).
+    ExceptionClassWithoutLightConfirmation {
         /// The line.
         line: usize,
     },
@@ -188,6 +276,24 @@ impl fmt::Display for MatrixError {
                     "line {line}: a table header has no separator row"
                 )
             }
+            Self::SeparatorCellCount { line } => write!(
+                formatter,
+                "line {line}: a separator row has another number of cells than its header"
+            ),
+            Self::IndentedTableRow { line } => {
+                write!(
+                    formatter,
+                    "line {line}: a table row of a section is indented"
+                )
+            }
+            Self::TableInFence { line } => write!(
+                formatter,
+                "line {line}: a table row of a section is in a fenced code block"
+            ),
+            Self::MisplacedActionColumn { line } => write!(
+                formatter,
+                "line {line}: a table with a Tier column does not start with the Action column"
+            ),
             Self::TableOutsideSection { line } => write!(
                 formatter,
                 "line {line}: a table of actions is outside a numbered section"
@@ -201,6 +307,17 @@ impl fmt::Display for MatrixError {
                 "line {line}: a row has another number of cells than its header"
             ),
             Self::EmptyAction { line } => write!(formatter, "line {line}: an Action cell is empty"),
+            Self::UnknownExceptionClass { line, value } => {
+                write!(formatter, "line {line}: unknown exception class {value:?}")
+            }
+            Self::ExceptionClassOutsideTier1 { line } => write!(
+                formatter,
+                "line {line}: a row with an exception class is not tier 1"
+            ),
+            Self::ExceptionClassWithoutLightConfirmation { line } => write!(
+                formatter,
+                "line {line}: a row of this exception class does not require light confirmation"
+            ),
             Self::DuplicateAction {
                 line,
                 section,
@@ -226,7 +343,7 @@ enum Table {
     /// Not in a table.
     None,
     /// After a header, before its separator; `Some` holds the columns of a table of actions.
-    Header(Option<Columns>),
+    Header(usize, Option<Columns>),
     /// In the body of a table; `Some` for a table of actions.
     Body(Option<Columns>),
 }
@@ -238,19 +355,40 @@ struct Columns {
     count: usize,
     tier: usize,
     confirmation: usize,
+    class: usize,
 }
 
 impl CapabilityMatrix {
     /// Reads `text`, in the format of `doc/capability-matrix.md`: each `## <number>. <title>`
     /// heading opens a section, and each table whose first header cell is `Action` is a table of
-    /// actions, which must have `Tier` and `Confirmation` columns. Other headings and other
-    /// tables are not read.
+    /// actions, which must have `Tier`, `Confirmation` and `Exception class` columns. Other
+    /// headings and other tables are not read, but every table needs its separator row. In a
+    /// numbered section, an indented table row and a table row in a fenced code block are refused
+    /// rather than skipped.
     pub fn parse(text: &str) -> Result<Self, MatrixError> {
         let mut sections: Vec<MatrixSection> = Vec::new();
         let mut current: Option<usize> = None;
         let mut table = Table::None;
+        let mut fenced = false;
+        let mut last_line = 0;
         for (index, line) in text.lines().enumerate() {
             let line_number = index + 1;
+            last_line = line_number;
+            if matches!(table, Table::Header(..)) && !line.starts_with('|') {
+                return Err(MatrixError::MissingSeparator { line: line_number });
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                fenced = !fenced;
+                table = Table::None;
+                continue;
+            }
+            if fenced {
+                if current.is_some() && trimmed.starts_with('|') {
+                    return Err(MatrixError::TableInFence { line: line_number });
+                }
+                continue;
+            }
             if let Some(heading) = line.strip_prefix("## ") {
                 table = Table::None;
                 current = None;
@@ -264,6 +402,7 @@ impl CapabilityMatrix {
                     sections.push(MatrixSection {
                         number: number.to_owned(),
                         title: title.to_owned(),
+                        has_actions: false,
                         rows: Vec::new(),
                     });
                     current = Some(sections.len() - 1);
@@ -271,15 +410,27 @@ impl CapabilityMatrix {
                 continue;
             }
             if !line.starts_with('|') {
+                if current.is_some() && trimmed.starts_with('|') {
+                    return Err(MatrixError::IndentedTableRow { line: line_number });
+                }
                 table = Table::None;
                 continue;
             }
             let cells = cells(line).ok_or(MatrixError::MalformedRow { line: line_number })?;
             table = match table {
-                Table::None => Table::Header(header(&cells, current, line_number)?),
-                Table::Header(columns) => {
+                Table::None => {
+                    let columns = header(&cells, current, line_number)?;
+                    if let Some(columns) = columns {
+                        sections[columns.section].has_actions = true;
+                    }
+                    Table::Header(cells.len(), columns)
+                }
+                Table::Header(count, columns) => {
                     if !is_separator(&cells) {
                         return Err(MatrixError::MissingSeparator { line: line_number });
+                    }
+                    if cells.len() != count {
+                        return Err(MatrixError::SeparatorCellCount { line: line_number });
                     }
                     Table::Body(columns)
                 }
@@ -291,6 +442,11 @@ impl CapabilityMatrix {
                     Table::Body(Some(columns))
                 }
             };
+        }
+        if matches!(table, Table::Header(..)) {
+            return Err(MatrixError::MissingSeparator {
+                line: last_line + 1,
+            });
         }
         Ok(Self { sections })
     }
@@ -321,7 +477,7 @@ impl CapabilityMatrix {
         let mut differences = Vec::new();
         for module in registry.modules() {
             for &section in module.matrix_sections {
-                if self.section(section).is_none() {
+                if !self.section(section).is_some_and(|found| found.has_actions) {
                     differences.push(MatrixDifference::SectionMissing {
                         module: module.name,
                         section,
@@ -330,9 +486,7 @@ impl CapabilityMatrix {
             }
         }
         for tool in registry.tools() {
-            if let Some(difference) = self.tool_difference(&tool) {
-                differences.push(difference);
-            }
+            self.tool_differences(&tool, &mut differences);
         }
         for module in registry.modules() {
             self.row_differences(module, &mut differences);
@@ -340,43 +494,71 @@ impl CapabilityMatrix {
         differences
     }
 
-    /// The difference a tool makes with its row, if any.
-    fn tool_difference(&self, registered: &RegisteredTool) -> Option<MatrixDifference> {
+    /// Every difference a tool makes with its row.
+    fn tool_differences(
+        &self,
+        registered: &RegisteredTool,
+        differences: &mut Vec<MatrixDifference>,
+    ) {
         let tool = registered.tool;
-        let Some(entry) = self.row(&tool.matrix_row) else {
-            return Some(MatrixDifference::ToolWithoutRow {
-                tool: registered.qualified_name(),
-                row: tool.matrix_row,
-            });
+        let name = registered.qualified_name();
+        let row = tool.matrix_row;
+        let Some(entry) = self.row(&row) else {
+            differences.push(MatrixDifference::ToolWithoutRow { tool: name, row });
+            return;
         };
         let RowTier::Registrable(tier) = entry.row_tier() else {
-            return Some(MatrixDifference::RowNotATool {
-                tool: registered.qualified_name(),
-                row: tool.matrix_row,
+            differences.push(MatrixDifference::RowNotATool {
+                tool: name,
+                row,
                 tier: entry.tier.clone(),
             });
+            return;
         };
         if tier != tool.tier {
-            return Some(MatrixDifference::TierMismatch {
-                tool: registered.qualified_name(),
-                row: tool.matrix_row,
+            differences.push(MatrixDifference::TierMismatch {
+                tool: name.clone(),
+                row,
                 matrix: entry.tier.clone(),
                 declared: tool.tier,
             });
         }
         if entry.tool_confirmation() != Some(tool.confirmation) {
-            return Some(MatrixDifference::ConfirmationMismatch {
-                tool: registered.qualified_name(),
-                row: tool.matrix_row,
+            differences.push(MatrixDifference::ConfirmationMismatch {
+                tool: name.clone(),
+                row,
                 matrix: entry.confirmation.clone(),
                 declared: tool.confirmation,
             });
         }
-        None
+        let expected = match entry.class {
+            RowClass::Unsettled => {
+                differences.push(MatrixDifference::ToolOnUnsettledRow { tool: name, row });
+                return;
+            }
+            RowClass::None => None,
+            RowClass::Class(class) => Some(class),
+        };
+        if tool.exception_class != expected {
+            differences.push(MatrixDifference::ExceptionClassMismatch {
+                tool: name.clone(),
+                row,
+                matrix: entry.class,
+                declared: tool.exception_class,
+            });
+        }
+        if tool.network_effect != expected.is_some() {
+            differences.push(MatrixDifference::NetworkEffectMismatch {
+                tool: name,
+                row,
+                matrix: entry.class,
+                declared: tool.network_effect,
+            });
+        }
     }
 
     /// The rows of the module's sections that a tool could implement but none of its tools does,
-    /// and the rows the check cannot read as one tier.
+    /// and the rows the check cannot assign: no single tier, or an unsettled class.
     fn row_differences(
         &self,
         module: &'static ModuleDeclaration,
@@ -387,8 +569,15 @@ impl CapabilityMatrix {
                 continue;
             };
             for entry in &section.rows {
-                match entry.row_tier() {
-                    RowTier::Registrable(_) => {
+                match (entry.row_tier(), entry.class) {
+                    (RowTier::Registrable(_), RowClass::Unsettled) => {
+                        differences.push(MatrixDifference::RowWithUnsettledClass {
+                            module: module.name,
+                            section: number,
+                            action: entry.action.clone(),
+                        });
+                    }
+                    (RowTier::Registrable(_), _) => {
                         let implemented = module.tools.iter().any(|tool| {
                             tool.matrix_row.section == number
                                 && tool.matrix_row.action == entry.action
@@ -401,13 +590,15 @@ impl CapabilityMatrix {
                             });
                         }
                     }
-                    RowTier::NotOneTier => differences.push(MatrixDifference::RowWithoutOneTier {
-                        module: module.name,
-                        section: number,
-                        action: entry.action.clone(),
-                        tier: entry.tier.clone(),
-                    }),
-                    RowTier::Irreversible | RowTier::HumanOnly | RowTier::NotApplicable => {}
+                    (RowTier::NotOneTier, _) => {
+                        differences.push(MatrixDifference::RowWithoutOneTier {
+                            module: module.name,
+                            section: number,
+                            action: entry.action.clone(),
+                            tier: entry.tier.clone(),
+                        });
+                    }
+                    (RowTier::Irreversible | RowTier::HumanOnly | RowTier::NotApplicable, _) => {}
                 }
             }
         }
@@ -426,10 +617,18 @@ impl CapabilityMatrix {
     }
 }
 
-/// `<number>. <title>`, the heading of a numbered section.
+/// `<number>. <title>`, the heading of a numbered section; a closing sequence of `#` preceded
+/// by a space is not part of the title.
 fn numbered_heading(heading: &str) -> Option<(&str, &str)> {
     let (number, title) = heading.split_once(". ")?;
-    (is_matrix_section(number) && !title.trim().is_empty()).then_some((number, title.trim()))
+    let title = title.trim_end();
+    let unclosed = title.trim_end_matches('#');
+    let title = if unclosed.len() < title.len() && unclosed.ends_with(' ') {
+        unclosed.trim_end()
+    } else {
+        title
+    };
+    (is_matrix_section(number) && !title.is_empty()).then_some((number, title))
 }
 
 /// The cells of a table row, trimmed; `None` unless the row starts and ends with `|`.
@@ -453,6 +652,9 @@ fn header(
     line: usize,
 ) -> Result<Option<Columns>, MatrixError> {
     if cells.first() != Some(&ACTION_COLUMN) {
+        if cells.contains(&TIER_COLUMN) {
+            return Err(MatrixError::MisplacedActionColumn { line });
+        }
         return Ok(None);
     }
     let section = section.ok_or(MatrixError::TableOutsideSection { line })?;
@@ -467,10 +669,11 @@ fn header(
         count: cells.len(),
         tier: column(TIER_COLUMN)?,
         confirmation: column(CONFIRMATION_COLUMN)?,
+        class: column(EXCEPTION_CLASS_COLUMN)?,
     }))
 }
 
-/// A row of a table of actions in `section`.
+/// A row of a table of actions in `section`, its exception class held to AD-48.
 fn entry(
     section: &MatrixSection,
     cells: &[&str],
@@ -491,10 +694,30 @@ fn entry(
             action: action.to_owned(),
         });
     }
+    let class_cell = cells[columns.class];
+    let class = RowClass::read(class_cell).ok_or_else(|| MatrixError::UnknownExceptionClass {
+        line,
+        value: class_cell.to_owned(),
+    })?;
+    let tier = cells[columns.tier];
+    let confirmation = cells[columns.confirmation];
+    if let RowClass::Class(class) = class {
+        if tier != Tier::ReversibleWrite.as_str() {
+            return Err(MatrixError::ExceptionClassOutsideTier1 { line });
+        }
+        if matches!(
+            class,
+            ExceptionClass::ReversibleExternalState | ExceptionClass::OwnAccountDelivery
+        ) && tool_confirmation(confirmation) != Some(Confirmation::Light)
+        {
+            return Err(MatrixError::ExceptionClassWithoutLightConfirmation { line });
+        }
+    }
     Ok(MatrixEntry {
         action: action.to_owned(),
-        tier: cells[columns.tier].to_owned(),
-        confirmation: cells[columns.confirmation].to_owned(),
+        tier: tier.to_owned(),
+        confirmation: confirmation.to_owned(),
+        class,
         line,
     })
 }
@@ -519,7 +742,7 @@ impl RegisteredTool {
 /// module, and the row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MatrixDifference {
-    /// A module claims a section the matrix does not have.
+    /// A module claims a section the matrix does not have, or one without a table of actions.
     SectionMissing {
         /// The module.
         module: &'static str,
@@ -541,6 +764,13 @@ pub enum MatrixDifference {
         row: MatrixRow,
         /// The row's Tier cell.
         tier: String,
+    },
+    /// A tool's row has an unsettled exception class.
+    ToolOnUnsettledRow {
+        /// The tool, `<module>.<tool>`.
+        tool: String,
+        /// The row it names.
+        row: MatrixRow,
     },
     /// A tool's tier is not its row's.
     TierMismatch {
@@ -564,6 +794,29 @@ pub enum MatrixDifference {
         /// The tool's confirmation.
         declared: Confirmation,
     },
+    /// A tool's exception class is not its row's.
+    ExceptionClassMismatch {
+        /// The tool, `<module>.<tool>`.
+        tool: String,
+        /// The row it names.
+        row: MatrixRow,
+        /// The row's class.
+        matrix: RowClass,
+        /// The tool's class.
+        declared: Option<ExceptionClass>,
+    },
+    /// A tool's network effect is not the one its row's class implies: a class, and only a
+    /// class, comes with a network effect below tier 2.
+    NetworkEffectMismatch {
+        /// The tool, `<module>.<tool>`.
+        tool: String,
+        /// The row it names.
+        row: MatrixRow,
+        /// The row's class.
+        matrix: RowClass,
+        /// The tool's network effect.
+        declared: bool,
+    },
     /// A row of a module's section that a tool could implement has no tool.
     RowWithoutTool {
         /// The module.
@@ -585,6 +838,15 @@ pub enum MatrixDifference {
         /// The row's Tier cell.
         tier: String,
     },
+    /// A row of a module's section has an unsettled exception class, so no tool can implement it.
+    RowWithUnsettledClass {
+        /// The module.
+        module: &'static str,
+        /// The section.
+        section: &'static str,
+        /// The row's Action cell.
+        action: String,
+    },
 }
 
 impl fmt::Display for MatrixDifference {
@@ -592,7 +854,8 @@ impl fmt::Display for MatrixDifference {
         match self {
             Self::SectionMissing { module, section } => write!(
                 formatter,
-                "module {module} claims section {section}, which the matrix does not have"
+                "module {module} claims section {section}, which the matrix does not have as a \
+                 section of actions"
             ),
             Self::ToolWithoutRow { tool, row } => write!(
                 formatter,
@@ -602,6 +865,11 @@ impl fmt::Display for MatrixDifference {
             Self::RowNotATool { tool, row, tier } => write!(
                 formatter,
                 "tool {tool} names row {:?} of section {}, which is tier {tier:?}, not a tool's",
+                row.action, row.section
+            ),
+            Self::ToolOnUnsettledRow { tool, row } => write!(
+                formatter,
+                "tool {tool} names row {:?} of section {}, whose exception class is unsettled",
                 row.action, row.section
             ),
             Self::TierMismatch {
@@ -626,13 +894,37 @@ impl fmt::Display for MatrixDifference {
                 row.action,
                 row.section
             ),
+            Self::ExceptionClassMismatch {
+                tool,
+                row,
+                matrix,
+                declared,
+            } => write!(
+                formatter,
+                "tool {tool} declares exception class {}, its row {:?} of section {} {matrix}",
+                declared.map_or(NO_CLASS, ExceptionClass::as_str),
+                row.action,
+                row.section
+            ),
+            Self::NetworkEffectMismatch {
+                tool,
+                row,
+                matrix,
+                declared,
+            } => write!(
+                formatter,
+                "tool {tool} declares network effect {declared}, its row {:?} of section {} has \
+                 exception class {matrix}",
+                row.action, row.section
+            ),
             Self::RowWithoutTool {
                 module,
                 section,
                 action,
             } => write!(
                 formatter,
-                "matrix row {action:?} of section {section}, claimed by module {module}, has no tool"
+                "matrix row {action:?} of section {section}, claimed by module {module}, has no \
+                 tool"
             ),
             Self::RowWithoutOneTier {
                 module,
@@ -643,6 +935,15 @@ impl fmt::Display for MatrixDifference {
                 formatter,
                 "matrix row {action:?} of section {section}, claimed by module {module}, names no \
                  single tier: {tier:?}"
+            ),
+            Self::RowWithUnsettledClass {
+                module,
+                section,
+                action,
+            } => write!(
+                formatter,
+                "matrix row {action:?} of section {section}, claimed by module {module}, has an \
+                 unsettled exception class"
             ),
         }
     }

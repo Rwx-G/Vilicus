@@ -1,5 +1,6 @@
-//! The rules of a module declaration (Story 3.2, AC2 to AC4 and AC7): a declaration that meets
-//! them passes, and each rule broken alone is refused with its own typed error.
+//! The rules of a module declaration (Story 3.2, AC2 to AC4 and AC7; Story 3.3, AC1 and AC3 to
+//! AC5): a declaration that meets them passes, and each rule broken alone is refused with its own
+//! typed error.
 
 use super::*;
 
@@ -79,9 +80,91 @@ const VALID: ModuleDeclaration = ModuleDeclaration {
             sql: "CREATE TABLE notes (id BLOB NOT NULL PRIMARY KEY) STRICT;",
         },
     ],
+    matrix_sections: &["6", "10a"],
+    tools: &[READ_TOOL, WRITE_TOOL, CART_TOOL, LIGHT_TOOL],
 };
 
 const _: () = VALID.assert_valid();
+
+/// A tier 0 tool: no confirmation, no undo handler.
+const READ_TOOL: Tool = Tool {
+    name: "read_items",
+    arguments: &[],
+    tier: Tier::Read,
+    network_effect: false,
+    exception_class: None,
+    confirmation: Confirmation::None,
+    crosses_partitions: false,
+    undo_handler: None,
+    matrix_row: MatrixRow {
+        section: "6",
+        action: "Read recipes, plan, stock",
+    },
+};
+
+/// A tier 1 write with a schema, undone by the Core's journal.
+const WRITE_TOOL: Tool = Tool {
+    name: "add_item",
+    arguments: &[
+        Field {
+            name: "label",
+            kind: FieldKind::FreeText { max_len: 200 },
+            optional: false,
+        },
+        Field {
+            name: "quantity",
+            kind: FieldKind::Structured(Structured::Integer { min: 1, max: 99 }),
+            optional: true,
+        },
+    ],
+    tier: Tier::ReversibleWrite,
+    network_effect: false,
+    exception_class: None,
+    confirmation: Confirmation::None,
+    crosses_partitions: false,
+    undo_handler: None,
+    matrix_row: MatrixRow {
+        section: "6",
+        action: "Add an item to the shopping list",
+    },
+};
+
+/// A `reversible_external_state` tool: tier 1, a network effect, light confirmation, an undo
+/// handler.
+const CART_TOOL: Tool = Tool {
+    name: "prepare_cart",
+    arguments: &[],
+    tier: Tier::ReversibleWrite,
+    network_effect: true,
+    exception_class: Some(ExceptionClass::ReversibleExternalState),
+    confirmation: Confirmation::Light,
+    crosses_partitions: false,
+    undo_handler: Some("empty_cart"),
+    matrix_row: MatrixRow {
+        section: "6",
+        action: "Prepare a cart through a store connector",
+    },
+};
+
+/// A `restorable_physical` tool, which needs no confirmation.
+const LIGHT_TOOL: Tool = Tool {
+    name: "set_light",
+    arguments: &[Field {
+        name: "on",
+        kind: FieldKind::Structured(Structured::Enumeration(&["on", "off"])),
+        optional: false,
+    }],
+    tier: Tier::ReversibleWrite,
+    network_effect: true,
+    exception_class: Some(ExceptionClass::RestorablePhysical),
+    confirmation: Confirmation::None,
+    crosses_partitions: false,
+    undo_handler: Some("restore_previous_state"),
+    matrix_row: MatrixRow {
+        section: "10a",
+        action: "Apply a scene",
+    },
+};
 
 fn leak<T>(items: Vec<T>) -> &'static [T] {
     items.leak()
@@ -601,5 +684,425 @@ fn every_error_names_its_rule_and_its_item() {
     assert_eq!(
         error.to_string(),
         "a record kind declares a data type twice: items (stock)"
+    );
+}
+
+// Story 3.3: the rules of a tool declaration.
+
+/// `VALID` with its tier 1 write tool replaced by `edit` applied to a copy of it.
+fn with_write_tool(edit: impl FnOnce(&mut Tool)) -> ModuleDeclaration {
+    let mut tools = VALID.tools.to_vec();
+    let index = tools
+        .iter()
+        .position(|tool| tool.name == WRITE_TOOL.name)
+        .expect("the write tool");
+    edit(&mut tools[index]);
+    ModuleDeclaration {
+        tools: leak(tools),
+        ..VALID
+    }
+}
+
+/// The outcome of `VALID`'s write tool edited by `edit`.
+fn write_tool_outcome(edit: impl FnOnce(&mut Tool)) -> Result<(), DeclarationError> {
+    with_write_tool(edit).validate()
+}
+
+/// The exception classes AD-48 says require light confirmation, and those it says do not, read
+/// from its rule in the spine, so a class that moves from one side to the other fails here.
+fn light_confirmation_classes_of_ad_48() -> (Vec<String>, Vec<String>) {
+    let spine = read_doc("architecture-spine.md");
+    let rule = spine
+        .lines()
+        .skip_while(|line| !line.starts_with("### AD-48:"))
+        .find(|line| line.starts_with("- **Rule:**"))
+        .expect("AD-48 rule");
+    let sentence = rule
+        .split_once("every such tool is tier 1; ")
+        .and_then(|(_, rest)| rest.split_once(" does not"))
+        .map(|(sentence, _)| sentence)
+        .expect("the light confirmation sentence of AD-48");
+    let (requiring, not_requiring) = sentence
+        .split_once(" require light confirmation")
+        .expect("the classes that require light confirmation");
+    let names =
+        |text: &str| -> Vec<String> { backticked(text).into_iter().map(str::to_owned).collect() };
+    (names(requiring), names(not_requiring))
+}
+
+/// AC1 (FR-22, AD-9): a module's tools carry name, schema, tier, network effect, at most one
+/// exception class, confirmation and matrix row, and a declaration whose tools meet every rule is
+/// accepted.
+#[test]
+fn a_declaration_with_tools_that_meet_every_rule_is_accepted() {
+    assert_eq!(VALID.validate(), Ok(()));
+    let cart = VALID.tool("prepare_cart").expect("declared");
+    assert_eq!(cart.tier, Tier::ReversibleWrite);
+    assert!(cart.network_effect);
+    assert_eq!(
+        cart.exception_class,
+        Some(ExceptionClass::ReversibleExternalState)
+    );
+    assert_eq!(cart.confirmation.as_str(), "light");
+    assert_eq!(cart.matrix_row.section, "6");
+    assert_eq!(
+        VALID.tool("add_item").map(|tool| tool.arguments.len()),
+        Some(2)
+    );
+    assert!(VALID.tool("absent").is_none());
+    let without_tools = ModuleDeclaration {
+        matrix_sections: &[],
+        tools: &[],
+        ..VALID
+    };
+    assert_eq!(without_tools.validate(), Ok(()));
+}
+
+/// AC5 (I18, AD-8): a tier H tool is refused, whatever else it declares.
+#[test]
+fn a_tier_h_tool_is_refused() {
+    let classes = core::iter::once(None).chain(ExceptionClass::ALL.iter().copied().map(Some));
+    for exception_class in classes {
+        for network_effect in [false, true] {
+            let outcome = write_tool_outcome(|tool| {
+                tool.tier = Tier::HumanOnly;
+                tool.network_effect = network_effect;
+                tool.exception_class = exception_class;
+                tool.undo_handler = Some("undo");
+                tool.confirmation = Confirmation::Light;
+            });
+            assert_eq!(
+                outcome,
+                Err(DeclarationError::HumanOnlyTool { tool: "add_item" }),
+                "{network_effect} {exception_class:?}"
+            );
+        }
+    }
+}
+
+/// AC3 (FR-60, D46): no tier 2 tool is registered before the native app, with or without a
+/// network effect.
+#[test]
+fn a_tier_2_tool_is_refused_before_the_native_app() {
+    for network_effect in [false, true] {
+        let outcome = write_tool_outcome(|tool| {
+            tool.tier = Tier::Irreversible;
+            tool.network_effect = network_effect;
+        });
+        assert_eq!(
+            outcome,
+            Err(DeclarationError::Tier2BeforeNativeApp { tool: "add_item" }),
+            "{network_effect}"
+        );
+    }
+}
+
+/// AC3 (FR-21, D46, DC-13): a tool that moves or copies a record across partitions is refused at
+/// every tier a tool can have, so cross-partition writes stay unregistered.
+#[test]
+fn a_cross_partition_tool_is_refused_at_every_tier() {
+    for tier in Tier::ALL.iter().copied() {
+        if tier == Tier::HumanOnly {
+            continue;
+        }
+        let outcome = write_tool_outcome(|tool| {
+            tool.tier = tier;
+            tool.crosses_partitions = true;
+        });
+        assert_eq!(
+            outcome,
+            Err(DeclarationError::CrossPartitionTool { tool: "add_item" }),
+            "{tier}"
+        );
+    }
+}
+
+/// AC4 (I13, AD-48): a network effect needs tier 2, or exactly one exception class at tier 1.
+#[test]
+fn a_network_effect_needs_tier_2_or_an_exception_class_at_tier_1() {
+    for tier in [Tier::Read, Tier::ReversibleWrite] {
+        let outcome = write_tool_outcome(|tool| {
+            tool.tier = tier;
+            tool.network_effect = true;
+        });
+        assert_eq!(
+            outcome,
+            Err(DeclarationError::NetworkEffectBelowTier2 { tool: "add_item" }),
+            "{tier}"
+        );
+    }
+    for class in ExceptionClass::ALL.iter().copied() {
+        for tier in [Tier::Read, Tier::Irreversible] {
+            let outcome = write_tool_outcome(|tool| {
+                tool.tier = tier;
+                tool.network_effect = true;
+                tool.exception_class = Some(class);
+                tool.confirmation = Confirmation::Light;
+                tool.undo_handler = Some("undo");
+            });
+            assert_eq!(
+                outcome,
+                Err(DeclarationError::ExceptionClassOutsideTier1 { tool: "add_item" }),
+                "{class} {tier}"
+            );
+        }
+        let outcome = write_tool_outcome(|tool| {
+            tool.exception_class = Some(class);
+            tool.confirmation = Confirmation::Light;
+            tool.undo_handler = Some("undo");
+        });
+        assert_eq!(
+            outcome,
+            Err(DeclarationError::ExceptionClassWithoutNetworkEffect { tool: "add_item" }),
+            "{class}"
+        );
+        let outcome = write_tool_outcome(|tool| {
+            tool.network_effect = true;
+            tool.exception_class = Some(class);
+            tool.confirmation = Confirmation::Light;
+            tool.undo_handler = Some("undo");
+        });
+        assert_eq!(outcome, Ok(()), "{class}");
+    }
+}
+
+/// AC4 (I13, AD-48): the classes AD-48 names require light confirmation, the others do not, and
+/// every exception-class tool names an undo handler.
+#[test]
+fn exception_classes_require_their_confirmation_and_an_undo_handler() {
+    let (requiring, not_requiring) = light_confirmation_classes_of_ad_48();
+    let mut named: Vec<&str> = requiring
+        .iter()
+        .chain(&not_requiring)
+        .map(String::as_str)
+        .collect();
+    named.sort_unstable();
+    let mut all: Vec<&str> = ExceptionClass::ALL
+        .iter()
+        .map(|class| class.as_str())
+        .collect();
+    all.sort_unstable();
+    assert_eq!(named, all, "AD-48 places every class on one side");
+    for class in ExceptionClass::ALL.iter().copied() {
+        let without_light = write_tool_outcome(|tool| {
+            tool.network_effect = true;
+            tool.exception_class = Some(class);
+            tool.confirmation = Confirmation::None;
+            tool.undo_handler = Some("undo");
+        });
+        if requiring.iter().any(|name| name == class.as_str()) {
+            assert_eq!(
+                without_light,
+                Err(DeclarationError::ExceptionClassWithoutLightConfirmation {
+                    tool: "add_item",
+                    class: class.as_str(),
+                }),
+                "{class}"
+            );
+        } else {
+            assert_eq!(without_light, Ok(()), "{class}");
+        }
+        let without_undo = write_tool_outcome(|tool| {
+            tool.network_effect = true;
+            tool.exception_class = Some(class);
+            tool.confirmation = Confirmation::Light;
+            tool.undo_handler = None;
+        });
+        assert_eq!(
+            without_undo,
+            Err(DeclarationError::ExceptionClassWithoutUndoHandler { tool: "add_item" }),
+            "{class}"
+        );
+    }
+}
+
+/// Light confirmation approves a tier 1 request only, and a read has nothing to undo.
+#[test]
+fn confirmation_and_undo_handler_follow_the_tier() {
+    let outcome = write_tool_outcome(|tool| {
+        tool.tier = Tier::Read;
+        tool.confirmation = Confirmation::Light;
+    });
+    assert_eq!(
+        outcome,
+        Err(DeclarationError::LightConfirmationOutsideTier1 { tool: "add_item" })
+    );
+    let outcome = write_tool_outcome(|tool| {
+        tool.tier = Tier::Read;
+        tool.undo_handler = Some("undo");
+    });
+    assert_eq!(
+        outcome,
+        Err(DeclarationError::UndoHandlerOnRead { tool: "add_item" })
+    );
+    let outcome = write_tool_outcome(|tool| tool.confirmation = Confirmation::Light);
+    assert_eq!(outcome, Ok(()));
+    let outcome = write_tool_outcome(|tool| tool.undo_handler = Some("undo_add_item"));
+    assert_eq!(outcome, Ok(()));
+}
+
+/// A tool's name, arguments and undo handler follow the grammar and the rules of fields.
+#[test]
+fn tool_names_arguments_and_undo_handlers_are_checked() {
+    for name in ["", "Add", "add item", "core.add"] {
+        assert_eq!(
+            write_tool_outcome(|tool| tool.name = name),
+            Err(DeclarationError::InvalidIdentifier {
+                kind: IdentifierKind::Tool,
+                name
+            }),
+            "{name:?}"
+        );
+    }
+    assert_eq!(
+        write_tool_outcome(|tool| tool.name = READ_TOOL.name),
+        Err(DeclarationError::DuplicateTool {
+            tool: READ_TOOL.name
+        })
+    );
+    assert_eq!(
+        write_tool_outcome(|tool| tool.undo_handler = Some("Undo")),
+        Err(DeclarationError::InvalidIdentifier {
+            kind: IdentifierKind::UndoHandler,
+            name: "Undo"
+        })
+    );
+    let argument = |name: &'static str, kind: FieldKind| Field {
+        name,
+        kind,
+        optional: false,
+    };
+    let cases = [
+        (
+            vec![
+                argument("label", FieldKind::FreeText { max_len: 10 }),
+                argument("label", FieldKind::FreeText { max_len: 10 }),
+            ],
+            DeclarationError::DuplicateField {
+                table: "add_item",
+                field: "label",
+            },
+        ),
+        (
+            vec![argument("label", FieldKind::FreeText { max_len: 0 })],
+            DeclarationError::FreeTextWithoutMaxLength {
+                table: "add_item",
+                field: "label",
+            },
+        ),
+        (
+            vec![argument(
+                "status",
+                FieldKind::Structured(Structured::Enumeration(&[])),
+            )],
+            DeclarationError::EmptyEnumeration {
+                table: "add_item",
+                field: "status",
+            },
+        ),
+    ];
+    for (arguments, error) in cases {
+        let arguments = leak(arguments);
+        assert_eq!(
+            write_tool_outcome(|tool| tool.arguments = arguments),
+            Err(error)
+        );
+    }
+    for column in ENVELOPE {
+        let arguments = leak(vec![argument(
+            column.name,
+            FieldKind::FreeText { max_len: 10 },
+        )]);
+        assert_eq!(
+            write_tool_outcome(|tool| tool.arguments = arguments),
+            Err(DeclarationError::EnvelopeName {
+                table: "add_item",
+                field: column.name,
+            }),
+            "{}",
+            column.name
+        );
+    }
+}
+
+/// A module claims capability matrix sections by number, once each, and its tools' rows lie in
+/// them, each with an Action text a matrix cell can hold.
+#[test]
+fn matrix_sections_and_rows_are_checked() {
+    let longest = format!("1{}", "a".repeat(MATRIX_SECTION_MAX_LEN - 1));
+    for accepted in ["1", "10a", "12", longest.as_str()] {
+        assert!(is_matrix_section(accepted), "{accepted:?}");
+    }
+    let too_long = format!("{longest}a");
+    for refused in [
+        "",
+        "0",
+        "02",
+        "a",
+        "10A",
+        "10.",
+        "10 a",
+        "1-2",
+        too_long.as_str(),
+    ] {
+        assert!(!is_matrix_section(refused), "{refused:?}");
+    }
+    let sections = |sections: Vec<&'static str>| ModuleDeclaration {
+        matrix_sections: leak(sections),
+        ..VALID
+    };
+    assert_eq!(
+        sections(vec!["6", "10a", "6."]).validate(),
+        Err(DeclarationError::InvalidMatrixSection { section: "6." })
+    );
+    assert_eq!(
+        sections(vec!["6", "10a", "6"]).validate(),
+        Err(DeclarationError::DuplicateMatrixSection { section: "6" })
+    );
+    assert_eq!(
+        sections(vec!["6"]).validate(),
+        Err(DeclarationError::MatrixRowOutsideModuleSections {
+            tool: LIGHT_TOOL.name,
+            section: "10a"
+        })
+    );
+    for action in [
+        "",
+        " Add",
+        "Add ",
+        "Add | stock",
+        "Add\nstock",
+        "Add\tstock",
+    ] {
+        assert_eq!(
+            write_tool_outcome(|tool| tool.matrix_row.action = action),
+            Err(DeclarationError::InvalidMatrixAction { tool: "add_item" }),
+            "{action:?}"
+        );
+    }
+}
+
+#[test]
+fn every_tool_error_names_its_rule_and_its_tool() {
+    assert_eq!(
+        DeclarationError::HumanOnlyTool { tool: "pair" }.to_string(),
+        "a tool is tier H, which is never a tool: pair"
+    );
+    assert_eq!(
+        DeclarationError::ExceptionClassWithoutLightConfirmation {
+            tool: "prepare_cart",
+            class: "reversible_external_state",
+        }
+        .to_string(),
+        "a tool of this exception class does not require light confirmation: prepare_cart \
+         (reversible_external_state)"
+    );
+    assert_eq!(
+        DeclarationError::MatrixRowOutsideModuleSections {
+            tool: "set_light",
+            section: "10a",
+        }
+        .to_string(),
+        "a tool's matrix row is in a section its module does not claim: set_light (section 10a)"
     );
 }

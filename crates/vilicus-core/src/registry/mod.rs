@@ -17,6 +17,8 @@
 //!     tables: &[],
 //!     fts5_tables: &[],
 //!     migrations: &[],
+//!     matrix_sections: &[],
+//!     tools: &[],
 //! };
 //! const REGISTRY: Registry = match Registry::new(&[&NOTES]) {
 //!     Ok(registry) => registry,

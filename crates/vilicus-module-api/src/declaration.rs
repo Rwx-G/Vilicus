@@ -1,11 +1,14 @@
-//! What a module declares about its file: its tables, each one record kind with its data types and
-//! its fields, its FTS5 tables and its migrations (AD-6, AD-9, D98, D103, D104, D127).
+//! What a module declares: its tables, each one record kind with its data types and its fields,
+//! its FTS5 tables and its migrations (AD-6, AD-9, D98, D103, D104, D127), and its tools with the
+//! capability matrix sections they implement (FR-22, I13, AD-48).
 //!
 //! Every declaration is plain `'static` data built in a `const` item, so the set of tables,
-//! fields, value sets and data types is fixed when the binary is built; nothing in this crate
-//! builds or extends one at run time.
+//! fields, value sets, data types and tools is fixed when the binary is built; nothing in this
+//! crate builds or extends one at run time.
 
 use vilicus_types::DataType;
+
+use crate::tool::Tool;
 
 /// The SQL type a column is declared with in the module's migrations; the registry compares it
 /// with `PRAGMA table_xinfo` of the migrated file, ignoring ASCII case.
@@ -213,7 +216,7 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Everything a module declares about its file. A module crate exposes one as a `const` item and
+/// Everything a module declares: its file and its tools. A module crate exposes one as a `const` item and
 /// checks it there with [`ModuleDeclaration::assert_valid`], so a declaration the registry would
 /// refuse fails that crate's build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -226,6 +229,12 @@ pub struct ModuleDeclaration {
     pub fts5_tables: &'static [Fts5Table],
     /// The module's migrations, in order: the first is version 1.
     pub migrations: &'static [Migration],
+    /// The sections of `doc/capability-matrix.md` the module implements, by number (`2`, `10a`):
+    /// every row of these sections that a tool can implement needs one of the module's tools,
+    /// and no other module may claim them.
+    pub matrix_sections: &'static [&'static str],
+    /// The module's tools.
+    pub tools: &'static [Tool],
 }
 
 impl ModuleDeclaration {
@@ -244,5 +253,10 @@ impl ModuleDeclaration {
     /// The FTS5 table named `name`.
     pub fn fts5_table(&self, name: &str) -> Option<&'static Fts5Table> {
         self.fts5_tables.iter().find(|table| table.name == name)
+    }
+
+    /// The tool named `name`.
+    pub fn tool(&self, name: &str) -> Option<&'static Tool> {
+        self.tools.iter().find(|tool| tool.name == name)
     }
 }

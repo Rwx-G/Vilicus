@@ -1,19 +1,22 @@
-//! The rules a module declaration must meet before the registry accepts it (FR-18, FR-22, FR-58,
-//! FR-68, AD-6, AD-9, D98, D103, D104, D127), as `const` functions: a module checks its own
-//! declaration in a `const` item, where a refusal stops the build, and the Core's registry runs
-//! the same check on every module it is built from.
+//! The rules a module declaration must meet before the registry accepts it (FR-18, FR-21, FR-22,
+//! FR-58, FR-60, FR-68, AD-6, AD-8, AD-9, AD-48, I13, I18, D46, D98, D103, D104, D127), as `const`
+//! functions: a module checks its own declaration in a `const` item, where a refusal stops the
+//! build, and the Core's registry runs the same check on every module it is built from.
 //!
 //! What the migrated file actually holds (the envelope columns, the field columns, the FTS5
-//! arguments and `secure-delete`) is the registry's comparison with the file, in `vilicus-core`.
+//! arguments and `secure-delete`) is the registry's comparison with the file, and whether each
+//! tool's row exists in `doc/capability-matrix.md` with the same tier and confirmation is the
+//! registry's comparison with the matrix, both in `vilicus-core`.
 
 use core::fmt;
 
-use vilicus_types::ModuleName;
+use vilicus_types::{ExceptionClass, ModuleName, Tier};
 
 use crate::declaration::{
     ENVELOPE, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table, ModuleDeclaration,
     Structured, Table,
 };
+use crate::tool::{Confirmation, Tool};
 
 /// Longest identifier accepted for a table, a field, an FTS5 table or column, an enumeration
 /// value or a vocabulary name.
@@ -27,6 +30,9 @@ pub const ROWID_NAMES: &[&str] = &["rowid", "oid", "_rowid_"];
 /// Column names an FTS5 table keeps for itself (`rank`, its rowid); an FTS5 table's own name is
 /// one too, the hidden column that takes its special commands.
 pub const FTS5_RESERVED_COLUMNS: &[&str] = &["rank", "rowid"];
+
+/// Longest capability matrix section number accepted.
+pub const MATRIX_SECTION_MAX_LEN: usize = 8;
 
 /// What an identifier names, for the error that refuses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -43,6 +49,10 @@ pub enum IdentifierKind {
     EnumerationValue,
     /// The name of a reviewed vocabulary.
     Vocabulary,
+    /// A tool.
+    Tool,
+    /// The undo handler a tool names.
+    UndoHandler,
 }
 
 impl IdentifierKind {
@@ -54,6 +64,8 @@ impl IdentifierKind {
             Self::Fts5Column => "FTS5 column",
             Self::EnumerationValue => "enumeration value",
             Self::Vocabulary => "vocabulary name",
+            Self::Tool => "tool",
+            Self::UndoHandler => "undo handler",
         }
     }
 }
@@ -81,9 +93,9 @@ pub enum DeclarationError {
         /// The name used twice.
         table: &'static str,
     },
-    /// Two fields of a table share a name.
+    /// Two fields of a table, or two arguments of a tool, share a name.
     DuplicateField {
-        /// The table.
+        /// The table, or the tool for an argument.
         table: &'static str,
         /// The name used twice.
         field: &'static str,
@@ -175,6 +187,94 @@ pub enum DeclarationError {
         /// Its version.
         version: usize,
     },
+    /// A capability matrix section the module claims is not a section number: ASCII digits, the
+    /// first not 0, then lowercase ASCII letters, at most [`MATRIX_SECTION_MAX_LEN`] in all
+    /// (`2`, `10a`).
+    InvalidMatrixSection {
+        /// The section refused.
+        section: &'static str,
+    },
+    /// The module claims a capability matrix section twice.
+    DuplicateMatrixSection {
+        /// The section claimed twice.
+        section: &'static str,
+    },
+    /// Two tools of the module share a name.
+    DuplicateTool {
+        /// The name used twice.
+        tool: &'static str,
+    },
+    /// A tool is tier H: a human-only action is a Core operation outside the tool registry, never
+    /// a tool (I18, AD-8).
+    HumanOnlyTool {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tool is tier 2, and no tier 2 action is registered before the native app exists (D46,
+    /// FR-60).
+    Tier2BeforeNativeApp {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tool moves or copies a record across partitions, which is tier 2 and so unregistered
+    /// before the native app exists (FR-21, D46).
+    CrossPartitionTool {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tool with an outbound network effect is below tier 2 without an exception class (I13).
+    NetworkEffectBelowTier2 {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tool that declares an exception class is not tier 1 (AD-48).
+    ExceptionClassOutsideTier1 {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tool declares an exception class but no network effect: a class only ever excuses an
+    /// outbound effect from tier 2 (I13).
+    ExceptionClassWithoutNetworkEffect {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A `reversible_external_state` or `own_account_delivery` tool does not require light
+    /// confirmation (I13, AD-48).
+    ExceptionClassWithoutLightConfirmation {
+        /// The tool.
+        tool: &'static str,
+        /// The class's name.
+        class: &'static str,
+    },
+    /// A tool that declares an exception class names no undo handler (I13).
+    ExceptionClassWithoutUndoHandler {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tool outside tier 1 requires light confirmation, which approves a tier 1 request only
+    /// (`doc/capability-matrix.md`, Legend).
+    LightConfirmationOutsideTier1 {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tier 0 tool names an undo handler: a read changes nothing to undo.
+    UndoHandlerOnRead {
+        /// The tool.
+        tool: &'static str,
+    },
+    /// A tool's matrix row is in a section the module does not claim.
+    MatrixRowOutsideModuleSections {
+        /// The tool.
+        tool: &'static str,
+        /// The row's section.
+        section: &'static str,
+    },
+    /// A tool's matrix row has no Action text a matrix cell can hold: empty, with white space at
+    /// either end, or with a `|` or a control character.
+    InvalidMatrixAction {
+        /// The tool.
+        tool: &'static str,
+    },
 }
 
 impl DeclarationError {
@@ -202,6 +302,41 @@ impl DeclarationError {
             }
             Self::ReservedName { .. } => "a column takes a name SQLite or FTS5 keeps for itself",
             Self::EmptyMigration { .. } => "a migration holds no SQL",
+            Self::InvalidMatrixSection { .. } => {
+                "a capability matrix section is not a section number"
+            }
+            Self::DuplicateMatrixSection { .. } => "a capability matrix section is claimed twice",
+            Self::DuplicateTool { .. } => "two tools share a name",
+            Self::HumanOnlyTool { .. } => "a tool is tier H, which is never a tool",
+            Self::Tier2BeforeNativeApp { .. } => {
+                "a tool is tier 2, unregistered before the native app"
+            }
+            Self::CrossPartitionTool { .. } => {
+                "a tool crosses partitions, tier 2 and unregistered before the native app"
+            }
+            Self::NetworkEffectBelowTier2 { .. } => {
+                "a tool with a network effect is below tier 2 without an exception class"
+            }
+            Self::ExceptionClassOutsideTier1 { .. } => {
+                "a tool with an exception class is not tier 1"
+            }
+            Self::ExceptionClassWithoutNetworkEffect { .. } => {
+                "a tool declares an exception class without a network effect"
+            }
+            Self::ExceptionClassWithoutLightConfirmation { .. } => {
+                "a tool of this exception class does not require light confirmation"
+            }
+            Self::ExceptionClassWithoutUndoHandler { .. } => {
+                "a tool with an exception class names no undo handler"
+            }
+            Self::LightConfirmationOutsideTier1 { .. } => {
+                "a tool outside tier 1 requires light confirmation"
+            }
+            Self::UndoHandlerOnRead { .. } => "a tier 0 tool names an undo handler",
+            Self::MatrixRowOutsideModuleSections { .. } => {
+                "a tool's matrix row is in a section its module does not claim"
+            }
+            Self::InvalidMatrixAction { .. } => "a tool's matrix row has no valid action text",
         }
     }
 }
@@ -239,6 +374,26 @@ impl fmt::Display for DeclarationError {
             }
             Self::ReservedName { table, name } => write!(formatter, ": {table}.{name}"),
             Self::EmptyMigration { version } => write!(formatter, ": version {version}"),
+            Self::InvalidMatrixSection { section } | Self::DuplicateMatrixSection { section } => {
+                write!(formatter, ": {section:?}")
+            }
+            Self::DuplicateTool { tool }
+            | Self::HumanOnlyTool { tool }
+            | Self::Tier2BeforeNativeApp { tool }
+            | Self::CrossPartitionTool { tool }
+            | Self::NetworkEffectBelowTier2 { tool }
+            | Self::ExceptionClassOutsideTier1 { tool }
+            | Self::ExceptionClassWithoutNetworkEffect { tool }
+            | Self::ExceptionClassWithoutUndoHandler { tool }
+            | Self::LightConfirmationOutsideTier1 { tool }
+            | Self::UndoHandlerOnRead { tool }
+            | Self::InvalidMatrixAction { tool } => write!(formatter, ": {tool}"),
+            Self::ExceptionClassWithoutLightConfirmation { tool, class } => {
+                write!(formatter, ": {tool} ({class})")
+            }
+            Self::MatrixRowOutsideModuleSections { tool, section } => {
+                write!(formatter, ": {tool} (section {section})")
+            }
         }
     }
 }
@@ -279,6 +434,20 @@ impl ModuleDeclaration {
             }
             index += 1;
         }
+        check!(validate_matrix_sections(self.matrix_sections));
+        index = 0;
+        while index < self.tools.len() {
+            let tool = &self.tools[index];
+            check!(validate_tool(self, tool));
+            let mut other = index + 1;
+            while other < self.tools.len() {
+                if same(tool.name, self.tools[other].name) {
+                    return Err(DeclarationError::DuplicateTool { tool: tool.name });
+                }
+                other += 1;
+            }
+            index += 1;
+        }
         Ok(())
     }
 
@@ -286,7 +455,10 @@ impl ModuleDeclaration {
     /// a `const` item:
     ///
     /// ```
-    /// use vilicus_module_api::{DataType, Field, FieldKind, Migration, ModuleDeclaration, Table};
+    /// use vilicus_module_api::{
+    ///     Confirmation, DataType, Field, FieldKind, MatrixRow, Migration, ModuleDeclaration, Table,
+    ///     Tier, Tool,
+    /// };
     ///
     /// pub const MODULE: ModuleDeclaration = ModuleDeclaration {
     ///     name: "notes",
@@ -303,6 +475,22 @@ impl ModuleDeclaration {
     ///     migrations: &[Migration {
     ///         sql: "CREATE TABLE notes (id BLOB NOT NULL PRIMARY KEY, body TEXT NOT NULL) STRICT;",
     ///     }],
+    ///     matrix_sections: &["7"],
+    ///     tools: &[Tool {
+    ///         name: "create_note",
+    ///         arguments: &[Field {
+    ///             name: "body",
+    ///             kind: FieldKind::FreeText { max_len: 2000 },
+    ///             optional: false,
+    ///         }],
+    ///         tier: Tier::ReversibleWrite,
+    ///         network_effect: false,
+    ///         exception_class: None,
+    ///         confirmation: Confirmation::None,
+    ///         crosses_partitions: false,
+    ///         undo_handler: None,
+    ///         matrix_row: MatrixRow { section: "7", action: "Create or edit a page" },
+    ///     }],
     /// };
     /// const _: () = MODULE.assert_valid();
     /// ```
@@ -317,6 +505,8 @@ impl ModuleDeclaration {
     ///     tables: &[Table { name: "notes", data_types: &[], fields: &[] }],
     ///     fts5_tables: &[],
     ///     migrations: &[Migration { sql: "CREATE TABLE notes (id BLOB) STRICT;" }],
+    ///     matrix_sections: &[],
+    ///     tools: &[],
     /// };
     /// const _: () = MODULE.assert_valid();
     /// ```
@@ -327,6 +517,81 @@ impl ModuleDeclaration {
     /// use vilicus_module_api::{DataType, Table};
     ///
     /// const NOTES: Table = Table { name: "notes", data_types: &[DataType::Pets], fields: &[] };
+    /// ```
+    ///
+    /// A tool that does not declare its network effect does not build (I13):
+    ///
+    /// ```compile_fail,E0063
+    /// use vilicus_module_api::{Confirmation, MatrixRow, Tier, Tool};
+    ///
+    /// const READ: Tool = Tool {
+    ///     name: "read_notes",
+    ///     arguments: &[],
+    ///     tier: Tier::Read,
+    ///     exception_class: None,
+    ///     confirmation: Confirmation::None,
+    ///     crosses_partitions: false,
+    ///     undo_handler: None,
+    ///     matrix_row: MatrixRow { section: "7", action: "Read pages and procedures" },
+    /// };
+    /// ```
+    ///
+    /// Nor does an exception class outside the closed set of I13 (AD-48):
+    ///
+    /// ```compile_fail,E0599
+    /// use vilicus_module_api::ExceptionClass;
+    ///
+    /// const CLASS: Option<ExceptionClass> = Some(ExceptionClass::SystemNotification);
+    /// ```
+    ///
+    /// Nor does a tier H tool (I18), or a tier 2 tool before the native app (D46, FR-60):
+    ///
+    /// ```compile_fail,E0080
+    /// use vilicus_module_api::{Confirmation, MatrixRow, ModuleDeclaration, Tier, Tool};
+    ///
+    /// const MODULE: ModuleDeclaration = ModuleDeclaration {
+    ///     name: "devices",
+    ///     tables: &[],
+    ///     fts5_tables: &[],
+    ///     migrations: &[],
+    ///     matrix_sections: &["1"],
+    ///     tools: &[Tool {
+    ///         name: "pair_device",
+    ///         arguments: &[],
+    ///         tier: Tier::HumanOnly,
+    ///         network_effect: false,
+    ///         exception_class: None,
+    ///         confirmation: Confirmation::None,
+    ///         crosses_partitions: false,
+    ///         undo_handler: None,
+    ///         matrix_row: MatrixRow { section: "1", action: "Pair a device" },
+    ///     }],
+    /// };
+    /// const _: () = MODULE.assert_valid();
+    /// ```
+    ///
+    /// ```compile_fail,E0080
+    /// use vilicus_module_api::{Confirmation, MatrixRow, ModuleDeclaration, Tier, Tool};
+    ///
+    /// const MODULE: ModuleDeclaration = ModuleDeclaration {
+    ///     name: "tasks",
+    ///     tables: &[],
+    ///     fts5_tables: &[],
+    ///     migrations: &[],
+    ///     matrix_sections: &["2"],
+    ///     tools: &[Tool {
+    ///         name: "purge_tasks",
+    ///         arguments: &[],
+    ///         tier: Tier::Irreversible,
+    ///         network_effect: false,
+    ///         exception_class: None,
+    ///         confirmation: Confirmation::None,
+    ///         crosses_partitions: false,
+    ///         undo_handler: None,
+    ///         matrix_row: MatrixRow { section: "2", action: "Purge deleted tasks" },
+    ///     }],
+    /// };
+    /// const _: () = MODULE.assert_valid();
     /// ```
     ///
     /// # Panics
@@ -421,6 +686,106 @@ const fn validate_field(table: &'static str, field: &Field) -> Result<(), Declar
             validate_enumeration(table, field.name, values)
         }
     }
+}
+
+const fn validate_matrix_sections(sections: &[&'static str]) -> Result<(), DeclarationError> {
+    let mut index = 0;
+    while index < sections.len() {
+        let section = sections[index];
+        if !is_matrix_section(section) {
+            return Err(DeclarationError::InvalidMatrixSection { section });
+        }
+        let mut other = index + 1;
+        while other < sections.len() {
+            if same(section, sections[other]) {
+                return Err(DeclarationError::DuplicateMatrixSection { section });
+            }
+            other += 1;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+/// The rules of a tool: its schema, then I18, FR-21, AD-48, I13 and D46 on its tier, partition
+/// effect, network effect, exception class, confirmation and undo handler, then its matrix row.
+const fn validate_tool(module: &ModuleDeclaration, tool: &Tool) -> Result<(), DeclarationError> {
+    let name = tool.name;
+    check!(identifier(IdentifierKind::Tool, name));
+    let mut index = 0;
+    while index < tool.arguments.len() {
+        let argument = &tool.arguments[index];
+        check!(validate_field(name, argument));
+        let mut other = index + 1;
+        while other < tool.arguments.len() {
+            if same(argument.name, tool.arguments[other].name) {
+                return Err(DeclarationError::DuplicateField {
+                    table: name,
+                    field: argument.name,
+                });
+            }
+            other += 1;
+        }
+        index += 1;
+    }
+    if matches!(tool.tier, Tier::HumanOnly) {
+        return Err(DeclarationError::HumanOnlyTool { tool: name });
+    }
+    if tool.crosses_partitions {
+        return Err(DeclarationError::CrossPartitionTool { tool: name });
+    }
+    match tool.exception_class {
+        Some(class) => {
+            if !matches!(tool.tier, Tier::ReversibleWrite) {
+                return Err(DeclarationError::ExceptionClassOutsideTier1 { tool: name });
+            }
+            if !tool.network_effect {
+                return Err(DeclarationError::ExceptionClassWithoutNetworkEffect { tool: name });
+            }
+            if matches!(
+                class,
+                ExceptionClass::ReversibleExternalState | ExceptionClass::OwnAccountDelivery
+            ) && !matches!(tool.confirmation, Confirmation::Light)
+            {
+                return Err(DeclarationError::ExceptionClassWithoutLightConfirmation {
+                    tool: name,
+                    class: class.as_str(),
+                });
+            }
+            if tool.undo_handler.is_none() {
+                return Err(DeclarationError::ExceptionClassWithoutUndoHandler { tool: name });
+            }
+        }
+        None => {
+            if tool.network_effect && !matches!(tool.tier, Tier::Irreversible) {
+                return Err(DeclarationError::NetworkEffectBelowTier2 { tool: name });
+            }
+        }
+    }
+    if matches!(tool.tier, Tier::Irreversible) {
+        return Err(DeclarationError::Tier2BeforeNativeApp { tool: name });
+    }
+    if matches!(tool.confirmation, Confirmation::Light)
+        && !matches!(tool.tier, Tier::ReversibleWrite)
+    {
+        return Err(DeclarationError::LightConfirmationOutsideTier1 { tool: name });
+    }
+    if let Some(handler) = tool.undo_handler {
+        if matches!(tool.tier, Tier::Read) {
+            return Err(DeclarationError::UndoHandlerOnRead { tool: name });
+        }
+        check!(identifier(IdentifierKind::UndoHandler, handler));
+    }
+    if !listed(module.matrix_sections, tool.matrix_row.section) {
+        return Err(DeclarationError::MatrixRowOutsideModuleSections {
+            tool: name,
+            section: tool.matrix_row.section,
+        });
+    }
+    if !is_matrix_action(tool.matrix_row.action) {
+        return Err(DeclarationError::InvalidMatrixAction { tool: name });
+    }
+    Ok(())
 }
 
 const fn validate_enumeration(
@@ -617,6 +982,44 @@ pub const fn is_identifier(name: &str) -> bool {
     }
     let reserved = b"sqlite_";
     !(bytes.len() >= reserved.len() && same_bytes(bytes.split_at(reserved.len()).0, reserved))
+}
+
+/// True for a capability matrix section number as its heading writes it: ASCII digits, the first
+/// not 0, then lowercase ASCII letters, at most [`MATRIX_SECTION_MAX_LEN`] in all (`2`, `10a`).
+pub const fn is_matrix_section(section: &str) -> bool {
+    let bytes = section.as_bytes();
+    if bytes.is_empty() || bytes.len() > MATRIX_SECTION_MAX_LEN || !matches!(bytes[0], b'1'..=b'9')
+    {
+        return false;
+    }
+    let mut index = 1;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    while index < bytes.len() && bytes[index].is_ascii_lowercase() {
+        index += 1;
+    }
+    index == bytes.len()
+}
+
+/// True for text a matrix Action cell can hold as it is read back: not empty, no white space at
+/// either end, no `|` and no control character.
+const fn is_matrix_action(action: &str) -> bool {
+    let bytes = action.as_bytes();
+    if bytes.is_empty()
+        || bytes[0].is_ascii_whitespace()
+        || bytes[bytes.len() - 1].is_ascii_whitespace()
+    {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'|' || bytes[index].is_ascii_control() {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 const fn listed(list: &[&str], name: &str) -> bool {

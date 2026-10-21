@@ -159,6 +159,8 @@ fn sample() -> ModuleDeclaration {
                 )),
             },
         ]),
+        matrix_sections: &[],
+        tools: &[],
     }
 }
 
@@ -195,6 +197,8 @@ const EMPTY: ModuleDeclaration = ModuleDeclaration {
     tables: &[],
     fts5_tables: &[],
     migrations: &[],
+    matrix_sections: &[],
+    tools: &[],
 };
 
 const LITERAL: ModuleDeclaration = ModuleDeclaration {
@@ -215,6 +219,8 @@ const LITERAL: ModuleDeclaration = ModuleDeclaration {
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, rev INTEGER NOT NULL, \
               body TEXT NOT NULL) STRICT;",
     }],
+    matrix_sections: &[],
+    tools: &[],
 };
 
 /// AC1: a registry built in a `const` item, from a `'static` list.

@@ -715,6 +715,56 @@ impl Handle<Write> {
         })
     }
 
+    /// Moves the delivery of `event` to `consumer` to the dead letters at `at`, in a transaction
+    /// of its own and without counting an attempt, as `_dead_letter` row `dead_letter`: an event
+    /// the Core gives up on for a consumer that cannot receive it, past the outbox's retention
+    /// (D150). A delivery that already succeeded or was dead-lettered is refused with
+    /// [`Error::OutboxRowNotPending`], and an event the file does not hold with
+    /// [`Error::OutboxRowNotFound`].
+    pub fn dead_letter_delivery(
+        &self,
+        event: Id,
+        consumer: &str,
+        at: UtcMillis,
+        dead_letter: Id,
+    ) -> Result<DeliveryRow> {
+        self.under_core_policy(|connection| {
+            let mut recorded = None;
+            handle::in_transaction(connection, || {
+                outbox_state(connection, event, EVENT_KIND)?.ok_or(Error::OutboxRowNotFound)?;
+                let earlier = delivery_of(connection, event, consumer)?;
+                if earlier
+                    .as_ref()
+                    .is_some_and(|delivery| delivery.state != DeliveryState::Failing)
+                {
+                    return Err(Error::OutboxRowNotPending);
+                }
+                let delivery = DeliveryRow {
+                    event,
+                    consumer: consumer.to_owned(),
+                    attempts: earlier.map_or(0, |delivery| delivery.attempts),
+                    state: DeliveryState::DeadLetter,
+                    updated_at: at,
+                };
+                write_delivery(connection, &delivery)?;
+                connection.execute(
+                    "INSERT INTO _dead_letter (id, event_id, consumer, attempts, failed_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        dead_letter.to_bytes(),
+                        event.to_bytes(),
+                        consumer,
+                        delivery.attempts,
+                        at.as_millis(),
+                    ],
+                )?;
+                recorded = Some(delivery);
+                Ok(())
+            })?;
+            recorded.ok_or(Error::OutboxRowNotFound)
+        })
+    }
+
     /// Closes the pending event or link request `id` as `state`, at `at`, in a transaction of
     /// its own: an event once every delivery is done, a link once the Core registered or refused
     /// it. A row that is not pending keeps its state and the call fails with

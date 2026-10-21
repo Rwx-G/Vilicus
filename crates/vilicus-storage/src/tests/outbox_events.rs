@@ -2,7 +2,8 @@
 //! read back in commit order; each delivery to a consumer is recorded after the consumer's
 //! commit, a failing one moves to the dead letters at its last attempt; a closed row is closed
 //! once; and the outbox's retention purge deletes the closed rows before its cutoff, keeping what
-//! the Core still delivers, retries, reports or may replay, then empties the WAL.
+//! the Core still delivers, retries, reports or may replay, then empties the WAL. Story 3.9: a
+//! delivery the Core gives up on moves to the dead letters without an attempt.
 
 use vilicus_types::{EffectOutcome, Id, Principal, Source, UtcMillis};
 
@@ -514,4 +515,76 @@ fn pending_rows_are_listed_by_page_and_a_row_that_does_not_decode_hides_none_aft
             .collect::<Vec<_>>(),
         [seqs[0], seqs[2], seqs[3]]
     );
+}
+
+/// Story 3.9 (D150): a delivery given up on behind a consumer that cannot receive it moves to the
+/// dead letters without an attempt counted, keeping the attempts already failed; a delivery
+/// already done or dead-lettered is refused, and so is an event the file does not hold.
+#[test]
+fn a_delivery_is_dead_lettered_without_an_attempt() {
+    let writer = new_writer("expired-deliveries");
+    let source = Source::Member(id(1));
+    let call = CallKey {
+        principal: Principal::Member,
+        source: &source,
+        call_id: id(9).into(),
+    };
+    in_transaction(&writer, || {
+        writer
+            .append_event(&event(call, id(60), at(0)))
+            .expect("event");
+    });
+    assert!(matches!(
+        writer.dead_letter_delivery(id(61), "meals.react", at(1), id(90)),
+        Err(Error::OutboxRowNotFound)
+    ));
+    let never_tried = writer
+        .dead_letter_delivery(id(60), "meals.react", at(2), id(90))
+        .expect("dead-lettered");
+    assert_eq!(
+        (never_tried.attempts, never_tried.state),
+        (0, DeliveryState::DeadLetter)
+    );
+    writer
+        .record_failed_delivery(id(60), "tasks.react", at(3), 5, id(91))
+        .expect("one failure");
+    let tried = writer
+        .dead_letter_delivery(id(60), "tasks.react", at(4), id(92))
+        .expect("dead-lettered");
+    assert_eq!(
+        (tried.attempts, tried.state),
+        (1, DeliveryState::DeadLetter)
+    );
+    let letters: Vec<(Id, String, u32, UtcMillis)> = writer
+        .dead_letters()
+        .expect("read")
+        .into_iter()
+        .map(|letter| {
+            (
+                letter.id,
+                letter.consumer,
+                letter.attempts,
+                letter.failed_at,
+            )
+        })
+        .collect();
+    assert_eq!(
+        letters,
+        [
+            (id(90), "meals.react".to_owned(), 0, at(2)),
+            (id(92), "tasks.react".to_owned(), 1, at(4))
+        ]
+    );
+    assert!(matches!(
+        writer.dead_letter_delivery(id(60), "meals.react", at(5), id(93)),
+        Err(Error::OutboxRowNotPending)
+    ));
+    writer
+        .record_delivered(id(60), "plans.react", at(6))
+        .expect("delivered");
+    assert!(matches!(
+        writer.dead_letter_delivery(id(60), "plans.react", at(7), id(94)),
+        Err(Error::OutboxRowNotPending)
+    ));
+    assert_eq!(writer.dead_letters().expect("read").len(), 2);
 }

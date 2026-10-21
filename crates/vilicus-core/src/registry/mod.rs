@@ -1,5 +1,7 @@
 //! The module registry (FR-22, AD-9): the modules compiled into the binary, with their schema,
-//! migrations and record kinds, and the checks that hold every module file to its declaration.
+//! migrations, record kinds and tools, the checks that hold every module file to its declaration,
+//! and the capability matrix check that holds every tool to its row of
+//! `doc/capability-matrix.md` ([`CapabilityMatrix`]).
 //!
 //! A [`Registry`] is built from a `'static` list of [`ModuleDeclaration`]s by a `const fn`, so a
 //! binary builds it in a `const` item from the declarations it names at build time, and a
@@ -33,6 +35,7 @@
 //! ([`Registry::open`]).
 
 mod fts5;
+mod matrix;
 mod schema;
 mod sql;
 
@@ -48,6 +51,10 @@ use vilicus_storage::{
 };
 use vilicus_types::ModuleName;
 
+pub use matrix::{
+    CapabilityMatrix, MatrixCheckError, MatrixDifference, MatrixEntry, MatrixError, MatrixSection,
+    RegisteredTool, RowTier,
+};
 pub use schema::SchemaError;
 
 /// The modules compiled into the binary.
@@ -71,6 +78,13 @@ pub enum RegistryError {
         /// The name.
         module: &'static str,
     },
+    /// Two modules claim one capability matrix section, so neither alone answers for its rows.
+    DuplicateMatrixSection {
+        /// The second module that claims it.
+        module: &'static str,
+        /// The section.
+        section: &'static str,
+    },
 }
 
 impl RegistryError {
@@ -79,6 +93,7 @@ impl RegistryError {
         match self {
             Self::Declaration { error, .. } => error.rule(),
             Self::DuplicateModule { .. } => "two modules share a name",
+            Self::DuplicateMatrixSection { .. } => "two modules claim a capability matrix section",
         }
     }
 }
@@ -89,6 +104,9 @@ impl fmt::Display for RegistryError {
             Self::Declaration { module, error } => write!(formatter, "module {module}: {error}"),
             Self::DuplicateModule { module } => {
                 write!(formatter, "{}: {module}", self.rule())
+            }
+            Self::DuplicateMatrixSection { module, section } => {
+                write!(formatter, "{}: {module} (section {section})", self.rule())
             }
         }
     }
@@ -177,8 +195,8 @@ const VERIFY_EPOCH: KeyEpoch = KeyEpoch {
 
 impl Registry {
     /// The registry of `modules`: every declaration is checked against the rules of the module
-    /// contract, and module names are unique. `const`, so a binary builds its registry in a
-    /// `const` item and a refusal is a build error.
+    /// contract, module names are unique and no two modules claim one capability matrix section.
+    /// `const`, so a binary builds its registry in a `const` item and a refusal is a build error.
     pub const fn new(
         modules: &'static [&'static ModuleDeclaration],
     ) -> Result<Self, RegistryError> {
@@ -198,11 +216,28 @@ impl Registry {
                         module: module.name,
                     });
                 }
+                if let Some(section) = shared_section(module, modules[other]) {
+                    return Err(RegistryError::DuplicateMatrixSection {
+                        module: modules[other].name,
+                        section,
+                    });
+                }
                 other += 1;
             }
             index += 1;
         }
         Ok(Self { modules })
+    }
+
+    /// The registry's tool table: every tool of every module, in declaration order. The
+    /// capability matrix check compares it with `doc/capability-matrix.md`.
+    pub fn tools(&self) -> impl Iterator<Item = RegisteredTool> + '_ {
+        self.modules.iter().flat_map(|&module| {
+            module
+                .tools
+                .iter()
+                .map(move |tool| RegisteredTool { module, tool })
+        })
     }
 
     /// The registered modules: each one's tables (record kinds with their data types and
@@ -286,6 +321,28 @@ fn check<R: Inspect>(module: &ModuleDeclaration, handle: &Handle<R>) -> Result<(
     }
     let snapshot = schema::Snapshot::read(handle, module)?;
     schema::compare(module, &snapshot).map_err(FileError::Schema)
+}
+
+/// A capability matrix section both modules claim.
+const fn shared_section(
+    module: &ModuleDeclaration,
+    other: &ModuleDeclaration,
+) -> Option<&'static str> {
+    let mut index = 0;
+    while index < module.matrix_sections.len() {
+        let mut candidate = 0;
+        while candidate < other.matrix_sections.len() {
+            if same(
+                module.matrix_sections[index],
+                other.matrix_sections[candidate],
+            ) {
+                return Some(module.matrix_sections[index]);
+            }
+            candidate += 1;
+        }
+        index += 1;
+    }
+    None
 }
 
 const fn same(left: &str, right: &str) -> bool {

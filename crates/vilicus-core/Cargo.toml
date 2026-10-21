@@ -19,9 +19,10 @@ missing_docs = "deny"
 undocumented_unsafe_blocks = "deny"
 
 # `testing` compiles the write path fuzz test, `Registry::fuzz_write_paths`, which confirms
-# vocabulary labels in the scratch files it creates (Story 3.4). Only test code enables it: the
-# testbed and the vilicus binary's dev-dependency; ci/check_packaging.py refuses it in the
-# normal or build dependencies of a release artefact.
+# vocabulary labels in the scratch files it creates (Story 3.4), and `vilicus_core::testing`, the
+# storage names the testbed's tests use (Story 3.10). Only test code enables it: the testbed and
+# the vilicus binary's dev-dependency; ci/check_packaging.py refuses it in the normal or build
+# dependencies of a release artefact.
 [features]
 testing = []
 

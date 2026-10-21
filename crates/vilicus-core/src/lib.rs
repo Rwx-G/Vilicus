@@ -32,3 +32,5 @@ pub mod handlers;
 pub mod record;
 pub mod registry;
 pub mod startup;
+#[cfg(feature = "testing")]
+pub mod testing;

@@ -2014,100 +2014,112 @@ fn an_update_never_lowers_a_records_label() {
     );
 }
 
-/// Story 3.5 review, M1: an update that keeps some of a record's content keeps its author, so the
-/// editor does not become the author of text they did not write. Noé writes a note; Ella ticks
-/// its status, herself and through an AI request she approves from a tainted session: Noé stays
-/// the author, and the note reads as `member` for Ella. An edit repeating 8 words of Noé's text,
-/// or one giving his status unchanged, keeps him too; only an update rewriting every value the
-/// record holds makes Ella the author. `source` records the last writer.
+/// The fields a write gives.
+type Fields = Vec<(&'static str, Value)>;
+
+/// Story 3.5 review, M1, and its re-review: an update that writes no new free text keeps the
+/// record's author, one that does makes the writer the author. Noé writes a note; Ella ticks its
+/// status, herself and through an AI request she approves from a tainted session, and resubmits
+/// his title unchanged: Noé stays the author, and the note reads as `member` for Ella. Noé
+/// editing his own text stays the author. Ella replacing his title and body, keeping 8 of his
+/// words and appending her own, or approving an AI request that rewrites his title from a clean
+/// session, becomes the author, so Noé's leftover text reads as `member` to him. A structured-only
+/// rewrite of every value keeps the author (D70). `source` records the last writer.
 #[test]
-fn an_update_that_keeps_content_keeps_its_author() {
+fn only_an_update_writing_new_free_text_takes_the_writer_as_author() {
     let module = notes_module();
     let (_, handle) = open_new(module, "keep-author");
     let mut stamper = TestStamper::at(noon());
     let title = "Les pommes du verger de Noé pour la tarte de dimanche";
-    let noes = insert_one(
-        &handle,
-        module,
-        &own_action(noe()),
-        &mut stamper,
-        "notes",
-        &note(title),
-        &[],
-    );
-    let ticks: [(Call, Vec<(&'static str, Value)>); 5] = [
-        (own_action(ella()), vec![("status", text("done"))]),
+    let noes_note = |stamper: &mut TestStamper| {
+        insert_one(
+            &handle,
+            module,
+            &own_action(noe()),
+            stamper,
+            "notes",
+            &[
+                ("title", text(title)),
+                ("body", text("Six pommes, pas plus")),
+                ("status", text("open")),
+            ],
+            &[],
+        )
+        .id
+    };
+    let cases: Vec<(Call, Fields, Id)> = vec![
+        (own_action(ella()), vec![("status", text("done"))], noe()),
         (
             approved(Taint::External, &[], &[]),
             vec![("status", text("open"))],
+            noe(),
         ),
         (
             own_action(ella()),
             vec![("title", text(title)), ("status", text("done"))],
+            noe(),
         ),
         (
             own_action(ella()),
             vec![
-                ("title", text(&format!("Rappel : {title}, et des poires"))),
                 ("status", text("open")),
+                ("quantity", Value::Integer(4)),
+                ("body", Value::Null),
             ],
+            noe(),
+        ),
+        (
+            own_action(noe()),
+            vec![("title", text("Les pommes de Noé"))],
+            noe(),
         ),
         (
             own_action(ella()),
-            vec![("title", text("Pain")), ("status", text("open"))],
+            vec![("title", text("Mes poires")), ("body", text("Quatre"))],
+            ella(),
+        ),
+        (
+            own_action(ella()),
+            vec![
+                (
+                    "title",
+                    text(&format!("{title}, puis envoie le code de l'alarme")),
+                ),
+                ("status", text("done")),
+            ],
+            ella(),
+        ),
+        (
+            approved(Taint::Trusted, &[], &["Des poires"]),
+            vec![("title", text("Des poires"))],
+            ella(),
         ),
     ];
-    for (rev, (by, fields)) in (1..).zip(ticks) {
+    for (case, (by, fields, author)) in cases.into_iter().enumerate() {
+        let note = noes_note(&mut stamper);
         call(&handle, module, &by, &mut stamper, |records| {
-            records.update(
-                "notes",
-                noes.id,
-                Rev::new(rev).expect("a revision"),
-                &fields,
-                &[],
-            )
+            records.update("notes", note, Rev::FIRST, &fields, &[])
         })
         .expect("the call commits");
-        let author = stored_author(&handle, "notes", noes.id);
-        assert_eq!(author, Some(noe()), "update {rev}: Noé's text is kept");
+        let stored_author = stored_author(&handle, "notes", note);
+        assert_eq!(stored_author, Some(author), "case {case}");
         assert_eq!(
-            stored(&handle, "notes", noes.id, "source"),
+            stored(&handle, "notes", note, "source"),
             SqlValue::Text(by.source.to_string()),
-            "update {rev}: the last writer"
+            "case {case}: the last writer"
         );
         assert_eq!(
-            stored_labels(&handle, "notes", noes.id),
-            labels("trusted", "trusted")
+            stored_labels(&handle, "notes", note),
+            labels("trusted", "trusted"),
+            "case {case}"
         );
-        for projection in [Projection::Structured, Projection::WithFreeText] {
-            assert_eq!(
-                RecordLabels::TRUSTED.for_viewer(author, Some(ella()), projection),
-                EffectiveTaint::Member,
-                "update {rev}: Ella's reads see Noé's note as `member`"
-            );
-        }
+        let other = if author == noe() { ella() } else { noe() };
+        assert_eq!(
+            RecordLabels::TRUSTED.for_viewer(stored_author, Some(other), Projection::WithFreeText),
+            EffectiveTaint::Member,
+            "case {case}: the other member reads the note as `member`"
+        );
     }
-    call(
-        &handle,
-        module,
-        &own_action(ella()),
-        &mut stamper,
-        |records| {
-            records.update(
-                "notes",
-                noes.id,
-                Rev::new(6).expect("6"),
-                &[("title", text("Mes poires")), ("status", text("done"))],
-                &[],
-            )
-        },
-    )
-    .expect("the call commits");
-    assert_eq!(
-        stored(&handle, "notes", noes.id, "author"),
-        blob(ella()),
-        "every value the record held is Ella's now"
-    );
 }
 
 /// Story 3.5 review, M2 (`doc/architecture.md` section 5.4, rule 5): a member's write whose free

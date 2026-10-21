@@ -8,8 +8,8 @@
 //! label, `approved_draft` (D99, I9, I35); model text no member approved is `external`, even from
 //! a clean session (`doc/architecture.md` section 5.4, rule 2). An update never lowers a label:
 //! promoting an `external` record stays with the host CLI (D45, D112), however much of it the
-//! update rewrites. And an update that keeps some of a record's content keeps its author, so
-//! editing one field of another member's record does not make their text the editor's.
+//! update rewrites. And an update that writes no new free text keeps the record's author, while
+//! one that does makes the writer the author, so another member's text is never stored as theirs.
 
 use core::fmt;
 use std::collections::HashSet;
@@ -74,10 +74,8 @@ impl RecordProvenance {
 pub(crate) struct Stored {
     /// The record's provenance.
     pub(crate) provenance: RecordProvenance,
-    /// True when the update keeps a value the record holds: a field it does not give, a value it
-    /// gives unchanged, or free text repeating a run of the record's own free text. The record
-    /// then keeps its author.
-    pub(crate) keeps_content: bool,
+    /// The values of the record's fields, in declared order.
+    pub(crate) held: Vec<Value>,
 }
 
 /// The envelope values a write's provenance decides.
@@ -136,7 +134,9 @@ pub(crate) fn stamp(
         Authority::Unapproved { author, .. } => *author,
     };
     let author = match stored {
-        Some(stored) if stored.keeps_content => stored.provenance.author,
+        Some(stored) if !rewrites_free_text(table, fields, &stored.held) => {
+            stored.provenance.author
+        }
         _ => writer,
     };
     Ok(Stamp {
@@ -287,6 +287,20 @@ fn approved_text_taint(
     } else {
         TextTaint::ApprovedDraft
     }
+}
+
+/// True when an update giving `fields` writes free text the record does not hold: a free-text
+/// value other than the field's stored one. Only then does the record take the writer as its
+/// author: a structured-only edit, or free text given unchanged, keeps the author of the text
+/// (D70), and any new text, even appended to the author's own words, is the writer's, so the
+/// author's leftover text reads as `member` to them, never theirs as the editor's.
+fn rewrites_free_text(table: &'static Table, fields: &[(&str, Value)], held: &[Value]) -> bool {
+    table.fields.iter().zip(held).any(|(field, stored)| {
+        matches!(field.kind, FieldKind::FreeText { .. })
+            && fields.iter().any(|(name, given)| {
+                *name == field.name && matches!(given, Value::Text(_)) && given != stored
+            })
+    })
 }
 
 /// The free-text values `fields` gives `table`; a name the table does not declare is the row

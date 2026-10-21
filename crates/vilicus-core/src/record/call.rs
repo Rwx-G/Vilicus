@@ -2,7 +2,7 @@
 //! `BEGIN IMMEDIATE` transaction on the module file's write handle, each stamped by the Core.
 
 use vilicus_module_api::{
-    Field, FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written,
+    FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written,
 };
 use vilicus_storage::{Handle, SqlValue, Write};
 use vilicus_types::{DataType, EffectiveTaint, Id, Principal, Rev, Source, Taint, UtcMillis};
@@ -342,7 +342,7 @@ impl CallRecords<'_> {
     ) -> Result<Written, RecordError> {
         let table = declared_table(self.module, table)?;
         let (input_ids, inputs) = self.resolve_inputs(table, inputs)?;
-        let (stored, rev) = read_stored(self.handle, table, id, fields)?;
+        let (stored, rev) = read_stored(self.handle, table, id)?;
         if rev != expected {
             return Err(RecordError::StaleRevision { table: table.name });
         }
@@ -487,13 +487,12 @@ impl CallRecords<'_> {
 /// them.
 const PROVENANCE_COLUMNS: [&str; 4] = ["taint", "text_taint", "author", "data_types"];
 
-/// Reads the record `id` of `table` that an update giving `fields` changes: its provenance, and
-/// whether the update keeps a value it holds; and its revision.
+/// Reads the record `id` of `table` that an update changes: its provenance and field values; and
+/// its revision.
 fn read_stored(
     handle: &Handle<Write>,
     table: &'static Table,
     id: Id,
-    fields: &[(&str, Value)],
 ) -> Result<(Stored, Rev), RecordError> {
     let columns: Vec<&str> = PROVENANCE_COLUMNS
         .into_iter()
@@ -517,45 +516,7 @@ fn read_stored(
     let rev = stored_rev(table, values.next())?;
     let held: Vec<Value> = values.collect();
     provenance.free_text = free_text_of(table, held.iter().cloned());
-    let keeps_content = table
-        .fields
-        .iter()
-        .zip(&held)
-        .any(|(field, value)| keeps_value(field, value, fields, &provenance.free_text));
-    Ok((
-        Stored {
-            provenance,
-            keeps_content,
-        },
-        rev,
-    ))
-}
-
-/// True when an update giving `fields` keeps `stored`, the value `field` holds: the update does
-/// not give the field, gives it the same value, or gives free text repeating a run of the
-/// record's own free text (D104), which is still the stored text, edited.
-fn keeps_value(
-    field: &Field,
-    stored: &Value,
-    fields: &[(&str, Value)],
-    stored_text: &[String],
-) -> bool {
-    if *stored == Value::Null {
-        return false;
-    }
-    match fields
-        .iter()
-        .find(|(name, _)| *name == field.name)
-        .map(|(_, value)| value)
-    {
-        None => true,
-        Some(given) if given == stored => true,
-        Some(Value::Text(text)) => {
-            matches!(field.kind, FieldKind::FreeText { .. })
-                && provenance::repeats_a_run(text, stored_text)
-        }
-        Some(_) => false,
-    }
+    Ok((Stored { provenance, held }, rev))
 }
 
 /// The free-text values of a row of `table`, from its field values in declared order.

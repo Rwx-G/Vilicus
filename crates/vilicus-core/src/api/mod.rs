@@ -6,9 +6,11 @@
 //! [`Records::read`](vilicus_module_api::Records::read), naming the module, the query and the
 //! record's id; the Core then checks, in this order, that the module offers the query, that the
 //! query's access list names the calling module, and, for each partition in the call's scope,
-//! that the file read is ready (AD-54, the gate [`ModuleStates::check`]) before it looks the record up
-//! on a read connection of that file ([`ApiFiles`]), never on its writer, so the read never
-//! re-enters another writer thread (AD-9). The scope of a call is the partition of its own file,
+//! that the file read is ready (AD-54, the gate [`ModuleStates::check`]) before it looks the
+//! record up on a read connection of that file ([`ApiFiles`]), never on its writer, so the read
+//! never re-enters another writer thread (AD-9). A file that is not ready is skipped: a record is
+//! found in another file of the scope, ids being unique, and a record found nowhere else is
+//! answered `module_unavailable`, with the skipped file's retry class. The scope of a call is the partition of its own file,
 //! and the household partition when that file is a member's personal partition ([`read_scope`]):
 //! a household or home call reads no member's partition, and no call reads another member's
 //! (FR-19), so the Core never asks for a file outside the scope.
@@ -93,11 +95,11 @@ pub fn read_scope(partition: Partition) -> Vec<Partition> {
 
 /// Serves the read of the record `id` through the query `query` of `module` to a call of
 /// `caller` on a file of `partition`: the record the query returns and its provenance, read from
-/// the first file of the call's scope that holds it. Refused when no registered module offers the
-/// query ([`RecordError::UnknownQuery`]), when its access list does not name `caller`
-/// ([`RecordError::QueryNotAllowed`]), when a file of the scope searched is not ready or not open
-/// ([`RecordError::Unavailable`]), and when no file of the scope holds the record
-/// ([`RecordError::RecordNotFound`]).
+/// the first file of the call's scope that holds it, a file that is not ready or not open being
+/// skipped. Refused when no registered module offers the query ([`RecordError::UnknownQuery`]),
+/// when its access list does not name `caller` ([`RecordError::QueryNotAllowed`]), and when no
+/// file of the scope it could search holds the record: [`RecordError::Unavailable`] for the first
+/// file it skipped, whose record it cannot rule out, otherwise [`RecordError::RecordNotFound`].
 pub(crate) fn read(
     reads: ApiReads<'_>,
     caller: &ModuleDeclaration,
@@ -124,21 +126,18 @@ pub(crate) fn read(
         .table(declared.table)
         .ok_or(RecordError::UnknownQuery)?;
     let name = ModuleName::from_static(target.name);
+    let mut unavailable = None;
     for partition in read_scope(partition) {
-        reads
-            .states
-            .check(&name, partition)
-            .map_err(RecordError::Unavailable)?;
-        let handle = reads
-            .apis
-            .files
-            .reader(&name, partition)
-            .filter(|handle| {
-                *handle.file().module() == name && handle.file().partition() == partition
-            })
-            .ok_or_else(|| {
-                RecordError::Unavailable(ModuleUnavailable::not_open(name.clone(), partition))
-            })?;
+        if let Err(state) = reads.states.check(&name, partition) {
+            unavailable.get_or_insert(state);
+            continue;
+        }
+        let Some(handle) = reads.apis.files.reader(&name, partition).filter(|handle| {
+            *handle.file().module() == name && handle.file().partition() == partition
+        }) else {
+            unavailable.get_or_insert(ModuleUnavailable::not_open(name.clone(), partition));
+            continue;
+        };
         if let Some((provenance, values)) = read_record(handle, table, id)? {
             let fields = declared
                 .fields
@@ -157,5 +156,8 @@ pub(crate) fn read(
             return Ok((ReadRecord { id, fields }, provenance));
         }
     }
-    Err(RecordError::RecordNotFound { table: table.name })
+    Err(match unavailable {
+        Some(unavailable) => RecordError::Unavailable(unavailable),
+        None => RecordError::RecordNotFound { table: table.name },
+    })
 }

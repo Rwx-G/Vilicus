@@ -511,9 +511,10 @@ fn a_read_searches_the_callers_partition_then_the_household_and_nothing_else() {
     }
 }
 
-/// AC5 (AD-54): a file in scope that is not ready answers `module_unavailable` with its state's
-/// retry class before any read; a file the states report ready whose read connection the Core
-/// does not hold answers `opening`.
+/// AC5 (AD-54): a file in scope that is not ready is never read; a record it may hold answers
+/// `module_unavailable` with its state's retry class, while a record of another file of the scope
+/// is served; a file the states report ready whose read connection the Core does not hold answers
+/// `opening`.
 #[test]
 fn a_read_of_a_file_that_is_not_ready_is_module_unavailable() {
     let fixture = Fixture::new("api-unavailable");
@@ -535,6 +536,34 @@ fn a_read_of_a_file_that_is_not_ready_is_module_unavailable() {
     }
     assert!(fixture.asked().is_empty(), "no connection is asked for");
     fixture.states.activate(&shop, Partition::Household);
+
+    let [ellas, _, _] = fixture.items;
+    fixture.states.deactivate(&shop, ELLA());
+    let read = |item| {
+        fixture.rule_call("notes", ELLA(), &fixture.invocation(), |records| {
+            records.read("shop", "item", item)
+        })
+    };
+    assert!(
+        matches!(read(household), Ok(CallResult::Committed(_))),
+        "a record of the household's file, the scope's file that serves"
+    );
+    match read(ellas) {
+        Err(HandlerError::Refused(RecordError::Unavailable(unavailable))) => {
+            assert_eq!(unavailable.state(), AvailabilityState::Deactivated);
+            assert_eq!(unavailable.partition(), ELLA());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        fixture.asked(),
+        [
+            ("shop".to_owned(), Partition::Household),
+            ("shop".to_owned(), Partition::Household)
+        ],
+        "the file that is not ready is never asked for"
+    );
+    fixture.states.activate(&shop, ELLA());
 
     let mut fixture = fixture;
     fixture

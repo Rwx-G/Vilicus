@@ -31,6 +31,16 @@ pub const UNDO_JOURNAL_RETENTION: Duration = Duration::from_secs(30 * DAY);
 /// more often than members do (spine AD-26, `[ASSUMPTION]`).
 pub const HOME_JOURNAL_RETENTION: Duration = Duration::from_secs(24 * HOUR);
 
+/// How long the outbox keeps a row once it is created: a delivered event, a registered or
+/// refused link, a `done` effect intent. Rows are marked, never deleted on delivery, so a restore
+/// can re-deliver every row newer than the oldest file copy of the backup (spine AD-26,
+/// `[ASSUMPTION]`).
+pub const OUTBOX_RETENTION: Duration = Duration::from_secs(30 * DAY);
+
+/// How many failed deliveries of one event to one consumer move the event to that consumer's
+/// dead letters (spine AD-29). A consumer that is not ready is not a failure (AD-54).
+pub const EVENT_DELIVERY_ATTEMPTS: u32 = 5;
+
 const _: () = assert!(UNLOCK_WINDOW_DEFAULT.as_secs() <= UNLOCK_WINDOW_MAX.as_secs());
 
 closed_set! {
@@ -76,6 +86,12 @@ mod tests {
             Duration::from_secs(30 * 24 * 60 * 60)
         );
         assert_eq!(HOME_JOURNAL_RETENTION, Duration::from_secs(24 * 60 * 60));
+    }
+
+    #[test]
+    fn outbox_values_of_ad_26_and_ad_29() {
+        assert_eq!(OUTBOX_RETENTION, Duration::from_secs(30 * 24 * 60 * 60));
+        assert_eq!(EVENT_DELIVERY_ATTEMPTS, 5);
     }
 
     #[test]

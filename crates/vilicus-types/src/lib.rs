@@ -81,6 +81,7 @@ macro_rules! closed_set {
     };
 }
 
+mod call_id;
 mod data_type;
 mod effect;
 mod error;
@@ -99,6 +100,7 @@ mod time;
 #[cfg(test)]
 mod test_support;
 
+pub use call_id::{CallId, CallIdError};
 pub use data_type::DataType;
 pub use effect::EffectOutcome;
 pub use error::{ClientError, ClientFacingError, ErrorCode, MessageKey, RetryClass};

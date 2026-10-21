@@ -705,13 +705,7 @@ impl CallRecords<'_> {
         let before = journal::image(self.handle, table, id)?;
         self.handle
             .execute_values(&format!("DELETE FROM {} WHERE id = ?1", table.name), &key)?;
-        let implicit: Vec<RecordProvenance> = self
-            .call
-            .implicit_inputs
-            .iter()
-            .chain(self.reads_beside_implicit())
-            .cloned()
-            .collect();
+        let implicit = self.implicit_inputs();
         let inputs = journal::encode_inputs(&implicit, &implicit)?;
         self.journal(
             RecordChange {

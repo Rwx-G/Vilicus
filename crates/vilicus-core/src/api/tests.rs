@@ -902,3 +902,66 @@ fn an_event_keeps_the_data_types_of_a_record_the_call_read() {
     assert_eq!(provenance.data_types, "journal,shopping_list");
     assert_eq!(provenance.taint, "external");
 }
+
+/// Review item 4 (AD-26, D151): a delete journals the call's implicit inputs as its insert and
+/// update do, each combined with the call's fresher read of it: a `trusted` snapshot of an item
+/// the call also read, stored `external`, is journaled `external` on both rows.
+#[test]
+fn a_delete_journals_its_inputs_combined_with_the_reads_of_the_call() {
+    let fixture = Fixture::new("api-delete");
+    let item = fixture.items[1];
+    let call = Call {
+        implicit_inputs: vec![RecordProvenance {
+            id: item,
+            author: Some(ella()),
+            ..read_before(item)
+        }],
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for: Some(ella()),
+        },
+        ..rule()
+    };
+    let handle = fixture.writer("notes", Partition::Household);
+    let declaration = fixture
+        .registry
+        .module(handle.file().module())
+        .expect("registered");
+    let invocation = fixture.invocation();
+    let result = fixture.boundary().run(
+        handle,
+        declaration,
+        &call,
+        &invocation,
+        &mut *fixture.stamper.borrow_mut(),
+        |records| {
+            records.read("shop", "item", item)?;
+            let note = records.insert("notes", &[("title", text("Pommes"))], &[])?;
+            records.delete("notes", note.id)
+        },
+    );
+    assert!(matches!(result, Ok(CallResult::Committed(_))), "{result:?}");
+    let journal = handle
+        .journaled_call(&CallKey {
+            principal: call.principal,
+            source: &call.source,
+            call_id: invocation.call_id,
+        })
+        .expect("read the journal");
+    assert_eq!(journal.len(), 2);
+    assert!(
+        journal[1].rev_after.is_none(),
+        "the second row is the delete"
+    );
+    for row in &journal {
+        let inputs = decode_inputs(&row.inputs).expect("decode");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!((inputs[0].id, inputs[0].implicit), (item, true));
+        assert_eq!(
+            (inputs[0].taint.as_str(), inputs[0].text_taint.as_str()),
+            ("external", "external"),
+            "rev after {:?}",
+            row.rev_after
+        );
+    }
+}

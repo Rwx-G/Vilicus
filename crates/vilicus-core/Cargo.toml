@@ -37,5 +37,9 @@ unicode-normalization.workspace = true
 
 # Test code only: the registry tests build real FTS5 tables in a module file without the
 # authorizer, as Story 3.7's migrations will, which no storage handle can before that story.
+# aws-lc-rs decrypts the pages of a module file for the file inspection of Story 3.6 (E17), as
+# the spike of Story 1.11 did with OpenSSL: the package and version vilicus-proto's tests already
+# use, a new dev-dependency edge and no new package.
 [dev-dependencies]
 rusqlite.workspace = true
+aws-lc-rs.workspace = true

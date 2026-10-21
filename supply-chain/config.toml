@@ -41,12 +41,12 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 [[exemptions.aws-lc-rs]]
 version = "1.18.2"
 criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by vilicus-proto. cargo vet suggests `cargo vet inspect aws-lc-rs 1.18.2` (34023 lines)."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests) and of vilicus-core (page decryption of the E17 file inspection tests, Story 3.6), never in a release artefact; required by vilicus-proto and vilicus-core. cargo vet suggests `cargo vet inspect aws-lc-rs 1.18.2` (34023 lines)."
 
 [[exemptions.aws-lc-sys]]
 version = "0.46.0"
 criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests) and of vilicus-core (E17 file inspection tests), never in a release artefact; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
 
 [[exemptions.bitflags]]
 version = "2.13.2"

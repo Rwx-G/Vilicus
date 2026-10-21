@@ -530,6 +530,7 @@ dependencies = [
 name = "vilicus-core"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "rusqlite",
  "unicode-normalization",
  "vilicus-crypto",

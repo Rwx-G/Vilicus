@@ -11,7 +11,8 @@
 //! Core journals each record the call changes (`journal`, AD-26), writes the call's effect
 //! intents to the outbox (AD-28) and records the event a consumer's call reacts to (AD-10); a
 //! repeated call, by its principal, `source` and `call_id`, returns the first one's result
-//! without running again. Effect outcomes are recorded after the commit (`effect`).
+//! without running again. Effect outcomes are recorded after the commit (`effect`), and the
+//! journal's retention purge runs per partition kind ([`purge_expired_journal`]).
 //!
 //! The row writer holds each field a write gives to its declaration (D98, D104, I40), and each
 //! envelope value to its stored form (`envelope`, D146), and refuses the whole write with a typed
@@ -56,9 +57,13 @@ mod journal;
 mod provenance;
 
 #[cfg(test)]
+mod inspect;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_call;
+#[cfg(test)]
+mod tests_deletion;
 #[cfg(test)]
 mod tests_journal;
 
@@ -78,7 +83,10 @@ pub use call::{
 pub use effect::{UnknownEffect, effects_to_perform, record_effect_outcome, retry_failed_effect};
 #[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
-pub use journal::{INPUT_COLUMNS, JournaledInput, Row, decode_inputs, decode_row};
+pub use journal::{
+    INPUT_COLUMNS, JournaledInput, Row, decode_inputs, decode_row, journal_retention,
+    purge_expired_journal,
+};
 pub use provenance::{DRAFT_RUN_WORDS, RecordProvenance};
 
 /// Why the Core refuses a write, a label confirmation or a stored row. No variant carries a

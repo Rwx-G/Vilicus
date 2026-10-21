@@ -1,5 +1,6 @@
 //! The write journal as the Core keeps it (AD-26, FR-29, I9, D132): what a call's change records
-//! of its record and of its inputs, and the encoding of both.
+//! of its record and of its inputs, the encoding of both, and the retention of the journal by
+//! partition kind.
 //!
 //! An image is the stored row of the record, read in the write transaction: every envelope
 //! column, both labels included, then every declared field, each with its name. It holds the
@@ -19,9 +20,11 @@
 //! - the inputs: version byte 1, their number as 2 bytes big-endian, then each input as a row of
 //!   the columns of [`INPUT_COLUMNS`], its length first as 4 bytes big-endian.
 
+use std::time::Duration;
+
 use vilicus_module_api::{ENVELOPE, Table, Value};
-use vilicus_storage::{Handle, SqlValue, Write};
-use vilicus_types::Id;
+use vilicus_storage::{Handle, JournalPurge, Partition, SqlValue, Write};
+use vilicus_types::{HOME_JOURNAL_RETENTION, Id, UNDO_JOURNAL_RETENTION, UtcMillis};
 
 use super::envelope::data_types_text;
 use super::provenance::RecordProvenance;
@@ -283,4 +286,30 @@ pub fn decode_inputs(bytes: &[u8]) -> Result<Vec<JournaledInput>, RecordError> {
     }
     reader.finish()?;
     Ok(inputs)
+}
+
+/// How long journal entries are kept in a partition (AD-26, D113): 30 days in personal and
+/// household partitions, the undo period of FR-29, and a shorter period in the home partition.
+/// Set by the Core per partition kind, never by a module.
+pub const fn journal_retention(partition: Partition) -> Duration {
+    match partition {
+        Partition::Member(_) | Partition::Household => UNDO_JOURNAL_RETENTION,
+        Partition::Home => HOME_JOURNAL_RETENTION,
+    }
+}
+
+/// The retention step of the journal of the file `handle` writes (FR-29, D113, D132): deletes
+/// every entry written before `now` minus [`journal_retention`] of the file's partition, in one
+/// `DELETE`, under `secure_delete` = ON, then checkpoints in TRUNCATE mode until the WAL is
+/// empty, in the same step ([`Handle::purge_journal`]).
+pub fn purge_expired_journal(
+    handle: &Handle<Write>,
+    now: UtcMillis,
+) -> Result<JournalPurge, RecordError> {
+    let retention_millis = i64::try_from(journal_retention(handle.file().partition()).as_secs())
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
+    let cutoff = UtcMillis::from_millis(now.as_millis().saturating_sub(retention_millis))
+        .unwrap_or(UtcMillis::MIN);
+    Ok(handle.purge_journal(cutoff)?)
 }

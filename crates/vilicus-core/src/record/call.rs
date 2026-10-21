@@ -874,9 +874,11 @@ impl CallRecords<'_> {
     /// The provenance of each input, each id once: the snapshot the call carries when the id is
     /// one of its implicit inputs (D147: an implicit input counts as captured, even when the
     /// module names it), otherwise a record of this file, read in the write transaction, or one
-    /// the call read from another file; then the call's other implicit inputs. A write that must
-    /// declare inputs and has none is refused, and so is one of more than [`MAX_WRITE_INPUTS`]
-    /// inputs, declared and implicit together.
+    /// the call read from another file; then the call's other implicit inputs. A snapshot whose
+    /// record the call also read afresh counts as the two combined, the most restrictive of both
+    /// ([`RecordProvenance::combined`]), so a fresher read never lowers a snapshot. A write that
+    /// must declare inputs and has none is refused, and so is one of more than
+    /// [`MAX_WRITE_INPUTS`] inputs, declared and implicit together.
     fn resolve_inputs(
         &self,
         table: &'static Table,
@@ -903,7 +905,7 @@ impl CallRecords<'_> {
                 .iter()
                 .find(|implicit| implicit.id == *id);
             let found = match implicit {
-                Some(implicit) => implicit.clone(),
+                Some(implicit) => self.captured(implicit),
                 None => match self.read_in_file(*id)? {
                     Some(found) => found,
                     None => self
@@ -921,10 +923,19 @@ impl CallRecords<'_> {
         for implicit in &self.call.implicit_inputs {
             if !ids.contains(&implicit.id) {
                 ids.push(implicit.id);
-                resolved.push(implicit.clone());
+                resolved.push(self.captured(implicit));
             }
         }
         Ok((ids, resolved))
+    }
+
+    /// An implicit input as a write counts it: its snapshot, combined with the call's fresher
+    /// read of the same record when the call read it too.
+    fn captured(&self, implicit: &RecordProvenance) -> RecordProvenance {
+        match self.call.read.iter().find(|read| read.id == implicit.id) {
+            Some(fresher) => implicit.combined(fresher),
+            None => implicit.clone(),
+        }
     }
 
     /// The provenance of the record `id` of this file, in whichever of the module's tables holds

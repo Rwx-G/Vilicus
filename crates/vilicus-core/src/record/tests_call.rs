@@ -2623,3 +2623,51 @@ fn stored_taint_is_never_member() {
     }
     check_stored_rows(&handle, module).expect("every stored row is in its stored form");
 }
+
+/// Story 3.9 (D150, review item 9 of Story 3.8): a consumer that reads afresh the record its event
+/// is about cannot lower the event's taint: each write counts the snapshot and the fresher read
+/// combined, whether the module names the record or not, and whichever of the two is `external`.
+#[test]
+fn a_fresher_read_never_lowers_an_events_snapshot() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "snapshot-and-read");
+    let mut stamper = TestStamper::at(noon());
+    let record = member_id(40);
+    let event = |snapshot: Taint, fresher: Taint| Call {
+        implicit_inputs: vec![provenance(record, snapshot, None, &[DataType::Meals])],
+        read: vec![provenance(record, fresher, None, &[DataType::Meals])],
+        ..unapproved(Principal::Event, Source::Event(task()))
+    };
+    for (snapshot, fresher) in [
+        (Taint::External, Taint::Trusted),
+        (Taint::Trusted, Taint::External),
+    ] {
+        for named in [false, true] {
+            let inputs: &[Id] = if named { &[record] } else { &[] };
+            let written = insert_one(
+                &handle,
+                module,
+                &event(snapshot, fresher),
+                &mut stamper,
+                "notes",
+                &note("Réponse"),
+                inputs,
+            );
+            assert_eq!(
+                stored_taint(&handle, "notes", written.id),
+                "external",
+                "snapshot {snapshot}, fresher {fresher}, named {named}"
+            );
+        }
+    }
+    let both_trusted = insert_one(
+        &handle,
+        module,
+        &event(Taint::Trusted, Taint::Trusted),
+        &mut stamper,
+        "notes",
+        &note("Réponse"),
+        &[record],
+    );
+    assert_eq!(stored_taint(&handle, "notes", both_trusted.id), "trusted");
+}

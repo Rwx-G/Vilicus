@@ -60,6 +60,36 @@ impl fmt::Debug for RecordProvenance {
 }
 
 impl RecordProvenance {
+    /// The provenance of one record a call knows twice: as captured with the call (`self`, an
+    /// event's snapshot or a definition an adult validated) and as read afresh (`fresher`). The
+    /// two combine to the most restrictive of both, never to the fresher alone, so reading a
+    /// record again cannot lower what its snapshot carries: the most restrictive labels, every
+    /// data type of either, the free text of both, and the author that makes the record trusted
+    /// for fewer readers. Two authors cannot both be the reader's, so a record known under two is
+    /// counted `external`, as a `trusted` record of another member counts for a derivation (AD-7).
+    pub(crate) fn combined(&self, fresher: &Self) -> Self {
+        let mut labels = self.labels.most_restrictive(fresher.labels);
+        let author = match (self.author, fresher.author) {
+            (Some(captured), Some(read)) if captured != read => {
+                labels = labels.most_restrictive(RecordLabels::EXTERNAL);
+                Some(captured)
+            }
+            (captured, read) => captured.or(read),
+        };
+        Self {
+            id: self.id,
+            labels,
+            author,
+            data_types: union([self.data_types.as_slice(), fresher.data_types.as_slice()]),
+            free_text: self
+                .free_text
+                .iter()
+                .chain(&fresher.free_text)
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// The label a derivation acting for `viewer` counts this record with: the whole record,
     /// free text included, as `viewer` sees it, a `member` record storing `external` (AD-7).
     fn derived_taint(&self, viewer: Option<Id>) -> Taint {
@@ -524,6 +554,57 @@ mod tests {
             "Pommes bio au MARCHÉ samedi matin avant dix",
             &[draft.to_owned()]
         ));
+    }
+
+    fn known(taint: Taint, author: Option<Id>, data_types: &[DataType]) -> RecordProvenance {
+        RecordProvenance {
+            id: "017f22e2-79b0-7cc3-98c4-dc0c0c07398f"
+                .parse()
+                .expect("test id"),
+            labels: RecordLabels::of(taint, taint.into()),
+            author,
+            data_types: data_types.to_vec(),
+            free_text: vec![format!("{taint}")],
+        }
+    }
+
+    /// Story 3.9: a snapshot and a fresher read of one record combine to the most restrictive
+    /// of both, whichever is fresher, and never below either.
+    #[test]
+    fn a_snapshot_and_a_fresher_read_combine_to_the_most_restrictive() {
+        let ella: Id = "017f22e2-79b0-7cc3-98c4-dc0c0c073981"
+            .parse()
+            .expect("test id");
+        let noe: Id = "017f22e2-79b0-7cc3-98c4-dc0c0c073982"
+            .parse()
+            .expect("test id");
+        let external = known(Taint::External, Some(ella), &[DataType::Meals]);
+        let trusted = known(Taint::Trusted, Some(ella), &[DataType::Health]);
+        for (snapshot, fresher) in [(&external, &trusted), (&trusted, &external)] {
+            let combined = snapshot.combined(fresher);
+            assert_eq!(combined.labels, RecordLabels::EXTERNAL);
+            assert_eq!(combined.data_types, [DataType::Health, DataType::Meals]);
+            assert_eq!(combined.free_text.len(), 2);
+            assert_eq!(combined.author, Some(ella));
+            assert_eq!(combined.id, snapshot.id);
+        }
+        let unauthored = known(Taint::Trusted, None, &[DataType::Meals]);
+        for (snapshot, fresher) in [(&unauthored, &trusted), (&trusted, &unauthored)] {
+            let combined = snapshot.combined(fresher);
+            assert_eq!(
+                combined.author,
+                Some(ella),
+                "trusted for Ella only, as the authored reading is"
+            );
+            assert_eq!(
+                combined.labels,
+                RecordLabels::of(Taint::Trusted, TextTaint::Trusted)
+            );
+        }
+        let by_noe = known(Taint::Trusted, Some(noe), &[DataType::Meals]);
+        let combined = trusted.combined(&by_noe);
+        assert_eq!(combined.labels, RecordLabels::EXTERNAL, "two authors");
+        assert_eq!(trusted.combined(&trusted).labels, trusted.labels);
     }
 
     #[test]

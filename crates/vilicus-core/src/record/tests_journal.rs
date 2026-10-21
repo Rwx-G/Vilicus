@@ -1,22 +1,27 @@
 //! Story 3.6: each write of a call is journaled in the call's transaction with both images, both
 //! revisions, the principal and the provenance of its inputs, implicit ones included (AC2); a
 //! repeated call is deduplicated on its principal, `source` and `call_id`, and a call that wrote
-//! nothing is not (AC3); and a record's wrapped key is never part of an image (D132).
+//! nothing is not (AC3); an effect intent commits with its call and its outcome is recorded after
+//! (AC4); a consumer's call records its event in `_consumed` with its effect (AC5); and a record's
+//! wrapped key is never part of an image (D132).
 
 use std::cell::Cell;
 
 use vilicus_module_api::{DataType, ENVELOPE, Records, Value, WriteError};
-use vilicus_storage::{AuthorityKind, CallKey, Handle, JournalRow, Write};
-use vilicus_types::{Id, Principal, Rev, Source, Taint};
+use vilicus_storage::{AuthorityKind, CallKey, EffectState, Handle, JournalRow, Write};
+use vilicus_types::{EffectOutcome, Id, Principal, Rev, Source, Taint};
 
 use super::envelope::data_types_text;
 use super::journal::decode_inputs;
 use super::tests::{content, noon, open_new, raw_connection, raw_rows};
 use super::tests_call::{
-    TestStamper, ella, member_id, new_invocation, noe, note, notes_module, own_action, provenance,
-    task,
+    TestStamper, approved, ella, member_id, new_invocation, noe, note, notes_module, own_action,
+    provenance, task,
 };
-use super::{Authority, Call, CallResult, Consumed, Invocation, RecordError, decode_row, run_call};
+use super::{
+    Authority, Call, CallResult, Consumed, EventDelivery, Invocation, RecordError, decode_row,
+    effects_to_perform, record_effect_outcome, retry_failed_effect, run_call,
+};
 
 fn key<'a>(call: &'a Call, invocation: &Invocation) -> CallKey<'a> {
     CallKey {
@@ -318,20 +323,23 @@ fn a_repeated_call_returns_the_first_result_and_runs_nothing() {
     let runs = Cell::new(0);
     let body = |records: &mut dyn Records| {
         runs.set(runs.get() + 1);
-        records.insert("notes", &note("Pommes"), &[])
+        let written = records.insert("notes", &note("Pommes"), &[])?;
+        records.request_effect("send_message", b"order-42", b"parameters")?;
+        Ok(written)
     };
     let CallResult::Committed(first) =
         run_call(&handle, module, &by, &invocation, &mut stamper, body).expect("commits")
     else {
         panic!("a new call runs")
     };
-    assert_eq!(first.changes.len(), 1);
+    assert_eq!((first.changes.len(), first.effects.len()), (1, 1));
     let after_first = content(&handle);
     let again = run_call(&handle, module, &by, &invocation, &mut stamper, body).expect("answered");
     let CallResult::Deduplicated(earlier) = again else {
         panic!("the same call is deduplicated")
     };
     assert_eq!(earlier.changes, first.changes);
+    assert_eq!(earlier.effects, first.effects);
     assert_eq!(runs.get(), 1, "the module's code ran once");
     assert_eq!(content(&handle), after_first, "nothing was written");
 
@@ -391,6 +399,242 @@ fn a_call_that_writes_nothing_is_not_deduplicated() {
     })
     .expect("the retry commits");
     assert!(matches!(outcome, CallResult::Committed(_)));
+}
+
+/// AC4 (AD-28, NFR-3): an effect intent commits with its call's writes, or not at all; the
+/// outcome is recorded after the commit; an `unknown` one is reported to the member and never
+/// retried; a `failed` one is retried by the Core with the same key; the same key requested by
+/// another call is the same intent.
+#[test]
+fn an_effect_intent_commits_with_its_call_and_its_outcome_is_recorded_after() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "effects");
+    let mut stamper = TestStamper::at(noon());
+    let by = approved(Taint::Trusted, &[], &[]);
+
+    let rolled_back = run_call(
+        &handle,
+        module,
+        &by,
+        &new_invocation(&by),
+        &mut stamper,
+        |records| {
+            records.request_effect("send_message", b"rolled-back", b"x")?;
+            records.insert("notes", &[("title", Value::Text("Pommes".into()))], &[])
+        },
+    );
+    assert!(rolled_back.is_err());
+    assert!(effects_to_perform(&handle).expect("read").is_empty());
+    for (effect, key) in [("Send message", &b"k"[..]), ("send_message", b"")] {
+        let refused = run_call(
+            &handle,
+            module,
+            &by,
+            &new_invocation(&by),
+            &mut stamper,
+            |records| records.request_effect(effect, key, b"x"),
+        );
+        assert!(
+            matches!(refused, Err(RecordError::InvalidEffect)),
+            "{effect:?} {refused:?}"
+        );
+    }
+
+    let mut requested = Vec::new();
+    for key in [&b"done"[..], b"failed", b"unknown"] {
+        let CallResult::Committed(outcome) = run_call(
+            &handle,
+            module,
+            &by,
+            &new_invocation(&by),
+            &mut stamper,
+            |records| {
+                records.insert("notes", &note("Commande"), &[])?;
+                records.request_effect("send_message", key, b"parameters")
+            },
+        )
+        .expect("commits") else {
+            panic!("a new call runs")
+        };
+        assert_eq!(outcome.effects.len(), 1);
+        assert_eq!(outcome.effects[0].id, outcome.value);
+        requested.push(outcome.value);
+    }
+    let CallResult::Committed(repeat) = run_call(
+        &handle,
+        module,
+        &by,
+        &new_invocation(&by),
+        &mut stamper,
+        |records| records.request_effect("send_message", b"done", b"parameters"),
+    )
+    .expect("commits") else {
+        panic!("a new call runs")
+    };
+    assert_eq!(
+        repeat.value, requested[0],
+        "the same key is the same intent"
+    );
+    assert!(repeat.effects.is_empty(), "and the call wrote no intent");
+    let pending: Vec<Id> = effects_to_perform(&handle)
+        .expect("read")
+        .into_iter()
+        .map(|effect| effect.id)
+        .collect();
+    assert_eq!(pending, requested);
+
+    let later = stamper_time(noon(), 1_000);
+    assert_eq!(
+        record_effect_outcome(&handle, requested[0], EffectOutcome::Done, later).expect("record"),
+        None
+    );
+    assert_eq!(
+        record_effect_outcome(&handle, requested[1], EffectOutcome::Failed, later).expect("record"),
+        None
+    );
+    let unknown = record_effect_outcome(&handle, requested[2], EffectOutcome::Unknown, later)
+        .expect("record")
+        .expect("an unknown outcome is reported");
+    assert_eq!(
+        (unknown.intent, unknown.member),
+        (requested[2], Some(ella()))
+    );
+    assert!(
+        retry_failed_effect(&handle, requested[2], later).is_err(),
+        "never blindly"
+    );
+    assert!(
+        retry_failed_effect(&handle, requested[0], later).is_err(),
+        "done is done"
+    );
+    retry_failed_effect(&handle, requested[1], later).expect("a failed effect is retried");
+    let pending = effects_to_perform(&handle).expect("read");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        (
+            pending[0].id,
+            pending[0].idempotency_key.as_slice(),
+            pending[0].state
+        ),
+        (requested[1], &b"failed"[..], EffectState::Pending)
+    );
+}
+
+fn consumer_call() -> Call {
+    Call {
+        principal: Principal::Event,
+        source: Source::Event(task()),
+        session: Taint::Trusted,
+        consumed: Consumed::NOTHING,
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for: Some(ella()),
+        },
+        read: Vec::new(),
+        implicit_inputs: vec![provenance(
+            member_id(50),
+            Taint::Trusted,
+            Some(ella()),
+            &[DataType::Meals],
+        )],
+    }
+}
+
+/// AC5 (FR-24, AD-26): a consumer's call records the event in `_consumed` in the transaction of
+/// its effect: a rolled-back call records nothing, a committed one records it, and a second
+/// delivery of the event to the consumer, whatever its call id, runs nothing.
+#[test]
+fn a_consumers_call_records_its_event_with_its_effect() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "consumed");
+    let mut stamper = TestStamper::at(noon());
+    let by = consumer_call();
+    let delivery = EventDelivery {
+        event: member_id(60),
+        consumer: "notes",
+    };
+    let invocation = |call_id| Invocation {
+        call_id,
+        delivery: Some(delivery),
+    };
+    let refused = run_call(
+        &handle,
+        module,
+        &by,
+        &invocation(member_id(61)),
+        &mut stamper,
+        |records| records.insert("notes", &[("title", Value::Text("Pommes".into()))], &[]),
+    );
+    assert!(refused.is_err());
+    assert!(
+        !handle
+            .is_consumed(delivery.event, delivery.consumer)
+            .expect("read")
+    );
+
+    let outcome = run_call(
+        &handle,
+        module,
+        &by,
+        &invocation(member_id(62)),
+        &mut stamper,
+        |records| records.insert("notes", &note("Pommes"), &[]),
+    )
+    .expect("commits");
+    assert!(matches!(outcome, CallResult::Committed(_)));
+    assert!(
+        handle
+            .is_consumed(delivery.event, delivery.consumer)
+            .expect("read")
+    );
+    let after = content(&handle);
+    let ran = Cell::new(false);
+    let again = run_call(
+        &handle,
+        module,
+        &by,
+        &invocation(member_id(63)),
+        &mut stamper,
+        |records| {
+            ran.set(true);
+            records.insert("notes", &note("Pommes"), &[])
+        },
+    )
+    .expect("answered");
+    assert!(matches!(again, CallResult::AlreadyConsumed));
+    assert!(!ran.get());
+    assert_eq!(content(&handle), after);
+    let other_consumer = Invocation {
+        call_id: member_id(64),
+        delivery: Some(EventDelivery {
+            consumer: "digest",
+            ..delivery
+        }),
+    };
+    assert!(matches!(
+        run_call(&handle, module, &by, &other_consumer, &mut stamper, |_| Ok(
+            ()
+        ))
+        .expect("commits"),
+        CallResult::Committed(_)
+    ));
+
+    let without_delivery = Invocation {
+        call_id: member_id(65),
+        delivery: None,
+    };
+    let by_member = own_action(ella());
+    for (call, invocation) in [
+        (&by, without_delivery),
+        (&by_member, invocation(member_id(66))),
+    ] {
+        let outcome = run_call(&handle, module, call, &invocation, &mut stamper, |_| Ok(()));
+        assert!(
+            matches!(outcome, Err(RecordError::InconsistentCall)),
+            "{:?}",
+            call.principal
+        );
+    }
 }
 
 /// D132, the decision of Story 3.6: a record's wrapped key, kept in the Core table

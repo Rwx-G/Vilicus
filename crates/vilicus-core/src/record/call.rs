@@ -1,12 +1,14 @@
 //! One call of a module through the typed record API (AD-9): every write of the call in one
 //! `BEGIN IMMEDIATE` transaction on the module file's write handle, each stamped by the Core and
 //! journaled in the same transaction (AD-26), the call deduplicated by its caller's `call_id`
-//! (AD-28).
+//! (AD-28), its effect intents written to the outbox and the event it consumes recorded with it.
 
 use vilicus_module_api::{
-    FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written,
+    FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written, is_identifier,
 };
-use vilicus_storage::{AuthorityKind, CallKey, Handle, JournalEntry, JournalRow, SqlValue, Write};
+use vilicus_storage::{
+    AuthorityKind, CallKey, EffectIntent, Handle, JournalEntry, JournalRow, SqlValue, Write,
+};
 use vilicus_types::{DataType, EffectiveTaint, Id, Principal, Rev, Source, Taint, UtcMillis};
 
 use super::envelope::{self, data_types_text};
@@ -109,12 +111,38 @@ pub trait Stamper {
     fn id_random(&mut self) -> [u8; 10];
 }
 
-/// What one call is beside who makes it: the id its caller gave it.
+/// What one call is beside who makes it: the id its caller gave it, and, for a consumer of an
+/// event, the delivery it reacts to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Invocation {
     /// The call's id, a UUIDv7 the caller generated before any queueing (AD-28): a second call of
     /// the same principal and `source` with this id, against the same file, is this call.
     pub call_id: Id,
+    /// The event an `Event` call consumes; `None` for every other principal (AD-27).
+    pub delivery: Option<EventDelivery>,
+}
+
+/// The delivery of one event to one consumer (AD-10, AD-27): the consumer records the event id
+/// in `_consumed` in the transaction of its effect, so a second delivery produces no second
+/// effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventDelivery {
+    /// The event's id.
+    pub event: Id,
+    /// The consumer, as the pipeline names it.
+    pub consumer: &'static str,
+}
+
+/// An effect intent a call wrote to the outbox (AD-28): the effect is performed by the Core after
+/// the commit, never by the module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestedEffect {
+    /// The intent's id.
+    pub id: Id,
+    /// The effect, as the module named it.
+    pub effect: String,
+    /// The business idempotency key the module derived from the effect's parameters.
+    pub idempotency_key: Vec<u8>,
 }
 
 /// A record a call changed: what the write journal of the call records (AD-26).
@@ -133,13 +161,17 @@ pub struct RecordChange {
     pub inputs: Vec<Id>,
 }
 
-/// A committed call: what the module's code returned and every record it changed, in order.
+/// A committed call: what the module's code returned, every record it changed and every effect
+/// intent it wrote, in order.
 #[derive(Debug)]
 pub struct CallOutcome<T> {
     /// What the module's code returned.
     pub value: T,
     /// Every record the call changed.
     pub changes: Vec<RecordChange>,
+    /// Every effect intent the call wrote; an effect whose key an earlier intent holds is that
+    /// intent's, and not listed again.
+    pub effects: Vec<RequestedEffect>,
 }
 
 /// What became of a call.
@@ -149,8 +181,11 @@ pub enum CallResult<T> {
     Committed(CallOutcome<T>),
     /// A call of the same principal, `source` and `call_id` wrote in this file before: the
     /// module's code did not run, nothing was written, and this is that call's result, read
-    /// back from the journal (AD-26, AD-28).
+    /// back from the journal and the outbox (AD-26, AD-28).
     Deduplicated(EarlierCall),
+    /// The consumer already recorded the event in `_consumed`: the module's code did not run
+    /// and nothing was written (AD-10).
+    AlreadyConsumed,
 }
 
 /// The result of an earlier call of the same key, as the file holds it.
@@ -158,27 +193,31 @@ pub enum CallResult<T> {
 pub struct EarlierCall {
     /// Every record it changed, in order.
     pub changes: Vec<RecordChange>,
+    /// Every effect intent it wrote, in order.
+    pub effects: Vec<RequestedEffect>,
 }
 
 /// Runs `body`, the module's code for one call, in one `BEGIN IMMEDIATE` transaction on
 /// `handle`, the write handle of a file of `module`. `body` writes through the
 /// [`Records`] it receives, and the transaction commits only when `body` returns `Ok` and no
 /// write of the call was refused; otherwise it is rolled back and nothing of the call is stored,
-/// its journal rows included. A refused write ends the call
+/// its journal rows, effect intents and consumed event included. A refused write ends the call
 /// with that refusal, whatever `body` returns after it; an error `body` returns of its own is
 /// [`RecordError::Aborted`]. A panic, in `body` or in the Core while it writes, rolls the
 /// transaction back as it unwinds; catching it is the caller's (AD-9).
 ///
 /// In the transaction, before `body` runs, the Core looks the call up by its principal, its
-/// `source` and the `call_id` of `invocation` in the file's journal: a call of that key that
-/// wrote is this one, and its result is returned without running `body`
+/// `source` and the `call_id` of `invocation` in the file's journal and outbox: a call of that
+/// key that wrote is this one, and its result is returned without running `body`
 /// ([`CallResult::Deduplicated`]); a call that wrote nothing left no row, so it is not
-/// deduplicated (AD-26, AD-28). Each write of the call journals its record, before and after
+/// deduplicated (AD-26, AD-28). Then a consumer's delivery already recorded in `_consumed` is
+/// [`CallResult::AlreadyConsumed`]. Each write of the call journals its record, before and after
 /// images, revisions, the call's principal, authority and member, and the provenance of its
-/// inputs, implicit ones included.
+/// inputs, implicit ones included; a consumer's call records its event in `_consumed` before the
+/// commit.
 ///
-/// The call is refused before any write when its authority does not fit its principal
-/// ([`RecordError::InconsistentCall`]).
+/// The call is refused before any write when its authority does not fit its principal, or a
+/// delivery its principal ([`RecordError::InconsistentCall`]).
 pub fn run_call<T>(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
@@ -187,7 +226,7 @@ pub fn run_call<T>(
     stamper: &mut dyn Stamper,
     body: impl FnOnce(&mut dyn Records) -> Result<T, WriteError>,
 ) -> Result<CallResult<T>, RecordError> {
-    check_call(call)?;
+    check_call(call, invocation)?;
     let key = CallKey {
         principal: call.principal,
         source: &call.source,
@@ -197,6 +236,11 @@ pub fn run_call<T>(
         if let Some(earlier) = earlier_call(handle, module, &key)? {
             return Ok(CallResult::Deduplicated(earlier));
         }
+        if let Some(delivery) = invocation.delivery
+            && handle.is_consumed(delivery.event, delivery.consumer)?
+        {
+            return Ok(CallResult::AlreadyConsumed);
+        }
         let mut records = CallRecords {
             handle,
             module,
@@ -204,28 +248,44 @@ pub fn run_call<T>(
             key,
             stamper,
             changes: Vec::new(),
+            effects: Vec::new(),
             refusal: None,
         };
         let returned = body(&mut records);
-        match (records.refusal, returned) {
+        let CallRecords {
+            stamper,
+            changes,
+            effects,
+            refusal,
+            ..
+        } = records;
+        match (refusal, returned) {
             (Some(refusal), _) => Err(refusal),
             (None, Err(error)) => Err(RecordError::Aborted(error)),
-            (None, Ok(value)) => Ok(CallResult::Committed(CallOutcome {
-                value,
-                changes: records.changes,
-            })),
+            (None, Ok(value)) => {
+                if let Some(delivery) = invocation.delivery {
+                    handle.record_consumed(delivery.event, delivery.consumer, stamper.now())?;
+                }
+                Ok(CallResult::Committed(CallOutcome {
+                    value,
+                    changes,
+                    effects,
+                }))
+            }
         }
     })
 }
 
-/// The result of the earlier call of `key` in this file, if one wrote there: its journal rows.
+/// The result of the earlier call of `key` in this file, if one wrote there: its journal rows and
+/// its effect intents.
 fn earlier_call(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
     key: &CallKey<'_>,
 ) -> Result<Option<EarlierCall>, RecordError> {
     let journal = handle.journaled_call(key)?;
-    if journal.is_empty() {
+    let effects = handle.effects_of_call(key)?;
+    if journal.is_empty() && effects.is_empty() {
         return Ok(None);
     }
     Ok(Some(EarlierCall {
@@ -233,6 +293,14 @@ fn earlier_call(
             .into_iter()
             .map(|row| journaled_change(module, row))
             .collect::<Result<_, _>>()?,
+        effects: effects
+            .into_iter()
+            .map(|effect| RequestedEffect {
+                id: effect.id,
+                effect: effect.effect,
+                idempotency_key: effect.idempotency_key,
+            })
+            .collect(),
     }))
 }
 
@@ -258,9 +326,9 @@ fn journaled_change(
 
 /// Refuses a call whose authority or source does not fit its principal: only `Member` and `Cli`
 /// act as a member themselves, and always do; only a request of a token principal is approved;
-/// the `source` stamped on its records is one the principal produces; and what it consumed fits
-/// its session.
-fn check_call(call: &Call) -> Result<(), RecordError> {
+/// the `source` stamped on its records is one the principal produces; what it consumed fits its
+/// session; and only an `Event` call, and every one, consumes a delivered event (AD-27).
+fn check_call(call: &Call, invocation: &Invocation) -> Result<(), RecordError> {
     let acts_as_member = matches!(call.principal, Principal::Member | Principal::Cli);
     let authority_fits = match call.authority {
         Authority::OwnAction { .. } => acts_as_member,
@@ -269,7 +337,8 @@ fn check_call(call: &Call) -> Result<(), RecordError> {
         }
         Authority::Unapproved { .. } => !acts_as_member,
     };
-    if authority_fits && source_fits(call) && consumed_fits(call) {
+    let delivery_fits = invocation.delivery.is_some() == (call.principal == Principal::Event);
+    if authority_fits && source_fits(call) && consumed_fits(call) && delivery_fits {
         Ok(())
     } else {
         Err(RecordError::InconsistentCall)
@@ -338,6 +407,7 @@ struct CallRecords<'a> {
     key: CallKey<'a>,
     stamper: &'a mut dyn Stamper,
     changes: Vec<RecordChange>,
+    effects: Vec<RequestedEffect>,
     /// The first refused write of the call, which ends it.
     refusal: Option<RecordError>,
 }
@@ -365,6 +435,15 @@ impl Records for CallRecords<'_> {
 
     fn delete(&mut self, table: &str, id: Id) -> Result<(), WriteError> {
         self.attempt(|records| records.delete_record(table, id))
+    }
+
+    fn request_effect(
+        &mut self,
+        effect: &str,
+        idempotency_key: &[u8],
+        payload: &[u8],
+    ) -> Result<Id, WriteError> {
+        self.attempt(|records| records.request(effect, idempotency_key, payload))
     }
 }
 
@@ -573,6 +652,41 @@ impl CallRecords<'_> {
         })?;
         self.changes.push(change);
         Ok(())
+    }
+
+    /// Writes an effect intent of the call to the outbox (AD-28): the effect `effect`, an
+    /// identifier, with its business idempotency key, which may not be empty, and its parameters.
+    /// An intent the file already holds under that key is returned instead, unchanged.
+    fn request(
+        &mut self,
+        effect: &str,
+        idempotency_key: &[u8],
+        payload: &[u8],
+    ) -> Result<Id, RecordError> {
+        if !is_identifier(effect) || idempotency_key.is_empty() {
+            return Err(RecordError::InvalidEffect);
+        }
+        let now = self.stamper.now();
+        let id =
+            Id::new_v7(now, self.stamper.id_random()).map_err(|_| RecordError::InvalidEffect)?;
+        let (_, member) = journaled_authority(&self.call.authority);
+        let intent = self.handle.append_effect(&EffectIntent {
+            call: self.key,
+            member,
+            id,
+            effect,
+            idempotency_key,
+            payload,
+            created_at: now,
+        })?;
+        if intent.id == id {
+            self.effects.push(RequestedEffect {
+                id,
+                effect: intent.effect,
+                idempotency_key: intent.idempotency_key,
+            });
+        }
+        Ok(intent.id)
     }
 
     /// The provenance of each input, each id once: a record of this file, read in the write
@@ -799,6 +913,7 @@ fn write_error(error: &RecordError) -> WriteError {
         RecordError::MissingInputs { table } => WriteError::MissingInputs { table },
         RecordError::UnknownInput { table } => WriteError::UnknownInput { table },
         RecordError::UndeclaredDataType { table } => WriteError::UndeclaredDataType { table },
+        RecordError::InvalidEffect => WriteError::InvalidEffect,
         RecordError::IdChanged { .. }
         | RecordError::InvalidJournal
         | RecordError::InvalidEnvelope { .. }

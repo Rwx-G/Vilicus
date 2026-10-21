@@ -5,7 +5,10 @@
 //! checks every value against its declaration, stamps the envelope (id, `source`, `author`, times,
 //! `rev`), and computes `taint`, `text_taint` and `data_types` from who makes the call and from
 //! the inputs (AD-6, AD-7). No method takes an envelope value, so a module cannot choose its own provenance,
-//! and no method runs SQL.
+//! and no method runs SQL. The Core journals every write in the same transaction (AD-26).
+//!
+//! A module never performs an outbound effect: it requests one, with a business idempotency key
+//! derived from the effect's parameters, and the Core performs it after the call commits (AD-28).
 //!
 //! A module's code holds a `&mut dyn Records` for the duration of one call:
 //!
@@ -67,6 +70,19 @@ pub trait Records {
 
     /// Deletes the record `id` of `table`.
     fn delete(&mut self, table: &str, id: Id) -> Result<(), WriteError>;
+
+    /// Requests the outbound effect `effect`, an identifier, with `payload` as its parameters
+    /// and `idempotency_key`, a key the module derives from those parameters, so the same
+    /// effect asked twice has the same key (AD-28). The request is written in the call's
+    /// transaction and the Core performs the effect after the commit; it is never performed when
+    /// the call is rolled back. A request whose key the file already holds is that earlier
+    /// request: nothing is written, and its id is returned. Returns the id of the request.
+    fn request_effect(
+        &mut self,
+        effect: &str,
+        idempotency_key: &[u8],
+        payload: &[u8],
+    ) -> Result<Id, WriteError>;
 }
 
 /// A record the Core wrote: its id and the revision it now has.
@@ -154,6 +170,8 @@ pub enum WriteError {
         /// The table.
         table: &'static str,
     },
+    /// An effect request whose effect is not an identifier, or whose idempotency key is empty.
+    InvalidEffect,
     /// An earlier write of this call was refused; the call is rolled back.
     CallRefused,
     /// The Core could not complete the write; the call is rolled back.
@@ -199,6 +217,9 @@ impl fmt::Display for WriteError {
             }
             Self::UndeclaredDataType { table } => {
                 write!(formatter, "{table}: a data type the table does not declare")
+            }
+            Self::InvalidEffect => {
+                formatter.write_str("an effect request needs an identifier and an idempotency key")
             }
             Self::CallRefused => formatter.write_str("an earlier write of this call was refused"),
             Self::Failed => formatter.write_str("the write failed and the call was rolled back"),

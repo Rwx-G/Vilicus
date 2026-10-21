@@ -8,8 +8,10 @@
 //! `rev`) and computes `taint`, `text_taint` and `data_types` from the [`Call`] (who makes it, on
 //! what authority) and from the records the write is derived from; the module gives field values
 //! and input ids only. A refused write rolls back the whole call. In the same transaction the
-//! Core journals each record the call changes (`journal`, AD-26); a repeated call, by its
-//! principal, `source` and `call_id`, returns the first one's result without running again.
+//! Core journals each record the call changes (`journal`, AD-26), writes the call's effect
+//! intents to the outbox (AD-28) and records the event a consumer's call reacts to (AD-10); a
+//! repeated call, by its principal, `source` and `call_id`, returns the first one's result
+//! without running again. Effect outcomes are recorded after the commit (`effect`).
 //!
 //! The row writer holds each field a write gives to its declaration (D98, D104, I40), and each
 //! envelope value to its stored form (`envelope`, D146), and refuses the whole write with a typed
@@ -46,6 +48,7 @@
 )]
 
 mod call;
+mod effect;
 mod envelope;
 #[cfg(any(test, feature = "testing"))]
 mod fuzz;
@@ -69,9 +72,10 @@ use vilicus_storage::{Handle, Inspect, SqlValue, Write};
 use vilicus_types::{Id, UtcMillis};
 
 pub use call::{
-    Authority, Call, CallOutcome, CallResult, Consumed, EarlierCall, Invocation, RecordChange,
-    Stamper, run_call,
+    Authority, Call, CallOutcome, CallResult, Consumed, EarlierCall, EventDelivery, Invocation,
+    RecordChange, RequestedEffect, Stamper, run_call,
 };
+pub use effect::{UnknownEffect, effects_to_perform, record_effect_outcome, retry_failed_effect};
 #[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
 pub use journal::{INPUT_COLUMNS, JournaledInput, Row, decode_inputs, decode_row};
@@ -188,9 +192,12 @@ pub enum RecordError {
     },
     /// The call does not hold together: a member's own action from a principal other than
     /// `Member` or `Cli`, an approval for a principal other than `AiTask` or `Plugin`, a `Member`
-    /// or `Cli` call that is not the member's own action, or a `source` its principal does not
-    /// produce.
+    /// or `Cli` call that is not the member's own action, a `source` its principal does not
+    /// produce, or an event delivery to a principal other than `Event`, or none to an `Event`.
     InconsistentCall,
+    /// An effect intent whose effect is not an identifier, or whose idempotency key is empty
+    /// (AD-28).
+    InvalidEffect,
     /// A journal row of the file does not decode, or names a table the module does not declare.
     InvalidJournal,
     /// The module's code ended the call with its own error; the call was rolled back.
@@ -262,6 +269,9 @@ impl fmt::Display for RecordError {
             }
             Self::InconsistentCall => {
                 formatter.write_str("the call's authority does not fit its principal")
+            }
+            Self::InvalidEffect => {
+                formatter.write_str("an effect intent needs an identifier and an idempotency key")
             }
             Self::InvalidJournal => formatter.write_str("a journal row of the file is malformed"),
             Self::Aborted(error) => write!(formatter, "the module ended the call: {error}"),

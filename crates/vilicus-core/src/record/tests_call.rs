@@ -18,8 +18,8 @@ use vilicus_types::{
 use super::envelope::data_types_text;
 use super::tests::{content, module, noon, open_new, rows, text};
 use super::{
-    Authority, Call, CallOutcome, CallResult, Consumed, Invocation, RecordChange, RecordError,
-    RecordProvenance, Stamper, check_stored_rows, insert, run_call,
+    Authority, Call, CallOutcome, CallResult, Consumed, EventDelivery, Invocation, RecordChange,
+    RecordError, RecordProvenance, Stamper, check_stored_rows, insert, run_call,
 };
 
 const NOTE_FIELDS: &[Field] = &[
@@ -207,8 +207,9 @@ pub(super) fn note(title: &str) -> Vec<(&'static str, Value)> {
     vec![("title", text(title)), ("status", text("open"))]
 }
 
-/// A new invocation for each call the tests make: a call id no other call of the test run has.
-pub(super) fn new_invocation(_call: &Call) -> Invocation {
+/// A new invocation for each call the tests make: a call id no other call of the test run has,
+/// and, for an `Event` call, the delivery of an event no consumer has seen.
+pub(super) fn new_invocation(call: &Call) -> Invocation {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     let issued = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let id = |prefix: u8| {
@@ -216,7 +217,13 @@ pub(super) fn new_invocation(_call: &Call) -> Invocation {
         random[6..].copy_from_slice(&issued.to_be_bytes());
         Id::new_v7(noon(), random).expect("after the epoch")
     };
-    Invocation { call_id: id(0xca) }
+    Invocation {
+        call_id: id(0xca),
+        delivery: (call.principal == Principal::Event).then(|| EventDelivery {
+            event: id(0xe7),
+            consumer: "notes",
+        }),
+    }
 }
 
 /// Runs `body` as one call, under a call id of its own, and returns its outcome.
@@ -229,7 +236,9 @@ fn call<T>(
 ) -> Result<CallOutcome<T>, RecordError> {
     match run_call(handle, module, call, &new_invocation(call), stamper, body)? {
         CallResult::Committed(outcome) => Ok(outcome),
-        CallResult::Deduplicated(_) => panic!("a call of a new call id always runs"),
+        CallResult::Deduplicated(_) | CallResult::AlreadyConsumed => {
+            panic!("a call of a new call id and a new event always runs")
+        }
     }
 }
 

@@ -138,11 +138,18 @@ pub fn cold_copies(file: &ModuleFile) -> Result<Vec<ColdCopy>> {
     Ok(copies)
 }
 
+/// Removes a cold copy with everything SQLite or the sidecar may have left beside it: its WAL
+/// and shared-memory file, should a connection ever have opened it, and its sidecar.
 fn remove_cold_copy(copy: &ColdCopy) -> Result<()> {
     handle::remove_if_present(&copy.path)?;
-    handle::remove_if_present(&file::sidecar_of(&copy.path))?;
-    handle::remove_if_present(&suffixed(&file::sidecar_of(&copy.path), ".tmp"))
+    for suffix in COLD_COPY_COMPANIONS {
+        handle::remove_if_present(&suffixed(&copy.path, suffix))?;
+    }
+    Ok(())
 }
+
+/// The files a cold copy may have beside it, `<cold copy><suffix>`.
+const COLD_COPY_COMPANIONS: [&str; 4] = ["-wal", "-shm", ".epoch", ".epoch.tmp"];
 
 /// Removes every cold copy of `file` that `backup` covers, an earlier state of the file than the
 /// one the verified backup holds, and returns how many went; the others are kept, so no cold
@@ -185,9 +192,9 @@ fn clear_interrupted(file: &ModuleFile) -> Result<()> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let database = name
-            .strip_suffix(".epoch.tmp")
-            .or_else(|| name.strip_suffix(".epoch"));
+        let database = COLD_COPY_COMPANIONS
+            .iter()
+            .find_map(|suffix| name.strip_suffix(suffix));
         if let Some(database) = database
             && parse_cold_copy(&prefix, database).is_some()
             && !file.directory().join(database).exists()

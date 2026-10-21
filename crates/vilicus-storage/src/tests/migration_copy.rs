@@ -360,6 +360,39 @@ fn at_most_three_cold_copies_are_kept_until_a_verified_backup_covers_them() {
     );
 }
 
+/// Review of Story 3.7, L3: a cold copy goes with the WAL and shared-memory file a connection to
+/// it would leave, and those left without their cold copy are cleared by the next migration.
+#[test]
+fn a_cold_copy_goes_with_its_wal_and_shared_memory_file() {
+    let dir = scratch_dir("cold-companions");
+    let file = create_module_file(&dir);
+    let cold = migrate_on_copy(&file, 1, None);
+    for suffix in ["-wal", "-shm"] {
+        let mut path = cold.path().as_os_str().to_owned();
+        path.push(suffix);
+        fs::write(path, b"left by a connection").expect("a companion");
+    }
+    let orphan = dir.join("fixture.household.db.pre-9.9-wal");
+    fs::write(&orphan, b"without its cold copy").expect("an orphan");
+    let removed = maintenance::remove_covered_cold_copies(
+        &file,
+        VerifiedBackup {
+            versions: versions(CORE, 1),
+        },
+    )
+    .expect("remove");
+    assert_eq!(removed, 1);
+    assert!(orphan.exists(), "not a covered cold copy");
+    copy_for_migration(&file, &KEY, None)
+        .expect("copy")
+        .discard()
+        .expect("discard");
+    assert_eq!(
+        names(&dir),
+        ["fixture.household.db", "fixture.household.db.epoch"]
+    );
+}
+
 /// What a crash in the middle of a migration can leave is cleared by the next one before it
 /// copies anything: the working directory, a cold copy that is still the live file (the crash
 /// fell between the link and the rename of the swap) and a cold copy's sidecar alone. The live

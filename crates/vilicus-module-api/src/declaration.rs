@@ -216,9 +216,9 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Everything a module declares: its file and its tools. A module crate exposes one as a `const` item and
-/// checks it there with [`ModuleDeclaration::assert_valid`], so a declaration the registry would
-/// refuse fails that crate's build.
+/// Everything a module declares: its file and its tools. A module crate exposes one as a `const`
+/// item and checks it there with [`ModuleDeclaration::assert_valid`], so a declaration the
+/// registry would refuse fails that crate's build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ModuleDeclaration {
     /// The module name (`vilicus_types::ModuleName` grammar), which names its files.

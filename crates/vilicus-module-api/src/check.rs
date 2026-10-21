@@ -222,7 +222,8 @@ pub enum DeclarationError {
         /// The tool.
         tool: &'static str,
     },
-    /// A tool with an outbound network effect is below tier 2 without an exception class (I13).
+    /// A tool that changes state outside the instance is below tier 2 without an exception class
+    /// (I13).
     NetworkEffectBelowTier2 {
         /// The tool.
         tool: &'static str,
@@ -232,8 +233,8 @@ pub enum DeclarationError {
         /// The tool.
         tool: &'static str,
     },
-    /// A tool declares an exception class but no network effect: a class only ever excuses an
-    /// outbound effect from tier 2 (I13).
+    /// A tool declares an exception class but no network effect: a class only ever excuses a
+    /// change of state outside the instance from tier 2 (I13).
     ExceptionClassWithoutNetworkEffect {
         /// The tool.
         tool: &'static str,
@@ -315,7 +316,7 @@ impl DeclarationError {
                 "a tool crosses partitions, tier 2 and unregistered before the native app"
             }
             Self::NetworkEffectBelowTier2 { .. } => {
-                "a tool with a network effect is below tier 2 without an exception class"
+                "a tool with an outbound effect is below tier 2 without an exception class"
             }
             Self::ExceptionClassOutsideTier1 { .. } => {
                 "a tool with an exception class is not tier 1"
@@ -456,8 +457,8 @@ impl ModuleDeclaration {
     ///
     /// ```
     /// use vilicus_module_api::{
-    ///     Confirmation, DataType, Field, FieldKind, MatrixRow, Migration, ModuleDeclaration, Table,
-    ///     Tier, Tool,
+    ///     Confirmation, DataType, Field, FieldKind, MatrixRow, Migration, ModuleDeclaration,
+    ///     Table, Tier, Tool,
     /// };
     ///
     /// pub const MODULE: ModuleDeclaration = ModuleDeclaration {
@@ -473,7 +474,8 @@ impl ModuleDeclaration {
     ///     }],
     ///     fts5_tables: &[],
     ///     migrations: &[Migration {
-    ///         sql: "CREATE TABLE notes (id BLOB NOT NULL PRIMARY KEY, body TEXT NOT NULL) STRICT;",
+    ///         sql: "CREATE TABLE notes (id BLOB NOT NULL PRIMARY KEY, \
+    ///               body TEXT NOT NULL) STRICT;",
     ///     }],
     ///     matrix_sections: &["7"],
     ///     tools: &[Tool {

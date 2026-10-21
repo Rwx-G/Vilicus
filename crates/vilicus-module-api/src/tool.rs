@@ -36,7 +36,9 @@ impl Confirmation {
     }
 }
 
-/// A row of `doc/capability-matrix.md`, by its section and its Action cell.
+/// A row of `doc/capability-matrix.md`, by its section and its Action cell. Several tools of a
+/// module may implement one row (a create tool and an edit tool for `Create or edit a task`); each
+/// is compared with the row on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MatrixRow {
     /// The section's number as its heading writes it before the period: `2` for
@@ -59,8 +61,10 @@ pub struct Tool {
     /// Its tier, the one its matrix row gives. Tier H never is a tool (I18), and tier 2 is not
     /// registered before the native app exists (D46, FR-60).
     pub tier: Tier,
-    /// True when a call has an outbound network effect: anything leaving the instance, a device
-    /// command included. Such a tool is tier 2 unless it declares an exception class (I13).
+    /// True when a call has an outbound network effect: it changes state outside the instance's
+    /// own files, in a third-party system, an account or a device. A read that only fetches is
+    /// not one; its egress is the egress proxy's and the sandbox's (I4). Such a tool is tier 2
+    /// unless it declares an exception class (I13), so a tier 0 tool never has one.
     pub network_effect: bool,
     /// The named exception class of I13 that makes an outbound effect tier 1, at most one
     /// (AD-48).

@@ -1106,3 +1106,22 @@ fn every_tool_error_names_its_rule_and_its_tool() {
         "a tool's matrix row is in a section its module does not claim: set_light (section 10a)"
     );
 }
+
+/// Review of Story 3.3, M2: a read that only fetches declares no network effect and registers at
+/// tier 0; a change of state outside the instance at tier 0 is refused, whatever it reads.
+#[test]
+fn a_read_that_fetches_declares_no_network_effect() {
+    let fetch = write_tool_outcome(|tool| {
+        tool.tier = Tier::Read;
+        tool.network_effect = false;
+    });
+    assert_eq!(fetch, Ok(()));
+    let change = write_tool_outcome(|tool| {
+        tool.tier = Tier::Read;
+        tool.network_effect = true;
+    });
+    assert_eq!(
+        change,
+        Err(DeclarationError::NetworkEffectBelowTier2 { tool: "add_item" })
+    );
+}

@@ -27,6 +27,10 @@ pub const UNLOCK_WINDOW_DEFAULT: Duration = Duration::from_secs(12 * HOUR);
 /// partitions; the audit log is not affected (PRD FR-29, D113).
 pub const UNDO_JOURNAL_RETENTION: Duration = Duration::from_secs(30 * DAY);
 
+/// How long journal entries are kept in the home partition, whose rules and adapters write far
+/// more often than members do (spine AD-26, `[ASSUMPTION]`).
+pub const HOME_JOURNAL_RETENTION: Duration = Duration::from_secs(24 * HOUR);
+
 const _: () = assert!(UNLOCK_WINDOW_DEFAULT.as_secs() <= UNLOCK_WINDOW_MAX.as_secs());
 
 closed_set! {
@@ -71,6 +75,7 @@ mod tests {
             UNDO_JOURNAL_RETENTION,
             Duration::from_secs(30 * 24 * 60 * 60)
         );
+        assert_eq!(HOME_JOURNAL_RETENTION, Duration::from_secs(24 * 60 * 60));
     }
 
     #[test]

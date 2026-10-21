@@ -82,6 +82,7 @@ macro_rules! closed_set {
 }
 
 mod data_type;
+mod effect;
 mod error;
 mod exception_class;
 mod id;
@@ -99,6 +100,7 @@ mod time;
 mod test_support;
 
 pub use data_type::DataType;
+pub use effect::EffectOutcome;
 pub use error::{ClientError, ClientFacingError, ErrorCode, MessageKey, RetryClass};
 pub use exception_class::ExceptionClass;
 pub use id::{Id, IdError};
@@ -108,8 +110,8 @@ pub use label::{
 };
 pub use limits::{
     CAPABILITY_TOKEN_DEFAULT_BUDGET, CAPABILITY_TOKEN_LIFETIME, DEFAULT_AUDIT_SPOOL_ENTRIES,
-    DEFAULT_BACKUP_INTERVAL, DEFAULT_CERTIFICATE_ALERT_LEAD_TIME, OperatorSetting,
-    UNDO_JOURNAL_RETENTION, UNLOCK_WINDOW_DEFAULT, UNLOCK_WINDOW_MAX,
+    DEFAULT_BACKUP_INTERVAL, DEFAULT_CERTIFICATE_ALERT_LEAD_TIME, HOME_JOURNAL_RETENTION,
+    OperatorSetting, UNDO_JOURNAL_RETENTION, UNLOCK_WINDOW_DEFAULT, UNLOCK_WINDOW_MAX,
 };
 pub use name::NameError;
 pub use principal::Principal;

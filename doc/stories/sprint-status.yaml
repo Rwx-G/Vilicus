@@ -67,7 +67,7 @@ development_status:
 
   epic-3: in-progress
   3-1-sqlcipher-storage-layer-and-connection-authorizer: done
-  3-2-module-registry-and-record-envelope: review
+  3-2-module-registry-and-record-envelope: done
   3-3-tool-declarations-and-capability-matrix-check: ready-for-dev
   3-4-structured-field-validation-and-reviewed-vocabularies: ready-for-dev
   3-5-typed-record-writes-with-taint-and-data-type-stamping: ready-for-dev

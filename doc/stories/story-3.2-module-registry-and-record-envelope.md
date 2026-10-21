@@ -2,7 +2,7 @@
 title: 'Module registry and record envelope'
 epic: 3
 story: 2
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-18, FR-22, FR-58, FR-68, AD-6, AD-9, I8, I36, D98, D103, D104, I6, AD-5, D127]

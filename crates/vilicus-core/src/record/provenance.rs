@@ -1,12 +1,15 @@
-//! The provenance the Core stamps on a write (AD-6, AD-7, D70, D99, D103, D104, I9, I21, I35,
-//! I43): a record's stored `taint`, `data_types` and `author`, computed from the [`Call`] and
+//! The provenance the Core stamps on a write (AD-6, AD-7, D45, D70, D99, D103, D104, I9, I21,
+//! I35, I43): a record's stored `taint`, `data_types` and `author`, computed from the [`Call`] and
 //! from the records the write is derived from, never chosen by a module or a model.
 //!
 //! A record has one `taint`. A write whose parts carry different labels (structured fields a
 //! member approved and free text drafted in a tainted session) stores the most restrictive of
-//! them, so no part of a record reads as more trusted than it is; and an update stores at least
-//! the record's old label while it keeps fields it does not rewrite.
+//! them, so no part of a record reads as more trusted than it is. An update never lowers a
+//! record's label: promoting an `external` record stays with the host CLI (D45, D112), however
+//! much of it the update rewrites. And an update that keeps some of a record's content keeps its
+//! author, so editing one field of another member's record does not make their text the editor's.
 
+use core::fmt;
 use std::collections::HashSet;
 
 use vilicus_module_api::{DataType, FieldKind, Table, Value};
@@ -19,11 +22,11 @@ use super::call::{Authority, Call};
 /// `external` when the field repeats it verbatim (D104).
 pub const DRAFT_RUN_WORDS: usize = 8;
 
-/// The provenance of a stored record that a write reads: its id, its stored taint, its author
-/// and its data types. The Core reads it from the file in the write transaction, or, for a record
-/// of another file, keeps it from the read that served the record to the call; a module never
-/// gives one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The provenance of a stored record that a write reads: its id, its stored taint, its author,
+/// its data types and its free text. The Core reads it from the file in the write transaction,
+/// or, for a record of another file, keeps it from the read that served the record to the call;
+/// a module never gives one.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecordProvenance {
     /// The record's id.
     pub id: Id,
@@ -33,13 +36,33 @@ pub struct RecordProvenance {
     pub author: Option<Id>,
     /// Its data types.
     pub data_types: Vec<DataType>,
+    /// The values of its free-text fields that hold one, which a member's write may not copy
+    /// into a `trusted` record when the record is not `trusted` for that member
+    /// (`doc/architecture.md` section 5.4, rule 5).
+    pub free_text: Vec<String>,
+}
+
+/// Leaves the free text out: it is record content (spine conventions, Logging).
+impl fmt::Debug for RecordProvenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecordProvenance")
+            .field("id", &self.id)
+            .field("taint", &self.taint)
+            .field("author", &self.author)
+            .field("data_types", &self.data_types)
+            .field("free_text", &self.free_text.len())
+            .finish()
+    }
 }
 
 /// What an update reads of the record it changes.
 pub(crate) struct Stored {
     /// The record's provenance.
     pub(crate) provenance: RecordProvenance,
-    /// True when a field the update does not give holds a value, which keeps its old label.
+    /// True when the update keeps a value the record holds: a field it does not give, a value it
+    /// gives unchanged, or free text repeating a run of the record's own free text. The record
+    /// then keeps its author.
     pub(crate) keeps_content: bool,
 }
 
@@ -67,32 +90,10 @@ pub(crate) fn stamp(
     inputs: &[RecordProvenance],
     stored: Option<&Stored>,
 ) -> Result<Stamp, RecordError> {
-    let taint = if is_outside_content(call.principal) {
-        Taint::External
-    } else {
-        match &call.authority {
-            Authority::OwnAction { .. } => kept(Taint::Trusted, stored),
-            Authority::Approved {
-                written, drafts, ..
-            } => {
-                let label = |text: &str| approved_text_taint(call.session, text, written, drafts);
-                let taint = free_texts(table, fields)
-                    .map(label)
-                    .fold(Taint::Trusted, most_restrictive);
-                kept(taint, stored)
-            }
-            Authority::Unapproved { acting_for, .. } => inputs
-                .iter()
-                .chain(stored.map(|stored| &stored.provenance))
-                .map(|input| {
-                    stored_taint(EffectiveTaint::for_viewer(
-                        input.taint,
-                        input.author,
-                        *acting_for,
-                    ))
-                })
-                .fold(call.session, most_restrictive),
-        }
+    let written = written_taint(call, table, fields, inputs, stored);
+    let taint = match stored {
+        Some(stored) => most_restrictive(written, stored.provenance.taint),
+        None => written,
     };
     let derived = if inputs.is_empty() {
         table.data_types.to_vec()
@@ -109,15 +110,87 @@ pub(crate) fn stamp(
     {
         return Err(RecordError::UndeclaredDataType { table: table.name });
     }
-    let author = match &call.authority {
+    let writer = match &call.authority {
         Authority::OwnAction { member } | Authority::Approved { member, .. } => Some(*member),
         Authority::Unapproved { author, .. } => *author,
+    };
+    let author = match stored {
+        Some(stored) if stored.keeps_content => stored.provenance.author,
+        _ => writer,
     };
     Ok(Stamp {
         taint,
         data_types,
         author,
     })
+}
+
+/// The label of what the write itself gives, before an update raises it to the record's.
+fn written_taint(
+    call: &Call,
+    table: &'static Table,
+    fields: &[(&str, Value)],
+    inputs: &[RecordProvenance],
+    stored: Option<&Stored>,
+) -> Taint {
+    if is_outside_content(call.principal) {
+        return Taint::External;
+    }
+    match &call.authority {
+        Authority::OwnAction { member } => {
+            let copied = untrusted_text(inputs, *member);
+            free_texts(table, fields)
+                .map(|text| {
+                    if repeats_a_run(text, &copied) {
+                        Taint::External
+                    } else {
+                        Taint::Trusted
+                    }
+                })
+                .fold(Taint::Trusted, most_restrictive)
+        }
+        Authority::Approved {
+            member,
+            written,
+            drafts,
+        } => {
+            let copied = untrusted_text(inputs, *member);
+            free_texts(table, fields)
+                .map(|text| {
+                    if repeats_a_run(text, &copied) {
+                        Taint::External
+                    } else {
+                        approved_text_taint(call.session, text, written, drafts)
+                    }
+                })
+                .fold(Taint::Trusted, most_restrictive)
+        }
+        Authority::Unapproved { acting_for, .. } => inputs
+            .iter()
+            .chain(stored.map(|stored| &stored.provenance))
+            .map(|input| {
+                stored_taint(EffectiveTaint::for_viewer(
+                    input.taint,
+                    input.author,
+                    *acting_for,
+                ))
+            })
+            .fold(call.session, most_restrictive),
+    }
+}
+
+/// The free text of the inputs that are not `trusted` for `member`: text a member's write may
+/// not copy into a record stored `trusted` (`doc/architecture.md` section 5.4, rule 5). An input
+/// another member wrote counts, as it does for a derivation (AD-7).
+fn untrusted_text(inputs: &[RecordProvenance], member: Id) -> Vec<&str> {
+    inputs
+        .iter()
+        .filter(|input| {
+            EffectiveTaint::for_viewer(input.taint, input.author, Some(member))
+                != EffectiveTaint::Trusted
+        })
+        .flat_map(|input| input.free_text.iter().map(String::as_str))
+        .collect()
 }
 
 /// The union of data type sets, in the order of [`DataType::ALL`].
@@ -129,12 +202,16 @@ pub(crate) fn union<'a>(sets: impl IntoIterator<Item = &'a [DataType]>) -> Vec<D
 }
 
 /// True when `text` repeats, word for word, a run of [`DRAFT_RUN_WORDS`] consecutive words of one
-/// of `drafts` (D104): a verbatim test, not an edit ratio, so editing the rest of the text does
-/// not matter. Words are the maximal runs of alphanumeric characters, compared in lowercase:
-/// spacing, punctuation and case do not break a run.
-pub(crate) fn copies_draft(text: &str, drafts: &[String]) -> bool {
-    let draft_words: Vec<Vec<String>> = drafts.iter().map(|draft| words(draft)).collect();
-    let runs: HashSet<&[String]> = draft_words
+/// of `sources`, the assistant's drafts or another record's free text (D104): a verbatim test,
+/// not an edit ratio, so editing the rest of the text does not matter. Words are the maximal runs
+/// of alphanumeric characters, compared in lowercase: spacing, punctuation and case do not break
+/// a run.
+pub(crate) fn repeats_a_run<S: AsRef<str>>(text: &str, sources: &[S]) -> bool {
+    let source_words: Vec<Vec<String>> = sources
+        .iter()
+        .map(|source| words(source.as_ref()))
+        .collect();
+    let runs: HashSet<&[String]> = source_words
         .iter()
         .flat_map(|words| words.windows(DRAFT_RUN_WORDS))
         .collect();
@@ -155,7 +232,7 @@ fn words(text: &str) -> Vec<String> {
 /// `trusted`, unless it repeats a run of a draft, which is `external` like the draft.
 fn approved_text_taint(session: Taint, text: &str, written: &[String], drafts: &[String]) -> Taint {
     let written_in_full = written.iter().any(|member_text| member_text == text);
-    if session == Taint::Trusted || (written_in_full && !copies_draft(text, drafts)) {
+    if session == Taint::Trusted || (written_in_full && !repeats_a_run(text, drafts)) {
         Taint::Trusted
     } else {
         Taint::External
@@ -175,14 +252,6 @@ fn free_texts<'a>(
             _ => None,
         }
     })
-}
-
-/// `taint`, raised to the record's old label when the update keeps some of its content.
-fn kept(taint: Taint, stored: Option<&Stored>) -> Taint {
-    match stored {
-        Some(stored) if stored.keeps_content => most_restrictive(taint, stored.provenance.taint),
-        _ => taint,
-    }
 }
 
 /// Content from outside the household: whatever a plugin or a device adapter writes is stored
@@ -222,29 +291,29 @@ mod tests {
     fn eight_consecutive_words_of_a_draft_are_a_copy() {
         let eight = "the organic apples at the market on Saturday";
         assert_eq!(eight.split(' ').count(), DRAFT_RUN_WORDS);
-        assert!(copies_draft(eight, &drafts()));
-        assert!(copies_draft(
+        assert!(repeats_a_run(eight, &drafts()));
+        assert!(repeats_a_run(
             &format!("Note to self: {eight}, and milk."),
             &drafts()
         ));
         let seven = "the organic apples at the market on";
-        assert!(!copies_draft(seven, &drafts()));
-        assert!(!copies_draft("", &drafts()));
-        assert!(!copies_draft(DRAFT, &[]));
+        assert!(!repeats_a_run(seven, &drafts()));
+        assert!(!repeats_a_run("", &drafts()));
+        assert!(!repeats_a_run::<&str>(DRAFT, &[]));
     }
 
     /// Spacing, punctuation and case do not break a run; a word changed or moved does.
     #[test]
     fn a_run_is_compared_word_for_word() {
-        assert!(copies_draft(
+        assert!(repeats_a_run(
             "THE  organic, apples - at the\nmarket on saturday!",
             &drafts()
         ));
-        assert!(!copies_draft(
+        assert!(!repeats_a_run(
             "the organic pears at the market on Saturday",
             &drafts()
         ));
-        assert!(!copies_draft(
+        assert!(!repeats_a_run(
             "the apples organic at the market on Saturday",
             &drafts()
         ));
@@ -266,14 +335,14 @@ mod tests {
                 }
             })
             .collect();
-        assert!(!copies_draft(&mostly_kept.join(" "), &drafts()));
+        assert!(!repeats_a_run(&mostly_kept.join(" "), &drafts()));
         let mostly_rewritten = format!(
             "{} {} {}",
             "entirely different words written by the member here and there",
             draft_words[1..=DRAFT_RUN_WORDS].join(" "),
             "and many more of their own words after it"
         );
-        assert!(copies_draft(&mostly_rewritten, &drafts()));
+        assert!(repeats_a_run(&mostly_rewritten, &drafts()));
     }
 
     /// A run is taken from one draft: words that end one draft and start another are not one.
@@ -283,11 +352,11 @@ mod tests {
             "one two three four".to_owned(),
             "five six seven eight".to_owned(),
         ];
-        assert!(!copies_draft(
+        assert!(!repeats_a_run(
             "one two three four five six seven eight",
             &two
         ));
-        assert!(copies_draft(
+        assert!(repeats_a_run(
             "one two three four five six seven eight",
             &["one two three four five six seven eight nine".to_owned()]
         ));
@@ -296,7 +365,7 @@ mod tests {
     #[test]
     fn non_latin_words_are_words() {
         let draft = "acheter des pommes bio au marché samedi matin avant dix heures";
-        assert!(copies_draft(
+        assert!(repeats_a_run(
             "Pommes bio au MARCHÉ samedi matin avant dix",
             &[draft.to_owned()]
         ));

@@ -1,7 +1,9 @@
 //! One call of a module through the typed record API (AD-9): every write of the call in one
 //! `BEGIN IMMEDIATE` transaction on the module file's write handle, each stamped by the Core.
 
-use vilicus_module_api::{ModuleDeclaration, Records, Table, Value, WriteError, Written};
+use vilicus_module_api::{
+    Field, FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written,
+};
 use vilicus_storage::{Handle, SqlValue, Write};
 use vilicus_types::{DataType, Id, Principal, Rev, Source, Taint, UtcMillis};
 
@@ -388,42 +390,48 @@ impl CallRecords<'_> {
     }
 
     /// The provenance of the record `id` of this file, in whichever of the module's tables holds
-    /// it.
+    /// it, its free text included.
     fn read_in_file(&self, id: Id) -> Result<Option<RecordProvenance>, RecordError> {
         for table in self.module.tables {
+            let columns: Vec<&str> = PROVENANCE_COLUMNS
+                .into_iter()
+                .chain(table.fields.iter().map(|field| field.name))
+                .collect();
             let rows = self.handle.query_values(
                 &format!(
-                    "SELECT taint, author, data_types FROM {} WHERE id = ?1",
+                    "SELECT {} FROM {} WHERE id = ?1",
+                    columns.join(", "),
                     table.name
                 ),
                 &[SqlValue::Blob(id.to_bytes().to_vec())],
             )?;
             if let Some(row) = rows.into_iter().next() {
-                let mut columns = row.into_iter().map(from_stored);
-                return provenance_of(table, id, &mut columns).map(Some);
+                let mut values = row.into_iter().map(from_stored);
+                let mut provenance = provenance_of(table, id, &mut values)?;
+                provenance.free_text = free_text_of(table, values);
+                return Ok(Some(provenance));
             }
         }
         Ok(None)
     }
 }
 
+/// The envelope columns a record's provenance is read from, in the order [`provenance_of`] takes
+/// them.
+const PROVENANCE_COLUMNS: [&str; 3] = ["taint", "author", "data_types"];
+
 /// Reads the record `id` of `table` that an update giving `fields` changes: its provenance, and
-/// whether a field the update leaves out holds a value; and its revision.
+/// whether the update keeps a value it holds; and its revision.
 fn read_stored(
     handle: &Handle<Write>,
     table: &'static Table,
     id: Id,
     fields: &[(&str, Value)],
 ) -> Result<(Stored, Rev), RecordError> {
-    let kept: Vec<&str> = table
-        .fields
-        .iter()
-        .map(|field| field.name)
-        .filter(|name| !fields.iter().any(|(given, _)| given == name))
-        .collect();
-    let columns: Vec<&str> = ["taint", "author", "data_types", "rev"]
+    let columns: Vec<&str> = PROVENANCE_COLUMNS
         .into_iter()
-        .chain(kept.iter().copied())
+        .chain(["rev"])
+        .chain(table.fields.iter().map(|field| field.name))
         .collect();
     let row = handle
         .query_values(
@@ -438,9 +446,15 @@ fn read_stored(
         .next()
         .ok_or(RecordError::RecordNotFound { table: table.name })?;
     let mut values = row.into_iter().map(from_stored);
-    let provenance = provenance_of(table, id, &mut values)?;
+    let mut provenance = provenance_of(table, id, &mut values)?;
     let rev = stored_rev(table, values.next())?;
-    let keeps_content = values.any(|value| value != Value::Null);
+    let held: Vec<Value> = values.collect();
+    provenance.free_text = free_text_of(table, held.iter().cloned());
+    let keeps_content = table
+        .fields
+        .iter()
+        .zip(&held)
+        .any(|(field, value)| keeps_value(field, value, fields, &provenance.free_text));
     Ok((
         Stored {
             provenance,
@@ -450,8 +464,49 @@ fn read_stored(
     ))
 }
 
+/// True when an update giving `fields` keeps `stored`, the value `field` holds: the update does
+/// not give the field, gives it the same value, or gives free text repeating a run of the
+/// record's own free text (D104), which is still the stored text, edited.
+fn keeps_value(
+    field: &Field,
+    stored: &Value,
+    fields: &[(&str, Value)],
+    stored_text: &[String],
+) -> bool {
+    if *stored == Value::Null {
+        return false;
+    }
+    match fields
+        .iter()
+        .find(|(name, _)| *name == field.name)
+        .map(|(_, value)| value)
+    {
+        None => true,
+        Some(given) if given == stored => true,
+        Some(Value::Text(text)) => {
+            matches!(field.kind, FieldKind::FreeText { .. })
+                && provenance::repeats_a_run(text, stored_text)
+        }
+        Some(_) => false,
+    }
+}
+
+/// The free-text values of a row of `table`, from its field values in declared order.
+fn free_text_of(table: &'static Table, values: impl Iterator<Item = Value>) -> Vec<String> {
+    table
+        .fields
+        .iter()
+        .zip(values)
+        .filter_map(|(field, value)| match (field.kind, value) {
+            (FieldKind::FreeText { .. }, Value::Text(text)) => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The provenance of the record `id` of `table` from its stored `taint`, `author` and
-/// `data_types`, the next three of `columns`, each held to its stored form.
+/// `data_types`, the next three of `columns`, each held to its stored form; its free text is the
+/// caller's to read.
 fn provenance_of(
     table: &'static Table,
     id: Id,
@@ -505,6 +560,7 @@ fn provenance_of(
         taint,
         author,
         data_types,
+        free_text: Vec::new(),
     })
 }
 

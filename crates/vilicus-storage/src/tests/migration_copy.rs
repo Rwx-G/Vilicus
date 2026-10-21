@@ -461,12 +461,36 @@ fn a_cleanup_that_fails_after_the_rename_is_not_a_failed_swap() {
     assert!(!dir.join("fixture.household.db.migration").exists());
 }
 
-/// AC6: the free space of the file system that holds the files, as `statvfs` reports it.
+/// AC6: the free space of the file system that holds the files, as an unprivileged process may
+/// use it, equal to what coreutils' `stat -f` reports independently (blocks available to a
+/// non-superuser times the fundamental block size), within what other processes may write
+/// meanwhile. A missing block size differs anywhere; the blocks free to the superuser differ
+/// wherever the file system keeps some for it, as the test image's does.
 #[test]
 fn the_free_space_of_the_data_directory_is_read() {
+    const DRIFT: u64 = 64 << 20;
     let dir = scratch_dir("free-space");
     let available = maintenance::available_space(&dir).expect("statvfs");
-    assert!(available > 0, "{available}");
+    let output = std::process::Command::new("stat")
+        .args(["-f", "-c", "%a %S"])
+        .arg(&dir)
+        .output()
+        .expect("run stat");
+    assert!(output.status.success(), "{output:?}");
+    let fields: Vec<u64> = String::from_utf8(output.stdout)
+        .expect("text")
+        .split_whitespace()
+        .map(|field| field.parse().expect("a number"))
+        .collect();
+    let [blocks_available, block_size] = fields[..] else {
+        panic!("{fields:?}");
+    };
+    let expected = blocks_available * block_size;
+    assert!(
+        available.abs_diff(expected) < DRIFT,
+        "statvfs {available}, stat {expected}"
+    );
+
     let missing = maintenance::available_space(&dir.join("missing"));
     assert!(matches!(missing, Err(Error::Io(_))), "{missing:?}");
 }

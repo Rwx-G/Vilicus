@@ -73,6 +73,94 @@ closed_set! {
     }
 }
 
+impl Source {
+    /// The kind of the source, the name its text and serialized forms carry.
+    fn kind(&self) -> SourceKind {
+        match self {
+            Self::Member(_) => SourceKind::Member,
+            Self::System => SourceKind::System,
+            Self::Module(_) => SourceKind::Module,
+            Self::Plugin(_) => SourceKind::Plugin,
+            Self::Import(_) => SourceKind::Import,
+            Self::AiTask(_) => SourceKind::AiTask,
+            Self::ScheduledTask(_) => SourceKind::ScheduledTask,
+            Self::Playbook(_) => SourceKind::Playbook,
+            Self::Event(_) => SourceKind::Event,
+            Self::Rule(_) => SourceKind::Rule,
+            Self::Display(_) => SourceKind::Display,
+            Self::Adapter(_) => SourceKind::Adapter,
+        }
+    }
+
+    /// The source of `kind` whose payload is the text `payload`: an identifier's lowercase
+    /// hyphenated text, or a module name.
+    fn with_payload(kind: SourceKind, payload: &str) -> Result<Self, NameError> {
+        let id = || Id::parse(payload).map_err(|_| NameError::new("source"));
+        Ok(match kind {
+            SourceKind::System => return Err(NameError::new("source")),
+            SourceKind::Module => Self::Module(ModuleName::parse(payload)?),
+            SourceKind::Member => Self::Member(id()?),
+            SourceKind::Plugin => Self::Plugin(id()?),
+            SourceKind::Import => Self::Import(id()?),
+            SourceKind::AiTask => Self::AiTask(id()?),
+            SourceKind::ScheduledTask => Self::ScheduledTask(id()?),
+            SourceKind::Playbook => Self::Playbook(id()?),
+            SourceKind::Event => Self::Event(id()?),
+            SourceKind::Rule => Self::Rule(id()?),
+            SourceKind::Display => Self::Display(id()?),
+            SourceKind::Adapter => Self::Adapter(id()?),
+        })
+    }
+
+    /// Reads the text form [`Display`](fmt::Display) writes, the notation of the spine
+    /// conventions: `system`, or the kind's name and its payload in parentheses, such as
+    /// `member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f)` or `module(meals)`. Anything else is
+    /// refused, never normalized, so one source has one text.
+    ///
+    /// ```
+    /// use vilicus_types::Source;
+    ///
+    /// let source = Source::parse("module(meals)")?;
+    /// assert_eq!(source.to_string(), "module(meals)");
+    /// assert!(Source::parse("Module(meals)").is_err());
+    /// # Ok::<(), vilicus_types::NameError>(())
+    /// ```
+    pub fn parse(text: &str) -> Result<Self, NameError> {
+        if text == SourceKind::System.as_str() {
+            return Ok(Self::System);
+        }
+        let (name, rest) = text.split_once('(').ok_or(NameError::new("source"))?;
+        let payload = rest.strip_suffix(')').ok_or(NameError::new("source"))?;
+        let kind = SourceKind::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == name)
+            .ok_or(NameError::new("source"))?;
+        Self::with_payload(kind, payload)
+    }
+}
+
+impl fmt::Display for Source {
+    /// Writes `system`, or the kind's name and its payload in parentheses.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = self.kind().as_str();
+        match self {
+            Self::System => formatter.write_str(kind),
+            Self::Module(name) => write!(formatter, "{kind}({name})"),
+            Self::Member(id)
+            | Self::Plugin(id)
+            | Self::Import(id)
+            | Self::AiTask(id)
+            | Self::ScheduledTask(id)
+            | Self::Playbook(id)
+            | Self::Event(id)
+            | Self::Rule(id)
+            | Self::Display(id)
+            | Self::Adapter(id) => write!(formatter, "{kind}({id})"),
+        }
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for Source {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct SourceVisitor;
@@ -324,6 +412,35 @@ mod tests {
         assert!(second_entry.is_err(), "second entry dropped silently");
         let empty = from_map::<&str, &str, Source>(vec![]);
         assert!(empty.is_err(), "empty map accepted");
+    }
+
+    /// The text form reads back for every kind, under the kind's vocabulary name, and nothing
+    /// but that form is read.
+    #[test]
+    fn the_text_form_reads_back_and_refuses_any_other_spelling() {
+        for source in one_of_each() {
+            let text = source.to_string();
+            assert!(text.starts_with(vocabulary_name(&source)), "{text}");
+            assert_eq!(Source::parse(&text), Ok(source));
+        }
+        for text in [
+            "",
+            "System",
+            "system()",
+            "member",
+            "member()",
+            "member(017F22E2-79B0-7CC3-98C4-DC0C0C07398F)",
+            "member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f",
+            "member (017f22e2-79b0-7cc3-98c4-dc0c0c07398f)",
+            "member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f) ",
+            "member(017f22e2-79b0-7cc3-98c4-dc0c0c07398f)x",
+            "mail(017f22e2-79b0-7cc3-98c4-dc0c0c07398f)",
+            "module(Meals)",
+            "module(meals)(meals)",
+            "forged source",
+        ] {
+            assert!(Source::parse(text).is_err(), "{text:?}");
+        }
     }
 
     #[test]

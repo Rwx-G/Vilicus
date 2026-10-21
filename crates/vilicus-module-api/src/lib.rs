@@ -14,7 +14,10 @@
 mod check;
 mod declaration;
 
-pub use check::{DeclarationError, IDENTIFIER_MAX_LEN, IdentifierKind, is_identifier};
+pub use check::{
+    DeclarationError, FTS5_RESERVED_COLUMNS, IDENTIFIER_MAX_LEN, IdentifierKind, ROWID_NAMES,
+    is_identifier,
+};
 pub use declaration::{
     ENVELOPE, EnvelopeColumn, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table,
     Fts5Tokenizer, Migration, ModuleDeclaration, SqlType, Structured, Table,

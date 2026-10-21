@@ -523,6 +523,50 @@ fn backticked(text: &str) -> Vec<&str> {
     text.split('`').skip(1).step_by(2).collect()
 }
 
+/// Review of Story 3.2, minor 3: a field cannot stand in for the rowid, and an FTS5 column
+/// cannot take a name FTS5 keeps (`rank`, `rowid`, the table's own name).
+#[test]
+fn reserved_column_names_are_refused() {
+    for name in ROWID_NAMES {
+        let declaration = with_field(
+            name,
+            FieldKind::Structured(Structured::Integer { min: 0, max: 9 }),
+        );
+        let expected = if is_identifier(name) {
+            DeclarationError::ReservedName {
+                table: "items",
+                name,
+            }
+        } else {
+            DeclarationError::InvalidIdentifier {
+                kind: IdentifierKind::Field,
+                name,
+            }
+        };
+        assert_eq!(declaration.validate(), Err(expected), "{name}");
+    }
+    for name in FTS5_RESERVED_COLUMNS
+        .iter()
+        .copied()
+        .chain(["extra_search"])
+    {
+        let declaration = with_fts5(Fts5Table {
+            name: "extra_search",
+            columns: leak(vec![name]),
+            tokenizer: Fts5Tokenizer::Ascii,
+            content: Fts5Content::Contentless,
+        });
+        assert_eq!(
+            declaration.validate(),
+            Err(DeclarationError::ReservedName {
+                table: "extra_search",
+                name
+            }),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn an_empty_migration_is_refused() {
     let declaration = ModuleDeclaration {

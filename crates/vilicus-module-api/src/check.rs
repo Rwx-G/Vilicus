@@ -19,6 +19,15 @@ use crate::declaration::{
 /// value or a vocabulary name.
 pub const IDENTIFIER_MAX_LEN: usize = 64;
 
+/// Names SQLite gives the rowid of a table that has no column of that name: a field of one of
+/// these names would take the place of the rowid in every statement that names it. `_rowid_` is
+/// outside the identifier grammar already.
+pub const ROWID_NAMES: &[&str] = &["rowid", "oid", "_rowid_"];
+
+/// Column names an FTS5 table keeps for itself (`rank`, its rowid); an FTS5 table's own name is
+/// one too, the hidden column that takes its special commands.
+pub const FTS5_RESERVED_COLUMNS: &[&str] = &["rank", "rowid"];
+
 /// What an identifier names, for the error that refuses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IdentifierKind {
@@ -154,6 +163,13 @@ pub enum DeclarationError {
         /// The column.
         column: &'static str,
     },
+    /// A field takes a name of the rowid, or an FTS5 column a name FTS5 keeps for itself.
+    ReservedName {
+        /// The table or FTS5 table.
+        table: &'static str,
+        /// The name.
+        name: &'static str,
+    },
     /// A migration holds no SQL.
     EmptyMigration {
         /// Its version.
@@ -184,6 +200,7 @@ impl DeclarationError {
             Self::Fts5ColumnNotInContent { .. } => {
                 "an FTS5 column is not a field of its content table"
             }
+            Self::ReservedName { .. } => "a column takes a name SQLite or FTS5 keeps for itself",
             Self::EmptyMigration { .. } => "a migration holds no SQL",
         }
     }
@@ -220,6 +237,7 @@ impl fmt::Display for DeclarationError {
             Self::Fts5ContentOutsideModule { table, content } => {
                 write!(formatter, ": {table} (content {content})")
             }
+            Self::ReservedName { table, name } => write!(formatter, ": {table}.{name}"),
             Self::EmptyMigration { version } => write!(formatter, ": version {version}"),
         }
     }
@@ -361,6 +379,12 @@ const fn validate_table(table: &Table) -> Result<(), DeclarationError> {
 
 const fn validate_field(table: &'static str, field: &Field) -> Result<(), DeclarationError> {
     check!(identifier(IdentifierKind::Field, field.name));
+    if listed(ROWID_NAMES, field.name) {
+        return Err(DeclarationError::ReservedName {
+            table,
+            name: field.name,
+        });
+    }
     let mut index = 0;
     while index < ENVELOPE.len() {
         if same(field.name, ENVELOPE[index].name) {
@@ -450,6 +474,12 @@ const fn validate_fts5(
     while index < fts5.columns.len() {
         let column = fts5.columns[index];
         check!(identifier(IdentifierKind::Fts5Column, column));
+        if listed(FTS5_RESERVED_COLUMNS, column) || same(column, fts5.name) {
+            return Err(DeclarationError::ReservedName {
+                table: fts5.name,
+                name: column,
+            });
+        }
         let mut other = index + 1;
         while other < fts5.columns.len() {
             if same(column, fts5.columns[other]) {
@@ -587,6 +617,17 @@ pub const fn is_identifier(name: &str) -> bool {
     }
     let reserved = b"sqlite_";
     !(bytes.len() >= reserved.len() && same_bytes(bytes.split_at(reserved.len()).0, reserved))
+}
+
+const fn listed(list: &[&str], name: &str) -> bool {
+    let mut index = 0;
+    while index < list.len() {
+        if same(list[index], name) {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 const fn same(left: &str, right: &str) -> bool {

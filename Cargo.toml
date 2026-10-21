@@ -42,10 +42,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 # pinned exactly because its Unicode version is part of the canonical form (D130).
 dcbor = { version = "=0.25.2", default-features = false, features = ["std"] }
 unicode-normalization = { version = "=0.1.25", default-features = false }
-# Dev-dependencies of vilicus-proto only (Story 2.5, owner approval): reading and writing the E19
-# vector files, and SHA-256 for their hashes. aws-lc-rs is the version rustls 0.23.46 resolves
-# to (spine Stack), with only its `aws-lc-sys` backend; runtime hashing is the Core's, through
-# vilicus-crypto (AD-3).
+# serde_json is a dev-dependency of vilicus-proto only (Story 2.5, owner approval), reading and
+# writing the E19 vector files. aws-lc-rs is the version rustls 0.23.46 resolves to (spine Stack),
+# with only its `aws-lc-sys` backend: a dev-dependency of vilicus-proto and vilicus-core for their
+# tests, and since Story 3.7 a dependency of vilicus-crypto, through which the Core hashes at run
+# time (AD-3).
 serde_json = "=1.0.154"
 aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys"] }
 # The libFuzzer runtime of the fuzz targets in fuzz/ (Story 2.7, owner approval), behind that crate's

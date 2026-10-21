@@ -40,13 +40,13 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 
 [[exemptions.aws-lc-rs]]
 version = "1.18.2"
-criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests) and of vilicus-core (page decryption of the E17 file inspection tests, Story 3.6), never in a release artefact; required by vilicus-proto and vilicus-core. cargo vet suggests `cargo vet inspect aws-lc-rs 1.18.2` (34023 lines)."
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. The cryptographic library of the spine's Stack, a normal dependency of vilicus-crypto since Story 3.7 (SHA-256 of migrations), so safe-to-deploy; also in the dev-dependency tree of vilicus-proto (vector generator and tests) and of vilicus-core (page decryption of the E17 file inspection tests, Story 3.6); required by vilicus-crypto, vilicus-proto and vilicus-core. cargo vet suggests `cargo vet inspect aws-lc-rs 1.18.2` (34023 lines)."
 
 [[exemptions.aws-lc-sys]]
 version = "0.46.0"
-criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests) and of vilicus-core (E17 file inspection tests), never in a release artefact; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. In the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; also in the dev-dependency tree of vilicus-proto and vilicus-core; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
 
 [[exemptions.bitflags]]
 version = "2.13.2"
@@ -70,8 +70,8 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 
 [[exemptions.cmake]]
 version = "0.1.58"
-criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-sys. cargo vet suggests `cargo vet diff cmake 0.1.50 0.1.58` (7 files changed, 458 insertions(+), 144 deletions(-))."
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. A build dependency of aws-lc-sys, in the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; aws-lc-sys does not run cmake on Linux (ci/build_time_code.toml); required by aws-lc-sys. cargo vet suggests `cargo vet diff cmake 0.1.50 0.1.58` (7 files changed, 458 insertions(+), 144 deletions(-))."
 
 [[exemptions.dcbor]]
 version = "0.25.2"
@@ -85,8 +85,8 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 
 [[exemptions.fs_extra]]
 version = "1.3.0"
-criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-sys. cargo vet suggests `cargo vet inspect fs_extra 1.3.0` (12715 lines)."
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. A build dependency of aws-lc-sys, in the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; required by aws-lc-sys. cargo vet suggests `cargo vet inspect fs_extra 1.3.0` (12715 lines)."
 
 [[exemptions.futures-task]]
 version = "0.3.21"

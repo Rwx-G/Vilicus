@@ -20,3 +20,6 @@ undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 vilicus-types.workspace = true
+# The cryptographic library of the spine's Stack (aws-lc-rs with its aws-lc-sys backend, D28),
+# at the version and features the workspace pins; its first runtime use is SHA-256 (Story 3.7).
+aws-lc-rs.workspace = true

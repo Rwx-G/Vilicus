@@ -544,6 +544,7 @@ dependencies = [
 name = "vilicus-crypto"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "vilicus-types",
 ]
 

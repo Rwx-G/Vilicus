@@ -15,3 +15,8 @@ workspace = true
 # client API by their names, and `deny_unknown_fields` is a derive attribute (spine AD-12).
 [dependencies]
 serde.workspace = true
+
+# Test code only: the label alphabet is checked against the NFKC tables (Story 3.4 review), with
+# the crate and version vilicus-proto already uses (D130).
+[dev-dependencies]
+unicode-normalization.workspace = true

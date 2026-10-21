@@ -639,6 +639,7 @@ name = "vilicus-types"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "unicode-normalization",
 ]
 
 [[package]]

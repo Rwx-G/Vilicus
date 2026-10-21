@@ -85,6 +85,7 @@ mod data_type;
 mod error;
 mod exception_class;
 mod id;
+mod label;
 mod limits;
 mod name;
 mod principal;
@@ -100,6 +101,10 @@ pub use data_type::DataType;
 pub use error::{ClientError, ClientFacingError, ErrorCode, MessageKey, RetryClass};
 pub use exception_class::ExceptionClass;
 pub use id::{Id, IdError};
+pub use label::{
+    VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, is_vocabulary_label,
+    is_vocabulary_label_letter,
+};
 pub use limits::{
     CAPABILITY_TOKEN_DEFAULT_BUDGET, CAPABILITY_TOKEN_LIFETIME, DEFAULT_AUDIT_SPOOL_ENTRIES,
     DEFAULT_BACKUP_INTERVAL, DEFAULT_CERTIFICATE_ALERT_LEAD_TIME, OperatorSetting,

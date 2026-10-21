@@ -73,6 +73,49 @@ const fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
+/// True for a calendar date in the RFC 3339 `full-date` form, `YYYY-MM-DD`, of the proleptic
+/// Gregorian calendar in the years [`UtcMillis`] covers, 0000 to 9999: exactly ten ASCII
+/// characters, a month from 01 to 12 and a day that exists in that month. Anything else is
+/// refused, never normalized, so one date has one text (`2026-1-05`, `2026-02-29` and a trailing
+/// time are refused). A `const` check, so the storage layer and a declaration read the same rule.
+///
+/// ```
+/// use vilicus_types::is_full_date;
+///
+/// assert!(is_full_date("2024-02-29"));
+/// assert!(!is_full_date("2026-02-29"));
+/// assert!(!is_full_date("2026-10-18T00:00:00Z"));
+/// ```
+pub const fn is_full_date(text: &str) -> bool {
+    const DIGITS: [usize; 8] = [0, 1, 2, 3, 5, 6, 8, 9];
+    let bytes = text.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let mut index = 0;
+    while index < DIGITS.len() {
+        if !bytes[DIGITS[index]].is_ascii_digit() {
+            return false;
+        }
+        index += 1;
+    }
+    let year = number(bytes, 0, 4);
+    let month = number(bytes, 5, 2);
+    let day = number(bytes, 8, 2);
+    matches!(month, 1..=12) && day > 0 && day <= days_in_month(year, month)
+}
+
+/// The decimal number of the `count` ASCII digits of `bytes` from `start`.
+const fn number(bytes: &[u8], start: usize, count: usize) -> i64 {
+    let mut value = 0;
+    let mut index = start;
+    while index < start + count {
+        value = value * 10 + (bytes[index] - b'0') as i64;
+        index += 1;
+    }
+    value
+}
+
 /// Days from 1970-01-01 to the given date of the proleptic Gregorian calendar; the algorithm of
 /// Howard Hinnant's `days_from_civil`, over 400-year eras of 146 097 days that start in March.
 const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -467,6 +510,45 @@ mod tests {
             };
         }
         assert_eq!(expected, (10_000, 1, 1));
+    }
+
+    /// Every day of the range is a full date as `Display` writes it, and nothing else of that
+    /// shape is: each month's day after its last, month 00 and 13, day 00.
+    #[test]
+    fn full_dates_are_the_days_of_the_range() {
+        let first = UtcMillis::MIN.as_millis() / MILLIS_PER_DAY;
+        let last = UtcMillis::MAX.as_millis().div_euclid(MILLIS_PER_DAY);
+        for days in first..=last {
+            let text = render(days * MILLIS_PER_DAY);
+            assert!(is_full_date(&text[..10]), "{text}");
+            let (year, month, _) = civil_from_days(days);
+            let past_the_end =
+                format!("{year:04}-{month:02}-{:02}", days_in_month(year, month) + 1);
+            assert!(!is_full_date(&past_the_end), "{past_the_end}");
+        }
+        for text in [
+            "",
+            "2026-10-1",
+            "2026-1-018",
+            "2026-00-10",
+            "2026-13-10",
+            "2026-10-00",
+            "2026-10-18 ",
+            " 2026-10-18",
+            "2026/10/18",
+            "20261018",
+            "+026-10-18",
+            "-026-10-18",
+            "2026-10-18T00:00:00Z",
+            "\u{ff12}026-10-18",
+            "1900-02-29",
+            "2100-02-29",
+        ] {
+            assert!(!is_full_date(text), "{text:?}");
+        }
+        for text in ["0000-01-01", "0000-02-29", "2000-02-29", "9999-12-31"] {
+            assert!(is_full_date(text), "{text}");
+        }
     }
 
     #[test]

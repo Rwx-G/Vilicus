@@ -110,4 +110,4 @@ pub use principal::Principal;
 pub use source::{ModuleName, Source};
 pub use taint::{EffectiveTaint, Taint};
 pub use tier::Tier;
-pub use time::{TimeError, UtcMillis};
+pub use time::{TimeError, UtcMillis, is_full_date};

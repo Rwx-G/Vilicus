@@ -21,7 +21,7 @@ pub(crate) const REGISTRY: Registry = match Registry::new(&[]) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use vilicus_core::registry::CapabilityMatrix;
 
@@ -35,6 +35,53 @@ mod tests {
         let text = std::fs::read_to_string(path).expect("read doc/capability-matrix.md");
         if let Err(error) = CapabilityMatrix::check(&text, &REGISTRY) {
             panic!("{error}");
+        }
+    }
+
+    /// Every Rust source file of the binary, with its text.
+    fn sources(directory: &Path, found: &mut Vec<(PathBuf, String)>) {
+        for entry in std::fs::read_dir(directory).expect("read the source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let text = std::fs::read_to_string(&path).expect("read a source file");
+                found.push((path, text));
+            }
+        }
+    }
+
+    /// The binary builds its registry here only, and while this module is compiled with the
+    /// tests only, no other source of the binary names the Core: code that starts the Core from
+    /// `main` must bring the registry into the build with it (Story 3.3 review, minor 1).
+    #[test]
+    fn the_registry_is_the_binary_s_only_use_of_the_core_while_it_is_test_only() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&directory, &mut files);
+        let main = &files
+            .iter()
+            .find(|(path, _)| path.ends_with("main.rs"))
+            .expect("main.rs")
+            .1;
+        let lines: Vec<&str> = main.lines().map(str::trim).collect();
+        let test_only = lines
+            .windows(2)
+            .any(|pair| pair == ["#[cfg(test)]", "mod registry;"]);
+        for (path, text) in &files {
+            if path.ends_with("registry.rs") {
+                continue;
+            }
+            assert!(
+                !text.contains("Registry::new("),
+                "{} builds a registry outside registry.rs",
+                path.display()
+            );
+            assert!(
+                !(test_only && text.contains("vilicus_core")),
+                "{} names the Core while the registry is compiled with the tests only",
+                path.display()
+            );
         }
     }
 }

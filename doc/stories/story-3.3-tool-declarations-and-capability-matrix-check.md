@@ -2,7 +2,7 @@
 title: 'Tool declarations and capability matrix check'
 epic: 3
 story: 3
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-22, FR-60, FR-21, I13, I18, AD-9, AD-48, D46, DC-13]

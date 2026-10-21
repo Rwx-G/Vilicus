@@ -115,6 +115,6 @@ pub use name::NameError;
 pub use principal::Principal;
 pub use rev::Rev;
 pub use source::{ModuleName, Source};
-pub use taint::{EffectiveTaint, Taint};
+pub use taint::{EffectiveTaint, Projection, RecordLabels, Taint, TextTaint};
 pub use tier::Tier;
 pub use time::{TimeError, UtcMillis, is_full_date};

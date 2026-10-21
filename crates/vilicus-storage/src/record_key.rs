@@ -17,10 +17,13 @@ use vilicus_types::Id;
 use crate::error::{Error, Result};
 use crate::handle::{self, Handle, Write};
 
-/// What the destruction of a wrapped record key took: the TRUNCATE checkpoint attempts until the
-/// WAL was empty.
+/// What the destruction of a wrapped record key did: whether it deleted a key row, and the
+/// TRUNCATE checkpoint attempts until the WAL was empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shredded {
+    /// True when this call deleted the key row; false when the record had no key left, as after
+    /// a shredding whose checkpoint failed and that this call finished.
+    pub key_deleted: bool,
     /// The checkpoint attempts, from 1.
     pub checkpoint_attempts: u32,
 }
@@ -59,24 +62,30 @@ impl Handle<Write> {
     /// Shreds the record `record` (D132, E17): deletes its wrapped key under `secure_delete` = ON
     /// in a transaction of its own, then checkpoints the WAL in TRUNCATE mode until a checkpoint
     /// reports not busy and the WAL is empty, so no byte of the key remains in the file or its
-    /// WAL. The record's own row, its ciphertext, stays: without the key it cannot be read. A
-    /// record without a key fails with [`Error::RecordKeyNotFound`]; a reader holding a snapshot
-    /// past every attempt fails it with [`Error::CheckpointIncomplete`], the key deleted but
-    /// possibly still in the WAL until the next checkpoint.
+    /// WAL. The record's own row, its ciphertext, stays: without the key it cannot be read.
+    ///
+    /// A reader holding a snapshot past every attempt fails it with
+    /// [`Error::DeletedNotCheckpointed`], the key deleted but possibly still in the WAL; calling
+    /// it again finishes the checkpoint, the record having no key left
+    /// ([`Shredded::key_deleted`] false), so a shredding is repeated until it succeeds. It refuses
+    /// to run inside an open transaction ([`Error::TransactionOpen`]): its delete must commit
+    /// before the checkpoint can remove it.
     pub fn destroy_wrapped_record_key(&self, record: Id) -> Result<Shredded> {
-        self.under_core_policy(|connection| {
+        self.require_no_transaction()?;
+        let deleted = self.under_core_policy(|connection| {
+            let mut deleted = 0;
             handle::in_transaction(connection, || {
-                match connection.execute(
+                deleted = connection.execute(
                     "DELETE FROM _record_keys WHERE record_id = ?1",
                     [record.to_bytes()],
-                )? {
-                    0 => Err(Error::RecordKeyNotFound),
-                    _ => Ok(()),
-                }
-            })
+                )?;
+                Ok(())
+            })?;
+            Ok(deleted)
         })?;
-        let checkpoint_attempts = handle::checkpoint_until_empty(self.file(), self.connection())?;
+        let checkpoint_attempts = handle::checkpoint_after_delete(self, deleted)?;
         Ok(Shredded {
+            key_deleted: deleted > 0,
             checkpoint_attempts,
         })
     }

@@ -305,9 +305,12 @@ impl Handle<Write> {
     /// The connection runs with `secure_delete` = ON, read back at open, so the delete
     /// overwrites the rows' cells and freed pages. A reader that holds a snapshot keeps the
     /// checkpoint busy; once the attempts are spent the purge fails with
-    /// [`Error::CheckpointIncomplete`], its rows deleted but possibly still in the WAL, and the
-    /// next purge, or [`checkpoint_truncate`](Self::checkpoint_truncate), checkpoints again.
+    /// [`Error::DeletedNotCheckpointed`], which carries the rows it deleted, possibly still in the
+    /// WAL, and the next purge, or [`checkpoint_truncate`](Self::checkpoint_truncate),
+    /// checkpoints again. It refuses to run inside an open transaction
+    /// ([`Error::TransactionOpen`]).
     pub fn purge_journal(&self, cutoff: UtcMillis) -> Result<JournalPurge> {
+        self.require_no_transaction()?;
         let deleted = self.under_core_policy(|connection| {
             let mut deleted = 0;
             handle::in_transaction(connection, || {
@@ -319,7 +322,7 @@ impl Handle<Write> {
             })?;
             Ok(deleted)
         })?;
-        let checkpoint_attempts = handle::checkpoint_until_empty(self.file(), self.connection())?;
+        let checkpoint_attempts = handle::checkpoint_after_delete(self, deleted)?;
         Ok(JournalPurge {
             deleted,
             checkpoint_attempts,

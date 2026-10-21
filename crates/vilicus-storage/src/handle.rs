@@ -407,6 +407,20 @@ pub(crate) fn checkpoint_until_empty(file: &ModuleFile, connection: &Connection)
     })
 }
 
+/// The checkpoint after a deletion that must be real (D132): [`checkpoint_until_empty`], whose
+/// failure after every attempt carries the `deleted` rows the caller committed, since they are
+/// gone from the tables yet maybe still in the WAL.
+pub(crate) fn checkpoint_after_delete(handle: &Handle<Write>, deleted: usize) -> Result<u32> {
+    checkpoint_until_empty(handle.file(), handle.connection()).map_err(|error| match error {
+        Error::CheckpointIncomplete { log, checkpointed } => Error::DeletedNotCheckpointed {
+            deleted,
+            log,
+            checkpointed,
+        },
+        other => other,
+    })
+}
+
 /// One TRUNCATE checkpoint, then the close. A busy checkpoint means another connection to the
 /// file is still open, so this one is not the last; the last close then checkpoints instead.
 pub(crate) fn checkpoint_and_close(connection: Connection) -> Result<()> {
@@ -415,6 +429,31 @@ pub(crate) fn checkpoint_and_close(connection: Connection) -> Result<()> {
         .close()
         .map_err(|(_, error)| Error::from(error))?;
     checkpoint.map(drop).map_err(Error::from)
+}
+
+/// The role's policy, put back on its connection when the Core's own statements end, or when a
+/// panic unwinds through them.
+struct RolePolicy<'c> {
+    connection: &'c Connection,
+    policy: Policy,
+    restored: bool,
+}
+
+impl RolePolicy<'_> {
+    fn restore(mut self) -> Result<()> {
+        self.restored = true;
+        authorizer::install(self.connection, self.policy).map_err(Error::from)
+    }
+}
+
+impl Drop for RolePolicy<'_> {
+    fn drop(&mut self) {
+        if !self.restored {
+            // Only while a panic unwinds: no caller to report a failure to, and the connection
+            // has no policy wider than the role's once this runs.
+            let _ = authorizer::install(self.connection, self.policy);
+        }
+    }
 }
 
 /// An open connection to a module file in role `R`, under that role's authorizer.
@@ -581,7 +620,8 @@ impl<R: Role> Handle<R> {
     }
 
     /// Runs `body`, one or more of the Core's own fixed statements on its tables, under
-    /// [`Policy::Core`], then puts the role's policy back, whatever `body` returned. The first
+    /// [`Policy::Core`], then puts the role's policy back, whatever `body` returned, and while a
+    /// panic unwinds through it too, so the handle never stays under the Core policy. The first
     /// error is the one returned.
     pub(crate) fn under_core_policy<T>(
         &self,
@@ -592,11 +632,26 @@ impl<R: Role> Handle<R> {
             .opening_policy()
             .unwrap_or(Policy::Closed);
         authorizer::install(connection, Policy::Core)?;
+        let guard = RolePolicy {
+            connection,
+            policy,
+            restored: false,
+        };
         let outcome = body(connection);
-        let restored = authorizer::install(connection, policy).map_err(Error::from);
+        let restored = guard.restore();
         match (outcome, restored) {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Refuses a Core operation that runs its own transaction while the handle is inside one: it
+    /// would fail on its `BEGIN`, or commit the caller's statements with its own.
+    pub(crate) fn require_no_transaction(&self) -> Result<()> {
+        if self.connection().is_autocommit() {
+            Ok(())
+        } else {
+            Err(Error::TransactionOpen)
         }
     }
 

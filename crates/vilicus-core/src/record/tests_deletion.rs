@@ -347,7 +347,7 @@ fn the_purge_checkpoint_waits_for_a_reader_and_completes_once_it_ends() {
                 matches!(
                     purge,
                     Err(super::RecordError::Storage(
-                        vilicus_storage::Error::CheckpointIncomplete { .. }
+                        vilicus_storage::Error::DeletedNotCheckpointed { deleted: 18, .. }
                     ))
                 ),
                 "{purge:?}"
@@ -445,7 +445,10 @@ fn shredding_leaves_no_run_of_the_destroyed_key() {
     );
     for record in &made.records[..10] {
         let shredded = handle.destroy_wrapped_record_key(*record).expect("shred");
-        assert_eq!(shredded.checkpoint_attempts, 1);
+        assert_eq!(
+            (shredded.key_deleted, shredded.checkpoint_attempts),
+            (true, 1)
+        );
     }
     let after = inspect(&file, &KEY);
     assert_eq!(after.wal_frames, 0);

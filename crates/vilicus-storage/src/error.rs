@@ -138,8 +138,19 @@ pub enum Error {
     },
     /// An empty wrapped record key.
     InvalidWrappedKey,
-    /// The record has no wrapped key to destroy.
-    RecordKeyNotFound,
+    /// A deletion that must be real committed, but its TRUNCATE checkpoint stayed busy, or left
+    /// WAL content, after every retry (D132): the rows are gone from the tables and may still be
+    /// in the WAL until the next checkpoint.
+    DeletedNotCheckpointed {
+        /// The rows the deletion removed.
+        deleted: usize,
+        /// Frames in the WAL at the last attempt.
+        log: i32,
+        /// Frames copied back at the last attempt.
+        checkpointed: i32,
+    },
+    /// A Core operation that runs its own transaction was called inside an open one.
+    TransactionOpen,
     /// A label to confirm is outside the form of reviewed-vocabulary labels (D104).
     InvalidVocabularyLabel,
     /// A file copy was asked for while the WAL still holds content (AD-23).
@@ -254,7 +265,18 @@ impl fmt::Display for Error {
                 write!(formatter, "an effect intent that is {state} is not retried")
             }
             Self::InvalidWrappedKey => formatter.write_str("an empty wrapped record key"),
-            Self::RecordKeyNotFound => formatter.write_str("the record has no wrapped key"),
+            Self::DeletedNotCheckpointed {
+                deleted,
+                log,
+                checkpointed,
+            } => write!(
+                formatter,
+                "{deleted} rows deleted, their TRUNCATE checkpoint incomplete after every retry \
+                 ({checkpointed} of {log} frames)"
+            ),
+            Self::TransactionOpen => {
+                formatter.write_str("a Core operation with its own transaction inside another")
+            }
             Self::InvalidVocabularyLabel => {
                 formatter.write_str("a label outside the form of reviewed-vocabulary labels")
             }
@@ -296,7 +318,8 @@ impl fmt::Debug for Error {
             Self::EffectNotPending { .. } => "EffectNotPending",
             Self::EffectNotRetryable { .. } => "EffectNotRetryable",
             Self::InvalidWrappedKey => "InvalidWrappedKey",
-            Self::RecordKeyNotFound => "RecordKeyNotFound",
+            Self::DeletedNotCheckpointed { .. } => "DeletedNotCheckpointed",
+            Self::TransactionOpen => "TransactionOpen",
             Self::InvalidVocabularyLabel => "InvalidVocabularyLabel",
             Self::WalNotEmpty(_) => "WalNotEmpty",
             Self::CopyRaced(_) => "CopyRaced",

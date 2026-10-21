@@ -366,8 +366,11 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
     let outlasted = writer.purge_journal(at(1));
     reader.join().expect("reader");
     assert!(
-        matches!(outlasted, Err(Error::CheckpointIncomplete { .. })),
-        "{outlasted:?}"
+        matches!(
+            outlasted,
+            Err(Error::DeletedNotCheckpointed { deleted: 1, .. })
+        ),
+        "the failure carries the rows deleted: {outlasted:?}"
     );
     writer
         .checkpoint_truncate()
@@ -576,16 +579,23 @@ fn a_wrapped_record_key_is_stored_once_and_destroyed_with_a_checkpoint() {
         Some(&b"wrapped key bytes"[..])
     );
     let shredded = writer.destroy_wrapped_record_key(id(80)).expect("destroy");
-    assert_eq!(shredded.checkpoint_attempts, 1);
+    assert_eq!(
+        shredded,
+        crate::Shredded {
+            key_deleted: true,
+            checkpoint_attempts: 1
+        }
+    );
     assert_eq!(writer.wrapped_record_key(id(80)).expect("read"), None);
     assert_eq!(
         std::fs::metadata(writer.file().wal_path()).map_or(0, |metadata| metadata.len()),
         0
     );
-    assert!(matches!(
-        writer.destroy_wrapped_record_key(id(80)),
-        Err(Error::RecordKeyNotFound)
-    ));
+    let again = writer.destroy_wrapped_record_key(id(80)).expect("again");
+    assert!(
+        !again.key_deleted,
+        "nothing left to delete, the checkpoint runs"
+    );
 }
 
 /// Story 3.6 review, M2: an intent is identified by its effect's name and its key. The same key
@@ -662,5 +672,84 @@ fn an_effect_key_names_one_effect_of_one_caller() {
             ("send_message".to_owned(), b"order-1".to_vec()),
             ("cancel_order".to_owned(), b"order-1".to_vec()),
         ]
+    );
+}
+
+/// Story 3.6 review, minor 5: a shredding whose checkpoint a reader keeps busy past every attempt
+/// fails with the deleted row in its error; calling it again once the reader ended finishes the
+/// checkpoint rather than failing on the missing key.
+#[test]
+fn a_shredding_whose_checkpoint_failed_is_finished_by_its_retry() {
+    let writer = new_writer("record-keys-retry");
+    let file = writer.file().clone();
+    writer
+        .store_wrapped_record_key(id(81), b"wrapped key bytes")
+        .expect("store");
+    let (ready, started) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let reader = open::<Read>(&file, &KEY).expect("open reader");
+        reader.execute_batch("BEGIN").expect("begin");
+        let _: i64 = reader
+            .query_row("SELECT count(*) FROM _meta", [], |row| row.get(0))
+            .expect("take a snapshot");
+        ready.send(()).expect("signal");
+        thread::sleep(Duration::from_millis(u64::from(CHECKPOINT_ATTEMPTS) * 400));
+        reader.execute_batch("COMMIT").expect("end the snapshot");
+        reader.close().expect("close");
+    });
+    started.recv().expect("the reader holds its snapshot");
+    let failed = writer.destroy_wrapped_record_key(id(81));
+    assert!(
+        matches!(
+            failed,
+            Err(Error::DeletedNotCheckpointed { deleted: 1, .. })
+        ),
+        "{failed:?}"
+    );
+    reader.join().expect("reader");
+    let finished = writer
+        .destroy_wrapped_record_key(id(81))
+        .expect("the retry");
+    assert!(!finished.key_deleted);
+    assert_eq!(
+        std::fs::metadata(writer.file().wal_path()).map_or(0, |metadata| metadata.len()),
+        0
+    );
+}
+
+/// Story 3.6 review, minor 8: the purge and the shredding run their own transaction, so inside
+/// an open one they are refused, and nothing is deleted.
+#[test]
+fn a_purge_or_a_shredding_inside_a_transaction_is_refused() {
+    let writer = new_writer("deletions-in-transaction");
+    writer
+        .store_wrapped_record_key(id(82), b"wrapped key bytes")
+        .expect("store");
+    writer.execute_batch("BEGIN IMMEDIATE").expect("begin");
+    assert!(matches!(
+        writer.purge_journal(at(0)),
+        Err(Error::TransactionOpen)
+    ));
+    assert!(matches!(
+        writer.destroy_wrapped_record_key(id(82)),
+        Err(Error::TransactionOpen)
+    ));
+    writer.execute_batch("ROLLBACK").expect("rollback");
+    assert!(writer.wrapped_record_key(id(82)).expect("read").is_some());
+}
+
+/// Story 3.6 review, minor 6: a panic inside the Core's own statements puts the role's policy
+/// back as it unwinds, so module SQL on the handle stays under the write policy.
+#[test]
+fn a_panic_under_the_core_policy_restores_the_role_policy() {
+    let writer = new_writer("core-policy-panic");
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: crate::Result<()> = writer.under_core_policy(|_| panic!("a Core bug"));
+    }));
+    assert!(unwound.is_err());
+    let refused = writer.execute_batch("DELETE FROM _journal");
+    assert!(
+        refused.as_ref().is_err_and(Error::is_refusal),
+        "{refused:?}"
     );
 }

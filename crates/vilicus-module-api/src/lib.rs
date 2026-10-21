@@ -6,7 +6,8 @@
 //!
 //! A module declares itself in one [`ModuleDeclaration`], a `const` item: its [`Table`]s, each
 //! holding one record kind with the data types its fields may hold and its [`Field`]s, structured
-//! or free text; its [`Fts5Table`]s; its [`Migration`]s; its [`Tool`]s, each with its tier,
+//! or free text; its [`Fts5Table`]s; its [`Migration`]s, each with its frozen hash; its
+//! [`Tool`]s, each with its tier,
 //! network effect, exception class, [`Confirmation`] and capability [`MatrixRow`], and the
 //! capability matrix sections it implements. Every table also carries the record [`ENVELOPE`],
 //! which the Core stamps. [`ModuleDeclaration::assert_valid`] applies the rules of the contract at
@@ -40,7 +41,7 @@ pub use tool::{Confirmation, MatrixRow, Tool};
 pub use value::{Value, ValueError, check_vocabulary_label, is_free_text_character};
 pub use vilicus_types::{
     DataType, ExceptionClass, Id, Rev, Tier, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS,
-    is_vocabulary_label, is_vocabulary_label_letter,
+    is_vocabulary_label, is_vocabulary_label_letter, sha256_hex,
 };
 
 #[cfg(test)]

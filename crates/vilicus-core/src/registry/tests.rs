@@ -10,11 +10,11 @@ use vilicus_module_api::{
     DataType, DeclarationError, ENVELOPE, Field, FieldKind, Fts5Content, Fts5Table, Fts5Tokenizer,
     Migration, ModuleDeclaration, Structured, Table,
 };
-use vilicus_storage::{ModuleFile, Partition, Read, Write};
+use vilicus_storage::{MigrationTrack, ModuleFile, Partition, Read, Write};
 use vilicus_types::ModuleName;
 
 use super::schema::{self, SchemaError, Snapshot};
-use super::{FileError, Registry, RegistryError};
+use super::{FileError, Registry, RegistryError, frozen};
 
 /// Test key only; the Core derives one key per file.
 const KEY: [u8; 32] = [0x3c; 32];
@@ -145,19 +145,15 @@ fn sample() -> ModuleDeclaration {
         ]),
         fts5_tables: &[],
         migrations: leak(vec![
-            Migration {
-                sql: leak_str(format!(
-                    "CREATE TABLE items ({});\nCREATE INDEX items_status ON items (status);",
-                    items_columns_sql()
-                )),
-            },
-            Migration {
-                sql: leak_str(format!(
-                    "ALTER TABLE items ADD COLUMN {};\nCREATE TABLE notes ({}, body TEXT NOT NULL) STRICT;",
-                    column_sql(AISLE.name, AISLE.kind.sql_type().as_str(), false, false),
-                    envelope_sql()
-                )),
-            },
+            frozen(leak_str(format!(
+                "CREATE TABLE items ({});\nCREATE INDEX items_status ON items (status);",
+                items_columns_sql()
+            ))),
+            frozen(leak_str(format!(
+                "ALTER TABLE items ADD COLUMN {};\nCREATE TABLE notes ({}, body TEXT NOT NULL) STRICT;",
+                column_sql(AISLE.name, AISLE.kind.sql_type().as_str(), false, false),
+                envelope_sql()
+            ))),
         ]),
         matrix_sections: &[],
         tools: &[],
@@ -217,6 +213,9 @@ const LITERAL: ModuleDeclaration = ModuleDeclaration {
               taint TEXT NOT NULL, text_taint TEXT NOT NULL, data_types TEXT NOT NULL, \
               author BLOB, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, \
               rev INTEGER NOT NULL, body TEXT NOT NULL) STRICT;",
+        sha256: vilicus_module_api::sha256_hex(
+            "730e7563a0fa04318560df3ade29b8679a1ddf158580e4eb41db714f60d0c5c9",
+        ),
     }],
     matrix_sections: &[],
     tools: &[],
@@ -474,7 +473,7 @@ fn undeclared_objects_and_missing_tables_fail_registration() {
     for (index, (sql, kind, name)) in undeclared.into_iter().enumerate() {
         let mut module = sample();
         let mut migrations = module.migrations.to_vec();
-        migrations.push(Migration { sql });
+        migrations.push(frozen(sql));
         module.migrations = leak(migrations);
         let error = schema_error(verify(module, &format!("undeclared-{index}")));
         assert_eq!(
@@ -570,15 +569,91 @@ fn the_core_checks_each_file_it_opens() {
     );
 }
 
+/// Story 3.7, AC1 (D21): the frozen hash of each of the Core's own migrations is the SHA-256 of
+/// its SQL, so an edit of a released Core migration fails here as it would fail every run.
+#[test]
+fn every_core_migration_has_the_digest_its_frozen_hash_states() {
+    for (version, migration) in (1..).zip(vilicus_storage::core_migrations()) {
+        assert_eq!(
+            vilicus_crypto::sha256(migration.sql.as_bytes()),
+            migration.sha256,
+            "Core migration {version}"
+        );
+    }
+}
+
+/// Story 3.7, AC1: a migration whose SQL no longer has the digest its frozen hash states is
+/// refused before any file is made or migrated, and so is a released one edited along with its
+/// hash, once a file ran the first one: the file is refused at open, and no migration runs on it.
+#[test]
+fn a_changed_migration_is_refused_before_it_runs_and_at_open() {
+    let dir = scratch_dir("changed-unfrozen");
+    let mut unfrozen = sample();
+    let mut migrations = unfrozen.migrations.to_vec();
+    migrations[1].sql = leak_str(format!("{} ", migrations[1].sql));
+    unfrozen.migrations = leak(migrations);
+    let outcome = registry_of(vec![unfrozen])
+        .verify_migrations(&dir, &KEY)
+        .map_err(|error| error.error);
+    assert!(
+        matches!(
+            outcome,
+            Err(FileError::ChangedMigration {
+                track: MigrationTrack::Module,
+                version: 2
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fs::read_dir(&dir).expect("list").count(),
+        0,
+        "no file was made"
+    );
+
+    let file = migrated_sample("changed-refrozen");
+    let mut refrozen = sample();
+    let mut migrations = refrozen.migrations.to_vec();
+    migrations[1] = frozen(leak_str(format!("{} ", migrations[1].sql)));
+    refrozen.migrations = leak(migrations);
+    let registry = registry_of(vec![refrozen]);
+    let outcome = registry.open::<Read>(&file, &KEY);
+    assert!(
+        matches!(
+            outcome,
+            Err(FileError::ChangedMigration {
+                track: MigrationTrack::Module,
+                version: 2
+            })
+        ),
+        "{outcome:?}"
+    );
+    let mut migration =
+        vilicus_storage::open::<vilicus_storage::Migration>(&file, &KEY).expect("open");
+    let module = registry.modules()[0];
+    let outcome = migration.apply_module_migrations(
+        &super::frozen_migrations(module).expect("frozen as the declaration states"),
+    );
+    migration.close().expect("close");
+    assert!(
+        matches!(
+            outcome,
+            Err(vilicus_storage::Error::MigrationChanged {
+                track: MigrationTrack::Module,
+                version: 2
+            })
+        ),
+        "{outcome:?}"
+    );
+}
+
 #[test]
 fn a_file_of_another_version_or_module_is_refused_at_open() {
     let file = migrated_sample("versions");
 
     let mut ahead = sample();
     let mut migrations = ahead.migrations.to_vec();
-    migrations.push(Migration {
-        sql: "CREATE INDEX notes_body ON notes (body);",
-    });
+    migrations.push(frozen("CREATE INDEX notes_body ON notes (body);"));
     ahead.migrations = leak(migrations);
     let outcome = registry_of(vec![ahead]).open::<Read>(&file, &KEY);
     assert!(
@@ -859,7 +934,7 @@ fn only_plain_indexes_pass_registration() {
     for (index, (sql, reason)) in refused.into_iter().enumerate() {
         let mut module = sample();
         let mut migrations = module.migrations.to_vec();
-        migrations.push(Migration { sql });
+        migrations.push(frozen(sql));
         module.migrations = leak(migrations);
         let error = schema_error(verify(module, &format!("index-{index}")));
         assert_eq!(
@@ -874,9 +949,9 @@ fn only_plain_indexes_pass_registration() {
     }
     let mut module = sample();
     let mut migrations = module.migrations.to_vec();
-    migrations.push(Migration {
-        sql: "CREATE INDEX items_x ON items (label DESC, list_id COLLATE BINARY);",
-    });
+    migrations.push(frozen(
+        "CREATE INDEX items_x ON items (label DESC, list_id COLLATE BINARY);",
+    ));
     module.migrations = leak(migrations);
     verify(module, "index-plain").expect("a plain index is allowed");
 }
@@ -892,9 +967,7 @@ fn case_and_comments_do_not_make_a_difference() {
     );
     let mut module = sample();
     let mut migrations = module.migrations.to_vec();
-    migrations[0] = Migration {
-        sql: leak_str(format!("CREATE TABLE ITEMS ({columns});")),
-    };
+    migrations[0] = frozen(leak_str(format!("CREATE TABLE ITEMS ({columns});")));
     module.migrations = leak(migrations);
     verify(module, "case-and-comments").expect("the same statement");
 }
@@ -903,9 +976,7 @@ fn case_and_comments_do_not_make_a_difference() {
 fn sample_with_items_definition(columns: &str, suffix: &str) -> ModuleDeclaration {
     let mut module = sample();
     let mut migrations = module.migrations.to_vec();
-    migrations[0] = Migration {
-        sql: leak_str(format!("CREATE TABLE items ({columns}){suffix};")),
-    };
+    migrations[0] = frozen(leak_str(format!("CREATE TABLE items ({columns}){suffix};")));
     module.migrations = leak(migrations);
     module
 }
@@ -945,9 +1016,7 @@ fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
 fn verify_fts5_migration(fts5: Fts5Table, sql: &str, label: &str) -> Result<(), FileError> {
     let mut module = sample_declaring(fts5);
     let mut migrations = module.migrations.to_vec();
-    migrations.push(Migration {
-        sql: leak_str(sql.to_owned()),
-    });
+    migrations.push(frozen(leak_str(sql.to_owned())));
     module.migrations = leak(migrations);
     verify(module, label)
 }

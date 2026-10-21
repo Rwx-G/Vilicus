@@ -11,6 +11,9 @@
 //! The tables of version 1:
 //! - `_vocabulary`, the labels an adult confirmed for the file's reviewed vocabularies (D104,
 //!   D146);
+//! - `_migrations`, the frozen hash of every migration of either track the file ran, one row per
+//!   track and version, written by the runner in the migration's own transaction (AD-23, D21);
+//!   the runner and the registry refuse a file whose record differs from the code's migrations;
 //! - `_journal`, one row per record a call changed: the call's key (principal, `source`,
 //!   `call_id`), the hash of its request when the pipeline gives one, its authority and member,
 //!   the record's table, id and revisions, its before and after images and the provenance of the
@@ -30,14 +33,26 @@
 //! commit; the others are `WITHOUT ROWID` tables keyed by their natural key. Every table is
 //! `STRICT`.
 
-/// The Core track's migrations, in order: migration `n` brings the track to version `n`. A
-/// migration once released is never edited; a change is a new migration (AD-23).
-pub(crate) const CORE_MIGRATIONS: &[&str] = &["CREATE TABLE _vocabulary (
+use vilicus_types::sha256_hex;
+
+use crate::migration::FrozenMigration;
+
+/// The Core track's migrations, in order, each with its frozen hash: migration `n` brings the
+/// track to version `n`. A migration once released is never edited; a change is a new migration
+/// (AD-23), and the Core's test of the frozen hashes fails on an edit.
+pub(crate) const CORE_MIGRATIONS: &[FrozenMigration<'static>] = &[FrozenMigration {
+    sql: "CREATE TABLE _vocabulary (
         vocabulary TEXT NOT NULL,
         label TEXT NOT NULL,
         confirmed_by BLOB NOT NULL,
         confirmed_at INTEGER NOT NULL,
         PRIMARY KEY (vocabulary, label)
+    ) STRICT, WITHOUT ROWID;
+    CREATE TABLE _migrations (
+        track TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        sha256 BLOB NOT NULL,
+        PRIMARY KEY (track, version)
     ) STRICT, WITHOUT ROWID;
     CREATE TABLE _journal (
         seq INTEGER PRIMARY KEY,
@@ -94,7 +109,15 @@ pub(crate) const CORE_MIGRATIONS: &[&str] = &["CREATE TABLE _vocabulary (
     CREATE TABLE _record_keys (
         record_id BLOB NOT NULL PRIMARY KEY,
         wrapped_key BLOB NOT NULL
-    ) STRICT, WITHOUT ROWID;"];
+    ) STRICT, WITHOUT ROWID;",
+    sha256: sha256_hex("c5d7d5e932d2725faea9ef73c5b706bf09a8445a07e886ed1308ee5d97de2717"),
+}];
+
+/// The Core track's migrations with their frozen hashes, which the Core checks against the
+/// digest of their SQL before it runs any migration (D21).
+pub fn core_migrations() -> &'static [FrozenMigration<'static>] {
+    CORE_MIGRATIONS
+}
 
 /// The Core track's schema version once every Core migration ran: the version the Core's code
 /// expects of every file it opens.

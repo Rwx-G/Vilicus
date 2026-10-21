@@ -6,7 +6,7 @@
 
 use vilicus_types::{CallId, Id, Principal, Rev, Source, UtcMillis};
 
-use super::{KEY, create_module_file, raw_connection, scratch_dir};
+use super::{KEY, create_module_file, frozen, raw_connection, scratch_dir};
 use crate::error::Error;
 use crate::{
     AuthorityKind, CallKey, EffectIntent, JournalEntry, Migration, ModuleFile, Read, Write, open,
@@ -117,7 +117,7 @@ fn a_migration_cannot_sample_the_core_indexes() {
     let mut failures = Vec::new();
     for sql in HOSTILE {
         let mut migration = open::<Migration>(&file, &KEY).expect("open");
-        let outcome = migration.apply_module_migration(1, sql);
+        let outcome = migration.apply_module_migrations(&[frozen(sql)]);
         migration.close().expect("close");
         if !outcome.as_ref().is_err_and(Error::is_refusal) {
             failures.push(format!("{sql}: {outcome:?}"));
@@ -133,7 +133,7 @@ fn a_migration_cannot_sample_the_core_indexes() {
         "CREATE TABLE sqlite_stat4 (tbl, idx, neq, nlt, ndlt, sample)",
     ] {
         let mut migration = open::<Migration>(&file, &KEY).expect("open");
-        let outcome = migration.apply_module_migration(1, sql);
+        let outcome = migration.apply_module_migrations(&[frozen(sql)]);
         migration.close().expect("close");
         if outcome.is_ok() || !statistics_tables(&file).is_empty() {
             failures.push(format!("{sql}: {outcome:?}"));
@@ -142,10 +142,9 @@ fn a_migration_cannot_sample_the_core_indexes() {
     assert!(failures.is_empty(), "{failures:#?}");
     let mut migration = open::<Migration>(&file, &KEY).expect("open");
     migration
-        .apply_module_migration(
-            1,
+        .apply_module_migrations(&[frozen(
             "CREATE TABLE notes (x INTEGER); CREATE INDEX notes_x ON notes (x);",
-        )
+        )])
         .expect("an ordinary migration with an index applies");
     migration.close().expect("close");
     assert!(
@@ -210,7 +209,7 @@ fn planted_statistics_are_read_by_no_role() {
         "DELETE FROM sqlite_stat1",
     ] {
         let mut migration = open::<Migration>(&file, &KEY).expect("open");
-        let outcome = migration.apply_module_migration(1, sql);
+        let outcome = migration.apply_module_migrations(&[frozen(sql)]);
         migration.close().expect("close");
         if !outcome.as_ref().is_err_and(Error::is_refusal) {
             failures.push(format!("migration {sql}: {outcome:?}"));
@@ -226,11 +225,10 @@ fn planted_statistics_are_read_by_no_role() {
 fn no_statistics_outlive_the_retention_purge() {
     let file = file_with_secrets("statistics-purge");
     let mut migration = open::<Migration>(&file, &KEY).expect("open");
-    let outcome = migration.apply_module_migration(
-        1,
+    let outcome = migration.apply_module_migrations(&[frozen(
         "ANALYZE; CREATE TABLE leak (sample BLOB); \
          INSERT INTO leak SELECT sample FROM sqlite_stat4 WHERE tbl = '_journal';",
-    );
+    )]);
     migration.close().expect("close");
     assert!(
         outcome.as_ref().is_err_and(Error::is_refusal),

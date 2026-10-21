@@ -210,12 +210,21 @@ pub struct Fts5Table {
 /// The suffixes FTS5 gives its shadow tables, `<table>_<suffix>`; no module table may take one.
 pub const FTS5_SHADOW_SUFFIXES: &[&str] = &["config", "content", "data", "docsize", "idx"];
 
-/// One migration of the module's track (AD-23), declarative SQL embedded in the binary. Its
-/// version is its position in [`ModuleDeclaration::migrations`], from 1.
+/// One migration of the module's track (AD-23), declarative SQL embedded in the binary with its
+/// frozen hash (D21). Its version is its position in [`ModuleDeclaration::migrations`], from 1.
+///
+/// The frozen hash is the SHA-256 of `sql`'s bytes, written once the migration is released and
+/// never changed, as `sha256: vilicus_module_api::sha256_hex("<64 hex digits>")`. Before any
+/// migration runs, the Core computes the digest of each migration's SQL and refuses the module's
+/// migrations when one differs from its frozen hash; a file records the frozen hash of every
+/// migration it ran, and the Core refuses a file whose record differs from the declaration, so a
+/// released migration edited later never runs and never passes for the one a file ran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Migration {
     /// The SQL, run by the Core's migration runner under the migration policy.
     pub sql: &'static str,
+    /// The SHA-256 of `sql`, frozen with the migration.
+    pub sha256: [u8; 32],
 }
 
 /// Everything a module declares: its file and its tools. A module crate exposes one as a `const`

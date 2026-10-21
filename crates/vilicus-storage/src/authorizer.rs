@@ -58,6 +58,7 @@ pub(crate) enum Policy {
 pub const CORE_TABLES: &[&str] = &[
     "_meta",
     "_vocabulary",
+    "_migrations",
     "_journal",
     "_outbox",
     "_consumed",
@@ -69,9 +70,12 @@ pub const CORE_TABLES: &[&str] = &[
 /// journal's images are earlier states of records, deleted ones included, which a module would
 /// otherwise still read once the record is gone; the outbox holds the payloads of effects; and
 /// a module that read a wrapped record key could copy it into a record and defeat its shredding
-/// (D132). `_meta` and `_vocabulary` stay readable: the epoch is a counter and the labels are the
+/// (D132). `_migrations`, the frozen hash of every migration the file ran, holds nothing secret,
+/// but module SQL has no use for it, and D148 lets module SQL read `_meta` and `_vocabulary`
+/// only. `_meta` and `_vocabulary` stay readable: the epoch is a counter and the labels are the
 /// module's own vocabulary.
 pub const CORE_PRIVATE_TABLES: &[&str] = &[
+    "_migrations",
     "_journal",
     "_outbox",
     "_consumed",

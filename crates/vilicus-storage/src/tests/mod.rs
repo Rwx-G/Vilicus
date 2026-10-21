@@ -21,7 +21,7 @@ use rusqlite::Connection;
 use vilicus_types::ModuleName;
 
 use crate::authorizer::{self, Policy};
-use crate::{Handle, KeyEpoch, ModuleFile, Partition, Role, RoleKind, create};
+use crate::{FrozenMigration, Handle, KeyEpoch, ModuleFile, Partition, Role, RoleKind, create};
 
 /// Test key only; the Core derives one key per file (`doc/key-management.md` section 2).
 pub(crate) const KEY: [u8; 32] = [0x5a; 32];
@@ -87,6 +87,27 @@ pub(crate) fn create_module_file(dir: &Path) -> ModuleFile {
         .expect("create schema");
     connection.close().expect("close schema connection");
     file
+}
+
+/// `sql` as the runner takes it, with a stand-in for its frozen hash: the storage layer computes
+/// no digest, it records and compares the one it is given, so any value that differs between two
+/// texts of these tests serves. The Core's tests use the SHA-256 of `vilicus-crypto`.
+pub(crate) fn frozen(sql: &str) -> FrozenMigration<'_> {
+    let mut sha256 = [0; 32];
+    for (index, chunk) in (0_u64..).zip(sha256.chunks_mut(8)) {
+        let fold = sql
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325 ^ index, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        chunk.copy_from_slice(&fold.to_le_bytes());
+    }
+    FrozenMigration { sql, sha256 }
+}
+
+/// Each of `sqls`, as [`frozen`] makes it: a module's migrations, the first being version 1.
+pub(crate) fn frozen_all<'a>(sqls: &[&'a str]) -> Vec<FrozenMigration<'a>> {
+    sqls.iter().map(|sql| frozen(sql)).collect()
 }
 
 pub(crate) fn opening_policy(kind: RoleKind) -> Policy {

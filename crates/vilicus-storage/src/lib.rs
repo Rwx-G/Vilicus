@@ -9,8 +9,9 @@
 //! 256-bit key ([`ModuleFile`], [`open`], [`create`]). Every connection is set up before its
 //! authorizer goes on and reads every setting back ([`Settings`]); a [`Handle`] then runs in one
 //! role, [`Read`] (`SELECT` only), [`Write`] (rows only) or [`Migration`] (closed outside
-//! [`Handle::apply_module_migration`] and [`Handle::apply_core_migrations`], which record each
-//! track's schema version in `_meta`).
+//! [`Handle::apply_module_migrations`] and [`Handle::apply_core_migrations`], which record each
+//! track's schema version in `_meta` and the frozen hash of each migration in `_migrations`,
+//! [`FrozenMigration`]).
 //! Read and write handles also read the file's [`Schema`], which the module registry compares
 //! with its declarations, and the confirmed labels of its reviewed vocabularies, which a write
 //! handle records in the Core table `_vocabulary` (D104). Copies and VACUUM run on the Core
@@ -32,12 +33,13 @@ mod file;
 mod handle;
 mod journal;
 pub mod maintenance;
+mod migration;
 mod outbox;
 mod record_key;
 mod schema;
 
 pub use authorizer::{CORE_PRIVATE_TABLES, CORE_TABLES};
-pub use core_schema::CORE_SCHEMA_VERSION;
+pub use core_schema::{CORE_SCHEMA_VERSION, core_migrations};
 pub use error::{Error, Result, is_refusal};
 pub use file::{KeyEpoch, ModuleFile, Partition, read_epoch};
 pub use handle::{
@@ -45,6 +47,7 @@ pub use handle::{
     MigrationTrack, Read, Role, RoleKind, Settings, Write, create, open,
 };
 pub use journal::{AuthorityKind, CallKey, JournalEntry, JournalPurge, JournalRow};
+pub use migration::FrozenMigration;
 pub use outbox::{EffectIntent, EffectRow, EffectState};
 pub use record_key::Shredded;
 pub use schema::{

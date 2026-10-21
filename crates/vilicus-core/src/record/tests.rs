@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use vilicus_module_api::{
-    DataType, ENVELOPE, Field, FieldKind, Migration, ModuleDeclaration, SqlType, Structured, Table,
+    DataType, ENVELOPE, Field, FieldKind, ModuleDeclaration, SqlType, Structured, Table,
     VOCABULARY_LABEL_MAX_LEN, Value, ValueError,
 };
 use vilicus_storage::{CORE_PRIVATE_TABLES, Handle, ModuleFile, SqlValue, TableKind, Write};
@@ -16,7 +16,7 @@ use vilicus_types::{Id, Source, Taint, TextTaint, UtcMillis};
 
 use super::envelope::{EnvelopeRule, data_types_text, rule};
 use super::{RecordError, WriteKind, WritePath, check_stored_rows, confirm_label};
-use crate::registry::{Registry, create_migrated};
+use crate::registry::{Registry, create_migrated, frozen};
 
 /// The row writer's insert of a record derived from no input.
 fn insert(
@@ -156,9 +156,9 @@ pub(super) fn module(
         "
 ",
     );
-    let mut migrations = vec![Migration { sql: create.leak() }];
+    let mut migrations = vec![frozen(create.leak())];
     if let Some(sql) = back_fill {
-        migrations.push(Migration { sql: sql.leak() });
+        migrations.push(frozen(sql.leak()));
     }
     Box::leak(Box::new(ModuleDeclaration {
         name,
@@ -1235,11 +1235,12 @@ fn a_failed_commit_leaves_no_open_transaction() {
     );
     let mut migration =
         vilicus_storage::open::<vilicus_storage::Migration>(&file, &KEY).expect("open");
+    let migration_sql = format!("CREATE TABLE lists (id BLOB PRIMARY KEY);\n{sql}");
     migration
-        .apply_module_migration(
-            1,
-            &format!("CREATE TABLE lists (id BLOB PRIMARY KEY);\n{sql}"),
-        )
+        .apply_module_migrations(&[vilicus_storage::FrozenMigration {
+            sql: &migration_sql,
+            sha256: vilicus_crypto::sha256(migration_sql.as_bytes()),
+        }])
         .expect("migrate");
     migration.close().expect("close");
     let handle = vilicus_storage::open::<Write>(&file, &KEY).expect("open without the registry");

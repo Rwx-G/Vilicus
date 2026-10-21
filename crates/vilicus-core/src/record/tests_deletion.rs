@@ -67,11 +67,11 @@ fn open_in(
         .expect("close");
     let mut migration =
         vilicus_storage::open::<vilicus_storage::Migration>(&file, &KEY).expect("open");
-    for (version, step) in (1..).zip(module.migrations) {
-        migration
-            .apply_module_migration(version, step.sql)
-            .expect("migrate");
-    }
+    migration
+        .apply_module_migrations(
+            &crate::registry::frozen_migrations(module).expect("frozen migrations"),
+        )
+        .expect("migrate");
     migration.close().expect("close");
     let handle = registry_of(vec![module])
         .open::<Write>(&file, &KEY)

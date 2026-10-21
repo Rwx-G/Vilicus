@@ -34,6 +34,7 @@ use crate::file::{
     self, KeyEpoch, META_CORE_SCHEMA_VERSION, META_GENERATION, META_MODULE_SCHEMA_VERSION,
     META_PARTITION_ROOT_VERSION, ModuleFile,
 };
+use crate::migration::{self, FrozenMigration};
 
 /// `PRAGMA journal_size_limit` on every connection: after a WAL restart, the first commit cuts
 /// the WAL to what it wrote, so stale frames do not outlive the restart even when a TRUNCATE
@@ -56,7 +57,8 @@ const CHECKPOINT_PAUSE: Duration = Duration::from_millis(20);
 /// What a connection is opened for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoleKind {
-    /// Applies migrations through [`Handle::apply_migration`] and nothing else.
+    /// Applies migrations through [`Handle::apply_module_migrations`] and
+    /// [`Handle::apply_core_migrations`], and nothing else.
     Migration,
     /// Writes rows in the file's tables, never its schema.
     Write,
@@ -111,11 +113,11 @@ impl Inspect for Read {}
 impl Inspect for Write {}
 
 /// One of the two migration tracks of a module file (AD-26): the Core's tables first, then the
-/// module's. Each track has its own schema version in `_meta`, which only the runner writes, in
-/// the transaction of the migration, under the Core policy that module SQL never runs under. The
-/// Core track's migrations are the Core's own, embedded in this crate
-/// ([`Handle::apply_core_migrations`]); a module's are given to
-/// [`Handle::apply_module_migration`].
+/// module's. Each track has its own schema version in `_meta` and its record of frozen hashes in
+/// `_migrations`, which only the runner writes, in the transaction of the migration, under the
+/// Core policy that module SQL never runs under. The Core track's migrations are the Core's own,
+/// embedded in this crate ([`Handle::apply_core_migrations`]); a module's are given to
+/// [`Handle::apply_module_migrations`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MigrationTrack {
     /// The Core tables of the file ([`CORE_TABLES`](crate::CORE_TABLES)) other than `_meta`.
@@ -530,8 +532,11 @@ pub fn create(file: &ModuleFile, key: &[u8; 32], epoch: KeyEpoch) -> Result<Hand
 fn build_new_file(staging: &Path, key: &[u8; 32], epoch: KeyEpoch) -> Result<()> {
     let (mut connection, _) = connect_path(staging, key, Setup::Role(RoleKind::Write), true)?;
     let built = write_new_meta(&connection, epoch).and_then(|()| {
-        core_migrations_after(0).try_for_each(|(version, sql)| {
-            run_migration(&mut connection, sql, Some((MigrationTrack::Core, version)))
+        (1..=CORE_SCHEMA_VERSION).try_for_each(|version| {
+            run_migration(
+                &mut connection,
+                Migrating::Step(Step::of(MigrationTrack::Core, version, CORE_MIGRATIONS)),
+            )
         })
     });
     let closed = checkpoint_and_close(connection);
@@ -542,14 +547,6 @@ fn build_new_file(staging: &Path, key: &[u8; 32], epoch: KeyEpoch) -> Result<()>
     }
     std::fs::File::open(staging)?.sync_all()?;
     Ok(())
-}
-
-/// The Core track's migrations after version `current`, each with the version it brings the
-/// track to.
-fn core_migrations_after(current: u32) -> impl Iterator<Item = (u32, &'static str)> {
-    (1..)
-        .zip(CORE_MIGRATIONS.iter().copied())
-        .filter(move |(version, _)| *version > current)
 }
 
 /// `_meta` with the key epoch, in one transaction: the table both migration tracks record their
@@ -862,69 +859,88 @@ fn write_meta(connection: &Connection, epoch: KeyEpoch) -> Result<()> {
 impl Handle<Migration> {
     /// Applies one migration without a version, for the replay of the Story 1.7 hostile
     /// statements, which test the runner itself. Product code has only
-    /// [`apply_module_migration`](Self::apply_module_migration) and
+    /// [`apply_module_migrations`](Self::apply_module_migrations) and
     /// [`apply_core_migrations`](Self::apply_core_migrations), so every schema change moves a
-    /// track's version.
+    /// track's version and leaves its frozen hash in `_migrations`.
     #[cfg(test)]
     pub(crate) fn apply_migration(&mut self, sql: &str) -> Result<()> {
-        self.run(sql, None)
+        self.run(Migrating::Unversioned(sql))
     }
 
-    /// Applies migration `version` of the module track atomically (AD-23, D126) and records
-    /// `version` as the track's schema version in `_meta`, in the same transaction, so the schema
-    /// and its version never disagree (AD-26).
+    /// Brings the file's module track to the last of `migrations`, the module's migrations in
+    /// order, the first being version 1, each with its frozen hash (AD-23, D21, D126). Returns the
+    /// number of migrations applied: 0 for a file already at the last one.
     ///
-    /// The runner opens the transaction with `BEGIN IMMEDIATE`, with the authorizer removed, so
-    /// the order checks read the versions under the write lock and a concurrent writer makes the
-    /// call fail as busy rather than race it. Core first: while the file's Core track is not at
-    /// [`CORE_SCHEMA_VERSION`], the call fails with [`Error::CoreSchemaNotCurrent`]. Forward only
-    /// and in order: `version` must follow the recorded one by exactly one, the first migration
-    /// being 1, or the call fails with [`Error::MigrationOutOfOrder`] before the SQL runs. The
-    /// migration SQL runs under the migration policy, which refuses transaction control and every
-    /// Core table; the version is written under the Core policy, never by the migration SQL,
-    /// which cannot reach `_meta`. On any error the transaction is rolled back and nothing is
-    /// written; on every exit the connection is left closed to every statement.
-    pub fn apply_module_migration(&mut self, version: u32, sql: &str) -> Result<()> {
-        self.run(sql, Some((MigrationTrack::Module, version)))
+    /// Before anything runs, with the authorizer removed: Core first, so while the file's Core
+    /// track is not at [`CORE_SCHEMA_VERSION`] the call fails with [`Error::CoreSchemaNotCurrent`];
+    /// a file at a module version beyond `migrations` fails with [`Error::NewerThanMigrations`];
+    /// and the frozen hashes the file recorded for the versions it is at must be those of
+    /// `migrations`, or the call fails with [`Error::MigrationChanged`]. This holds a file to the
+    /// migrations it ran; that each frozen hash is the digest of its SQL is the Core's check,
+    /// made before it calls this.
+    ///
+    /// Each pending migration then runs in its own transaction, which the runner opens with
+    /// `BEGIN IMMEDIATE`, with the authorizer removed, so the checks are made again under the
+    /// write lock and a concurrent writer makes the call fail as busy rather than race it;
+    /// forward only and in order, or [`Error::MigrationOutOfOrder`]. The migration SQL runs under
+    /// the migration policy, which refuses transaction control and every Core table; the version
+    /// in `_meta` and the frozen hash in `_migrations` are written under the Core policy, never by
+    /// the migration SQL. A migration that fails is rolled back and nothing of it is written, and
+    /// the call fails with [`Error::MigrationFailed`], which names its version; on every exit the
+    /// connection is left closed to every statement.
+    pub fn apply_module_migrations(&mut self, migrations: &[FrozenMigration<'_>]) -> Result<u32> {
+        let latest = track_length(migrations);
+        let current = self.checked_before_running(MigrationTrack::Module, migrations)?;
+        for version in current + 1..=latest {
+            self.run(Migrating::Step(Step::of(
+                MigrationTrack::Module,
+                version,
+                migrations,
+            )))?;
+        }
+        Ok(latest - current)
     }
 
     /// Brings the file's Core track to [`CORE_SCHEMA_VERSION`], one migration after the other,
-    /// each through the runner in its own transaction with its version, as
-    /// [`apply_module_migration`](Self::apply_module_migration) applies a module's, under the
+    /// each through the runner in its own transaction with its version and its frozen hash, as
+    /// [`apply_module_migrations`](Self::apply_module_migrations) applies a module's, under the
     /// Core migration policy, which changes the Core tables only (AD-23, AD-26). Returns the
     /// number of migrations applied: 0 for a file already current, which every file `create`
     /// made is. A file whose Core track is newer than this code fails with
-    /// [`Error::CoreSchemaNotCurrent`] and is not touched.
+    /// [`Error::CoreSchemaNotCurrent`], and one whose record of the Core track differs from the
+    /// Core's migrations with [`Error::MigrationChanged`]; neither is touched.
     pub fn apply_core_migrations(&mut self) -> Result<u32> {
-        let current = self.core_schema_version()?;
-        if current > CORE_SCHEMA_VERSION {
-            return Err(Error::CoreSchemaNotCurrent {
-                found: current,
-                latest: CORE_SCHEMA_VERSION,
-            });
-        }
-        for (version, sql) in core_migrations_after(current) {
-            self.run(sql, Some((MigrationTrack::Core, version)))?;
+        let current = self.checked_before_running(MigrationTrack::Core, CORE_MIGRATIONS)?;
+        for version in current + 1..=CORE_SCHEMA_VERSION {
+            self.run(Migrating::Step(Step::of(
+                MigrationTrack::Core,
+                version,
+                CORE_MIGRATIONS,
+            )))?;
         }
         Ok(CORE_SCHEMA_VERSION - current)
     }
 
-    /// The Core track's version, read with the authorizer removed, as the runner reads it, then
-    /// the connection closed again.
-    fn core_schema_version(&self) -> Result<u32> {
+    /// The checks made before a track's first pending migration, with the authorizer removed, as
+    /// the runner reads, then the connection closed again. Returns the track's version.
+    fn checked_before_running(
+        &self,
+        track: MigrationTrack,
+        migrations: &[FrozenMigration<'_>],
+    ) -> Result<u32> {
         let connection = self.connection();
         authorizer::remove(connection)?;
-        let version = read_schema_version(connection, MigrationTrack::Core);
+        let checked = checks_before_step(connection, track, migrations);
         let closed = authorizer::install(connection, Policy::Closed).map_err(Error::from);
-        version.and_then(|version| closed.map(|()| version))
+        checked.and_then(|current| closed.map(|()| current))
     }
 
-    fn run(&mut self, sql: &str, version: Option<(MigrationTrack, u32)>) -> Result<()> {
+    fn run(&mut self, migrating: Migrating<'_, '_>) -> Result<()> {
         let connection = self
             .connection
             .as_mut()
             .expect("a handle holds its connection until it is closed or dropped");
-        let outcome = run_migration(connection, sql, version);
+        let outcome = run_migration(connection, migrating);
         let closed = authorizer::install(connection, Policy::Closed).map_err(Error::from);
         outcome.and(closed)
     }
@@ -934,6 +950,16 @@ impl<R: Inspect> Handle<R> {
     /// The schema version `_meta` records for `track`; 0 before the track's first migration.
     pub fn schema_version(&self, track: MigrationTrack) -> Result<u32> {
         read_schema_version(self.connection(), track)
+    }
+
+    /// The frozen hash of each migration of `track` the file ran, version 1 first, as the runner
+    /// recorded it in the Core table `_migrations`, read under the Core policy: the registry
+    /// compares it with the module's declaration and with the Core's migrations at every open.
+    pub fn migration_hashes(&self, track: MigrationTrack) -> Result<Vec<[u8; 32]>> {
+        if track == MigrationTrack::Core && self.schema_version(MigrationTrack::Core)? == 0 {
+            return Ok(Vec::new());
+        }
+        self.under_core_policy(|connection| migration::recorded(connection, track))
     }
 
     /// True when `label` is a confirmed label of the reviewed vocabulary `vocabulary` in this
@@ -962,17 +988,94 @@ fn read_schema_version(connection: &Connection, track: MigrationTrack) -> Result
     }
 }
 
+/// The number of migrations of a track, its last version. A track's migrations are a static list
+/// written out in source; no build holds 2^32 of them.
+fn track_length(migrations: &[FrozenMigration<'_>]) -> u32 {
+    migrations.len() as u32
+}
+
+/// What the runner applies: a versioned step of a track, or, in the tests of the runner itself,
+/// SQL with no version.
+enum Migrating<'s, 'm> {
+    Step(Step<'m>),
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the unversioned runner exists in tests only")
+    )]
+    Unversioned(&'s str),
+}
+
+/// The migration that brings `track` to `version`, with the migrations before it, whose frozen
+/// hashes the file must have recorded.
+#[derive(Clone, Copy)]
+struct Step<'m> {
+    track: MigrationTrack,
+    version: u32,
+    migrations: &'m [FrozenMigration<'m>],
+}
+
+impl<'m> Step<'m> {
+    /// Step `version` of `migrations`, the first being 1; the callers iterate within the list.
+    fn of(track: MigrationTrack, version: u32, migrations: &'m [FrozenMigration<'m>]) -> Self {
+        Self {
+            track,
+            version,
+            migrations,
+        }
+    }
+
+    fn migration(&self) -> &'m FrozenMigration<'m> {
+        &self.migrations[self.version as usize - 1]
+    }
+
+    fn earlier(&self) -> &'m [FrozenMigration<'m>] {
+        &self.migrations[..self.version as usize - 1]
+    }
+}
+
+/// The checks of a track before its next migration, on a connection without authorizer: Core
+/// first for the module track, the track's version within `migrations`, and its record of
+/// frozen hashes equal to those of the versions it is at. Returns the track's version.
+fn checks_before_step(
+    connection: &Connection,
+    track: MigrationTrack,
+    migrations: &[FrozenMigration<'_>],
+) -> Result<u32> {
+    if track == MigrationTrack::Module {
+        let core = read_schema_version(connection, MigrationTrack::Core)?;
+        if core != CORE_SCHEMA_VERSION {
+            return Err(Error::CoreSchemaNotCurrent {
+                found: core,
+                latest: CORE_SCHEMA_VERSION,
+            });
+        }
+    }
+    let latest = track_length(migrations);
+    let current = read_schema_version(connection, track)?;
+    if current > latest {
+        return Err(match track {
+            MigrationTrack::Core => Error::CoreSchemaNotCurrent {
+                found: current,
+                latest,
+            },
+            MigrationTrack::Module => Error::NewerThanMigrations {
+                track,
+                found: current,
+                latest,
+            },
+        });
+    }
+    migration::check_recorded(connection, track, &migrations[..current as usize])?;
+    Ok(current)
+}
+
 /// Runs one migration in the runner's transaction: a module migration, or one of the Core
 /// track's, each under its own policy.
-fn run_migration(
-    connection: &mut Connection,
-    sql: &str,
-    version: Option<(MigrationTrack, u32)>,
-) -> Result<()> {
+fn run_migration(connection: &mut Connection, migrating: Migrating<'_, '_>) -> Result<()> {
     authorizer::remove(connection)?;
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let applied = migrate_in_transaction(&transaction, sql, version);
+    let applied = migrate_in_transaction(&transaction, &migrating);
     authorizer::remove(&transaction)?;
     match applied {
         Ok(()) => Ok(transaction.commit()?),
@@ -983,46 +1086,50 @@ fn run_migration(
     }
 }
 
-/// The body of the runner's transaction: the order checks with no authorizer (Core statements),
-/// the migration SQL under the policy of its track (the migration policy for a module's, the
-/// Core migration policy for the Core's), then the version row under the Core policy.
-fn migrate_in_transaction(
-    transaction: &Connection,
-    sql: &str,
-    version: Option<(MigrationTrack, u32)>,
-) -> Result<()> {
-    if let Some((track, version)) = version {
-        if track == MigrationTrack::Module {
-            let core = read_schema_version(transaction, MigrationTrack::Core)?;
-            if core != CORE_SCHEMA_VERSION {
-                return Err(Error::CoreSchemaNotCurrent {
-                    found: core,
-                    latest: CORE_SCHEMA_VERSION,
-                });
-            }
+/// The body of the runner's transaction: the checks with no authorizer (Core statements), the
+/// migration SQL under the policy of its track (the migration policy for a module's, the Core
+/// migration policy for the Core's), then its version and frozen hash under the Core policy. A
+/// failure of the SQL or of its record is [`Error::MigrationFailed`], naming the version.
+fn migrate_in_transaction(transaction: &Connection, migrating: &Migrating<'_, '_>) -> Result<()> {
+    let step = match migrating {
+        Migrating::Unversioned(sql) => {
+            authorizer::install(transaction, Policy::Migration)?;
+            return Ok(transaction.execute_batch(sql)?);
         }
-        let current = read_schema_version(transaction, track)?;
-        if current.checked_add(1) != Some(version) {
-            return Err(Error::MigrationOutOfOrder {
-                track,
-                current,
-                version,
-            });
-        }
-    }
-    let policy = match version {
-        Some((MigrationTrack::Core, _)) => Policy::CoreMigration,
-        Some((MigrationTrack::Module, _)) | None => Policy::Migration,
+        Migrating::Step(step) => *step,
     };
-    authorizer::install(transaction, policy)?;
-    transaction.execute_batch(sql)?;
-    if let Some((track, version)) = version {
-        authorizer::install(transaction, Policy::Core)?;
-        transaction.execute(
-            "INSERT INTO _meta (key, value) VALUES (?1, ?2) \
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![track.meta_key(), version],
-        )?;
+    let current = checks_before_step(transaction, step.track, step.earlier())?;
+    if current.checked_add(1) != Some(step.version) {
+        return Err(Error::MigrationOutOfOrder {
+            track: step.track,
+            current,
+            version: step.version,
+        });
     }
-    Ok(())
+    let policy = match step.track {
+        MigrationTrack::Core => Policy::CoreMigration,
+        MigrationTrack::Module => Policy::Migration,
+    };
+    let migration = step.migration();
+    let applied = authorizer::install(transaction, policy)
+        .map_err(Error::from)
+        .and_then(|()| {
+            transaction
+                .execute_batch(migration.sql)
+                .map_err(Error::from)
+        })
+        .and_then(|()| authorizer::install(transaction, Policy::Core).map_err(Error::from))
+        .and_then(|()| {
+            transaction.execute(
+                "INSERT INTO _meta (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![step.track.meta_key(), step.version],
+            )?;
+            migration::record(transaction, step.track, step.version, migration)
+        });
+    applied.map_err(|cause| Error::MigrationFailed {
+        track: step.track,
+        version: step.version,
+        cause: Box::new(cause),
+    })
 }

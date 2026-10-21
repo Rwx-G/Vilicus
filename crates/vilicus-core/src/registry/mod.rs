@@ -57,8 +57,8 @@ use std::path::Path;
 
 use vilicus_module_api::{DeclarationError, ModuleDeclaration};
 use vilicus_storage::{
-    CORE_SCHEMA_VERSION, Handle, Inspect, KeyEpoch, Migration, MigrationTrack, ModuleFile,
-    Partition, Read,
+    CORE_SCHEMA_VERSION, FrozenMigration, Handle, Inspect, KeyEpoch, Migration, MigrationTrack,
+    ModuleFile, Partition, Read,
 };
 use vilicus_types::ModuleName;
 
@@ -165,6 +165,15 @@ pub enum FileError {
     },
     /// The file's schema differs from the module's declaration (AD-9).
     Schema(SchemaError),
+    /// A migration was changed after it was frozen (AD-23, D21): its SQL no longer has the
+    /// digest its frozen hash states, or the file ran a migration of that version whose frozen
+    /// hash differs from the code's. No migration runs and the file is not opened.
+    ChangedMigration {
+        /// The track.
+        track: MigrationTrack,
+        /// The version.
+        version: u32,
+    },
 }
 
 impl fmt::Display for FileError {
@@ -192,6 +201,11 @@ impl fmt::Display for FileError {
                 "the file is at schema version {found}, newer than its module's {latest}"
             ),
             Self::Schema(error) => write!(formatter, "the file's schema differs: {error}"),
+            Self::ChangedMigration { track, version } => write!(
+                formatter,
+                "{track} migration {version} differs from its frozen hash or from the one the \
+                 file ran"
+            ),
         }
     }
 }
@@ -200,7 +214,12 @@ impl std::error::Error for FileError {}
 
 impl From<vilicus_storage::Error> for FileError {
     fn from(error: vilicus_storage::Error) -> Self {
-        Self::Storage(error)
+        match error {
+            vilicus_storage::Error::MigrationChanged { track, version } => {
+                Self::ChangedMigration { track, version }
+            }
+            other => Self::Storage(other),
+        }
     }
 }
 
@@ -291,8 +310,9 @@ impl Registry {
 
     /// Opens `file` in role `R` with its raw `key`, after checking it against its module's
     /// declaration (AD-9): the module is registered, the file's Core tables are at the Core's
-    /// schema version and its module schema at the module's latest version (AD-26), and its
-    /// schema is the declared one. Each refusal is a typed
+    /// schema version and its module schema at the module's latest version (AD-26), the frozen
+    /// hashes it recorded for both tracks are the code's (AD-23, D21), and its schema is the
+    /// declared one. Each refusal is a typed
     /// [`FileError`]; the handle is closed before the error is returned. Crate-private: a handle
     /// executes raw SQL, so outside the Core it would write around field validation.
     pub(crate) fn open<R: Inspect>(
@@ -308,9 +328,10 @@ impl Registry {
         Ok(handle)
     }
 
-    /// The build-time test of AD-9: for each module, builds a new file under `directory` with
-    /// `key`, applies the module's migrations in order through the migration runner, then opens
-    /// it as the Core opens every file, comparing the migrated schema with the declaration.
+    /// The build-time test of AD-9: for each module, checks the SHA-256 of each migration's SQL
+    /// against its frozen hash, builds a new file under `directory` with `key`, applies the
+    /// module's migrations in order through the migration runner, then opens it as the Core opens
+    /// every file, comparing the migrated schema with the declaration.
     /// `directory` holds no file of these modules beforehand; the files stay there.
     pub fn verify_migrations(&self, directory: &Path, key: &[u8; 32]) -> Result<(), VerifyError> {
         for module in self.modules {
@@ -348,15 +369,59 @@ pub(crate) fn create_migrated(
         ModuleName::from_static(module.name),
         Partition::Household,
     );
+    let migrations = frozen_migrations(module)?;
     vilicus_storage::create(&file, key, VERIFY_EPOCH)?.close()?;
     let mut migration = vilicus_storage::open::<Migration>(&file, key)?;
-    let mut version = 0;
-    for step in module.migrations {
-        version += 1;
-        migration.apply_module_migration(version, step.sql)?;
-    }
+    migration.apply_module_migrations(&migrations)?;
     migration.close()?;
     Ok(file)
+}
+
+/// The module's migrations as the runner takes them, once the check of AD-23 and D21 passed:
+/// the SQL of each of the Core's own migrations, then of each of the module's, has the SHA-256
+/// its frozen hash states. The first that does not is [`FileError::ChangedMigration`]: a
+/// migration edited after it was frozen never runs.
+pub(crate) fn frozen_migrations(
+    module: &'static ModuleDeclaration,
+) -> Result<Vec<FrozenMigration<'static>>, FileError> {
+    let core = vilicus_storage::core_migrations();
+    let module_migrations: Vec<FrozenMigration<'static>> = module
+        .migrations
+        .iter()
+        .map(|migration| FrozenMigration {
+            sql: migration.sql,
+            sha256: migration.sha256,
+        })
+        .collect();
+    for (track, migrations) in [
+        (MigrationTrack::Core, core),
+        (MigrationTrack::Module, module_migrations.as_slice()),
+    ] {
+        for (version, migration) in (1..).zip(migrations) {
+            if vilicus_crypto::sha256(migration.sql.as_bytes()) != migration.sha256 {
+                return Err(FileError::ChangedMigration { track, version });
+            }
+        }
+    }
+    Ok(module_migrations)
+}
+
+/// Refuses a file whose record of `track` is not the frozen hashes of `migrations`: the first
+/// version that differs, or that one side holds and the other does not.
+fn check_recorded<R: Inspect>(
+    handle: &Handle<R>,
+    track: MigrationTrack,
+    migrations: &[[u8; 32]],
+) -> Result<(), FileError> {
+    let recorded = handle.migration_hashes(track)?;
+    match (1..)
+        .zip(migrations.iter().map(Some).chain([None]))
+        .zip(recorded.iter().map(Some).chain([None]))
+        .find_map(|((version, frozen), record)| (frozen != record).then_some(version))
+    {
+        None => Ok(()),
+        Some(version) => Err(FileError::ChangedMigration { track, version }),
+    }
 }
 
 /// The checks of `Registry::open` on an open handle.
@@ -382,8 +447,28 @@ fn check<R: Inspect>(module: &ModuleDeclaration, handle: &Handle<R>) -> Result<(
     if found > latest {
         return Err(FileError::NewerThanCode { found, latest });
     }
+    let core_hashes: Vec<[u8; 32]> = vilicus_storage::core_migrations()
+        .iter()
+        .map(|migration| migration.sha256)
+        .collect();
+    check_recorded(handle, MigrationTrack::Core, &core_hashes)?;
+    let module_hashes: Vec<[u8; 32]> = module
+        .migrations
+        .iter()
+        .map(|migration| migration.sha256)
+        .collect();
+    check_recorded(handle, MigrationTrack::Module, &module_hashes)?;
     let snapshot = schema::Snapshot::read(handle, module)?;
     schema::compare(module, &snapshot).map_err(FileError::Schema)
+}
+
+/// `sql` as a migration of a test declaration, frozen with the SHA-256 of its text.
+#[cfg(test)]
+pub(crate) fn frozen(sql: &'static str) -> vilicus_module_api::Migration {
+    vilicus_module_api::Migration {
+        sql,
+        sha256: vilicus_crypto::sha256(sql.as_bytes()),
+    }
 }
 
 /// A capability matrix section both modules claim.

@@ -100,6 +100,35 @@ pub enum Error {
     },
     /// The schema version `_meta` holds for a track is not a version number.
     MalformedSchemaVersion(MigrationTrack),
+    /// The frozen hashes a file recorded for a track differ from those of the migrations given
+    /// for the versions it is at: a migration the file ran was changed since, or the record is
+    /// missing or longer (AD-23, D21). Nothing runs on such a file.
+    MigrationChanged {
+        /// The track.
+        track: MigrationTrack,
+        /// The first version whose record differs, is missing or is beyond the migrations.
+        version: u32,
+    },
+    /// The file's module track is at a version beyond the migrations given: a file newer than
+    /// the code (D21).
+    NewerThanMigrations {
+        /// The track.
+        track: MigrationTrack,
+        /// The schema version of the file.
+        found: u32,
+        /// The last version of the migrations given.
+        latest: u32,
+    },
+    /// A migration failed and was rolled back: its SQL, refused or failing, or the record of its
+    /// version. Nothing of it was written.
+    MigrationFailed {
+        /// The track.
+        track: MigrationTrack,
+        /// The version the migration would have brought the track to.
+        version: u32,
+        /// Why it failed.
+        cause: Box<Error>,
+    },
     /// The file's Core track is not at the version this code expects: a module migration waits
     /// for the Core's (Core first, AD-26), and a file newer than the code is not migrated back.
     CoreSchemaNotCurrent {
@@ -164,9 +193,13 @@ pub enum Error {
 }
 
 impl Error {
-    /// True for a statement the authorizer refused.
+    /// True for a statement the authorizer refused, a failed migration's included.
     pub fn is_refusal(&self) -> bool {
-        matches!(self, Self::Refused(_))
+        match self {
+            Self::Refused(_) => true,
+            Self::MigrationFailed { cause, .. } => cause.is_refusal(),
+            _ => false,
+        }
     }
 }
 
@@ -242,6 +275,23 @@ impl fmt::Display for Error {
                     "the {track} schema version in _meta is malformed"
                 )
             }
+            Self::MigrationChanged { track, version } => write!(
+                formatter,
+                "{track} migration {version} differs from the one the file recorded"
+            ),
+            Self::NewerThanMigrations {
+                track,
+                found,
+                latest,
+            } => write!(
+                formatter,
+                "the file's {track} schema is at version {found}, beyond the last migration {latest}"
+            ),
+            Self::MigrationFailed {
+                track,
+                version,
+                cause,
+            } => write!(formatter, "{track} migration {version} failed: {cause}"),
             Self::CoreSchemaNotCurrent { found, latest } => write!(
                 formatter,
                 "the file's Core schema is at version {found}, the Core's at {latest}"
@@ -309,6 +359,9 @@ impl fmt::Debug for Error {
             Self::CheckpointIncomplete { .. } => "CheckpointIncomplete",
             Self::MigrationOutOfOrder { .. } => "MigrationOutOfOrder",
             Self::MalformedSchemaVersion(_) => "MalformedSchemaVersion",
+            Self::MigrationChanged { .. } => "MigrationChanged",
+            Self::NewerThanMigrations { .. } => "NewerThanMigrations",
+            Self::MigrationFailed { .. } => "MigrationFailed",
             Self::CoreSchemaNotCurrent { .. } => "CoreSchemaNotCurrent",
             Self::NoTransaction => "NoTransaction",
             Self::MalformedCoreRow { .. } => "MalformedCoreRow",

@@ -487,7 +487,7 @@ impl ModuleDeclaration {
     /// ```
     /// use vilicus_module_api::{
     ///     Confirmation, DataType, Field, FieldKind, MatrixRow, Migration, ModuleDeclaration,
-    ///     Table, Tier, Tool,
+    ///     Table, Tier, Tool, sha256_hex,
     /// };
     ///
     /// pub const MODULE: ModuleDeclaration = ModuleDeclaration {
@@ -505,6 +505,7 @@ impl ModuleDeclaration {
     ///     migrations: &[Migration {
     ///         sql: "CREATE TABLE notes (id BLOB NOT NULL PRIMARY KEY, \
     ///               body TEXT NOT NULL) STRICT;",
+    ///         sha256: sha256_hex("bd3ae7e55c50de674128958bd6bdb1da23a2c490ad40895aeccdac1da6575bc7"),
     ///     }],
     ///     matrix_sections: &["7"],
     ///     tools: &[Tool {
@@ -529,13 +530,16 @@ impl ModuleDeclaration {
     /// A record kind without a data type does not build (FR-68):
     ///
     /// ```compile_fail,E0080
-    /// use vilicus_module_api::{Migration, ModuleDeclaration, Table};
+    /// use vilicus_module_api::{Migration, ModuleDeclaration, Table, sha256_hex};
     ///
     /// const MODULE: ModuleDeclaration = ModuleDeclaration {
     ///     name: "notes",
     ///     tables: &[Table { name: "notes", data_types: &[], fields: &[] }],
     ///     fts5_tables: &[],
-    ///     migrations: &[Migration { sql: "CREATE TABLE notes (id BLOB) STRICT;" }],
+    ///     migrations: &[Migration {
+    ///         sql: "CREATE TABLE notes (id BLOB) STRICT;",
+    ///         sha256: sha256_hex("504c31b0d64a5a28102bc23da76c8128190f99fec66184760eb62fd388c051a6"),
+    ///     }],
     ///     matrix_sections: &[],
     ///     tools: &[],
     /// };

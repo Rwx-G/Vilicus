@@ -75,9 +75,11 @@ const VALID: ModuleDeclaration = ModuleDeclaration {
     migrations: &[
         Migration {
             sql: "CREATE TABLE items (id BLOB NOT NULL PRIMARY KEY) STRICT;",
+            sha256: sha256_hex("c49163ad70f8dc7d48900402a23aef608ffaca5a2c58fea6f3ee34c331d34be9"),
         },
         Migration {
             sql: "CREATE TABLE notes (id BLOB NOT NULL PRIMARY KEY) STRICT;",
+            sha256: sha256_hex("32a3d0992c1a36bd88955ab973e6c1596cd4cde09757543b6f137ef89336b540"),
         },
     ],
     matrix_sections: &["6", "10a"],
@@ -664,13 +666,18 @@ fn reserved_column_names_are_refused() {
 
 #[test]
 fn an_empty_migration_is_refused() {
+    const MIGRATIONS: &[Migration] = &[
+        Migration {
+            sql: "CREATE TABLE items (id BLOB) STRICT;",
+            sha256: sha256_hex("3b026d75face3d997e1bc4328aeabfa2caf8cb0edd4c537f8e34969322062eef"),
+        },
+        Migration {
+            sql: "",
+            sha256: sha256_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        },
+    ];
     let declaration = ModuleDeclaration {
-        migrations: &[
-            Migration {
-                sql: "CREATE TABLE items (id BLOB) STRICT;",
-            },
-            Migration { sql: "" },
-        ],
+        migrations: MIGRATIONS,
         ..VALID
     };
     assert_eq!(

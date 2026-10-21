@@ -637,16 +637,30 @@ def check_vendored_config(workspace_root: Path) -> list[str]:
 
 
 def check_reference_module(metadata: dict) -> list[str]:
-    """The reference module links the module port alone: any other normal or build dependency,
-    a workspace crate or a registry package, fails."""
-    return [
-        f"reference: {package['name']} -> {dep['name']} ({dep['kind'] or 'normal'} dependency); the reference "
-        f"module is a module and links {MODULE_PORT} alone (AD-9)"
-        for package in _members(metadata)
-        if package["name"] == REFERENCE_MODULE
-        for dep in package["dependencies"]
-        if (dep["kind"] or "normal") in LINKED_KINDS and dep["name"] != MODULE_PORT
-    ]
+    """The reference module links the module port alone, the workspace member of that name: any
+    other normal or build dependency, a workspace crate or a registry package, fails, and so does
+    a dependency named like the port that is not a path dependency on that member."""
+    port_dirs = [path for path, name in _member_directories(metadata).items() if name == MODULE_PORT]
+    violations = []
+    for package in _members(metadata):
+        if package["name"] != REFERENCE_MODULE:
+            continue
+        for dep in package["dependencies"]:
+            kind = dep["kind"] or "normal"
+            if kind not in LINKED_KINDS:
+                continue
+            path = Path(dep["path"]) if dep.get("path") is not None else None
+            if dep["name"] != MODULE_PORT:
+                violations.append(
+                    f"reference: {package['name']} -> {dep['name']} ({kind} dependency); the reference "
+                    f"module is a module and links {MODULE_PORT} alone (AD-9)"
+                )
+            elif path is None or path not in port_dirs:
+                violations.append(
+                    f"reference: {package['name']} -> {dep['name']} ({kind} dependency) is not a path "
+                    f"dependency on the workspace member {MODULE_PORT}"
+                )
+    return violations
 
 
 def check_exclusive_dependencies(graph: Graph, metadata: dict) -> list[str]:

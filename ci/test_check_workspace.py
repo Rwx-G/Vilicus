@@ -379,6 +379,26 @@ class ReferenceModuleTest(WorkspaceTestCase):
         self.workspace.declare(cw.REFERENCE_MODULE, {"name": "rusqlite", "kind": None, "source": source})
         self.assert_single(self.workspace.check(), f"reference: {cw.REFERENCE_MODULE} -> rusqlite (normal dependency)")
 
+    def test_a_module_port_that_is_not_the_workspace_member_fails(self) -> None:
+        """Review of Story 3.10: a dependency named like the port must be the path dependency on
+        the workspace member, never a registry crate or another directory of that name."""
+        source = "registry+https://github.com/rust-lang/crates.io-index"
+        elsewhere = {"name": cw.MODULE_PORT, "kind": None, "path": "/elsewhere/vilicus-module-api"}
+        for dependency in ({"name": cw.MODULE_PORT, "kind": None, "source": source}, elsewhere):
+            with self.subTest(dependency=dependency):
+                self.setUp()
+                self.full_graph()
+                self.workspace.packages[cw.REFERENCE_MODULE]["dependencies"] = []
+                self.workspace.declare(cw.REFERENCE_MODULE, dependency)
+                violations = [v for v in self.workspace.check() if v.startswith("reference:")]
+                self.assertEqual(
+                    violations,
+                    [
+                        f"reference: {cw.REFERENCE_MODULE} -> {cw.MODULE_PORT} (normal dependency) is not a "
+                        f"path dependency on the workspace member {cw.MODULE_PORT}"
+                    ],
+                )
+
     def test_the_module_port_and_dev_dependencies_pass(self) -> None:
         self.full_graph()
         self.workspace.depend(cw.REFERENCE_MODULE, "vilicus-core", "dev")

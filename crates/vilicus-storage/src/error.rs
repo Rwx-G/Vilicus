@@ -201,6 +201,8 @@ pub enum Error {
         /// The cold copies kept.
         kept: usize,
     },
+    /// The mark of a failed migration beside a file is not in the form the storage layer writes.
+    MalformedFailureMark(PathBuf),
     /// Any other SQLite failure.
     Sqlite(rusqlite::Error),
     /// A file system failure on the file, its sidecar or its directory.
@@ -213,6 +215,46 @@ impl Error {
         match self {
             Self::Refused(_) => true,
             Self::MigrationFailed { cause, .. } => cause.is_refusal(),
+            _ => false,
+        }
+    }
+
+    /// True for a failure that comes from the state of the host when it happened rather than
+    /// from the file's content and the code: the file system or the disk, a lock or a connection
+    /// held on the file, cold copies no verified backup covers yet, a key or an epoch the caller
+    /// gave, an interrupted change of epoch. The same operation on the same file, with the same
+    /// code, may succeed later. Every other failure, a statement refused or failing on the
+    /// file's content, a changed migration, a schema or a record outside its declaration, repeats
+    /// until the code changes, and is not environmental.
+    pub fn is_environmental(&self) -> bool {
+        match self {
+            Self::Io(_)
+            | Self::CopyRaced(_)
+            | Self::WalNotEmpty(_)
+            | Self::ColdCopiesFull { .. }
+            | Self::CheckpointIncomplete { .. }
+            | Self::DeletedNotCheckpointed { .. }
+            | Self::AlreadyExists(_)
+            | Self::TransactionOpen
+            | Self::WrongKey
+            | Self::EpochTransitionPending { .. }
+            | Self::EpochSidecarMissing(_)
+            | Self::EpochSidecarWithoutFile(_) => true,
+            Self::Sqlite(error) => matches!(
+                error.sqlite_error_code(),
+                Some(
+                    rusqlite::ErrorCode::DatabaseBusy
+                        | rusqlite::ErrorCode::DatabaseLocked
+                        | rusqlite::ErrorCode::OutOfMemory
+                        | rusqlite::ErrorCode::SystemIoFailure
+                        | rusqlite::ErrorCode::DiskFull
+                        | rusqlite::ErrorCode::CannotOpen
+                        | rusqlite::ErrorCode::FileLockingProtocolFailed
+                        | rusqlite::ErrorCode::ReadOnly
+                        | rusqlite::ErrorCode::OperationInterrupted
+                )
+            ),
+            Self::MigrationFailed { cause, .. } => cause.is_environmental(),
             _ => false,
         }
     }
@@ -362,6 +404,13 @@ impl fmt::Display for Error {
                 formatter,
                 "{kept} cold copies are kept, none covered by a verified backup"
             ),
+            Self::MalformedFailureMark(path) => {
+                write!(
+                    formatter,
+                    "malformed failed-migration mark {}",
+                    path.display()
+                )
+            }
             Self::Sqlite(error) => write!(formatter, "SQLite: {}", Summary(error)),
             Self::Io(error) => write!(formatter, "file system: {error}"),
         }
@@ -406,6 +455,7 @@ impl fmt::Debug for Error {
             Self::WalNotEmpty(_) => "WalNotEmpty",
             Self::CopyRaced(_) => "CopyRaced",
             Self::ColdCopiesFull { .. } => "ColdCopiesFull",
+            Self::MalformedFailureMark(_) => "MalformedFailureMark",
             Self::Sqlite(_) => "Sqlite",
             Self::Io(_) => "Io",
         };
@@ -472,6 +522,54 @@ mod tests {
             let shown = format!("{error} {error:?}");
             assert!(!shown.contains("sensitive"), "{shown}");
             assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    /// A failure of the host's state is environmental, wrapped in a failed migration too; one of
+    /// the file's content or of the code is not.
+    #[test]
+    fn environmental_failures_are_those_of_the_host() {
+        let sqlite = |code| {
+            Error::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        let in_migration = |cause| Error::MigrationFailed {
+            track: MigrationTrack::Module,
+            version: 2,
+            cause: Box::new(cause),
+        };
+        let environmental = [
+            Error::Io(std::io::Error::other("disk")),
+            Error::CopyRaced(PathBuf::from("f")),
+            Error::ColdCopiesFull { kept: 3 },
+            Error::WrongKey,
+            sqlite(rusqlite::ffi::SQLITE_FULL),
+            sqlite(rusqlite::ffi::SQLITE_BUSY),
+            sqlite(rusqlite::ffi::SQLITE_IOERR),
+            in_migration(sqlite(rusqlite::ffi::SQLITE_FULL)),
+        ];
+        for error in environmental {
+            assert!(error.is_environmental(), "{error:?}");
+        }
+        let repeated = [
+            Error::Refused(input_error(
+                "not authorized to use function: x",
+                rusqlite::ffi::SQLITE_ERROR,
+            )),
+            sqlite(rusqlite::ffi::SQLITE_CONSTRAINT),
+            sqlite(rusqlite::ffi::SQLITE_CORRUPT),
+            sqlite(rusqlite::ffi::SQLITE_ERROR),
+            in_migration(sqlite(rusqlite::ffi::SQLITE_ERROR)),
+            Error::MigrationChanged {
+                track: MigrationTrack::Module,
+                version: 1,
+            },
+            Error::MalformedFailureMark(PathBuf::from("f")),
+        ];
+        for error in repeated {
+            assert!(!error.is_environmental(), "{error:?}");
         }
     }
 

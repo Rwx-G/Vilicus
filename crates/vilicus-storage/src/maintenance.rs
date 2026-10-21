@@ -25,6 +25,10 @@ use crate::error::{Error, Result};
 use crate::file::{self, KeyEpoch, ModuleFile};
 use crate::handle::{self, Setup};
 
+pub use crate::failure_mark::{
+    FailedMigrationMark, clear_failed_migration_mark, failed_migration_mark,
+    failed_migration_mark_path, mark_failed_migration,
+};
 pub use crate::migration_copy::{
     ColdCopy, MAX_COLD_COPIES, MigrationCopy, SchemaVersions, Swapped, VerifiedBackup,
     available_space, clear_interrupted_migration, cold_copies, copy_for_migration,

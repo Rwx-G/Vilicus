@@ -195,9 +195,15 @@ pub(crate) fn read_sidecar_if_present(path: &Path) -> Result<Option<KeyEpoch>> {
     }
 }
 
-/// Writes a sidecar atomically: a temporary file written and synced, renamed over `path`, then
-/// the directory synced, so a crash leaves the old sidecar or the new one, never a torn one.
+/// Writes a sidecar atomically ([`write_atomically`]).
 pub(crate) fn write_sidecar(path: &Path, epoch: KeyEpoch) -> Result<()> {
+    write_atomically(path, epoch.to_sidecar().as_bytes())
+}
+
+/// Writes `contents` to `path` atomically: a temporary file `<path>.tmp` written and synced,
+/// renamed over `path`, then the directory synced, so a crash leaves the old file or the new one,
+/// never a torn one.
+pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     let mut staging = path.as_os_str().to_owned();
     staging.push(".tmp");
     let staging = PathBuf::from(staging);
@@ -206,7 +212,7 @@ pub(crate) fn write_sidecar(path: &Path, epoch: KeyEpoch) -> Result<()> {
         .create(true)
         .truncate(true)
         .open(&staging)?;
-    out.write_all(epoch.to_sidecar().as_bytes())?;
+    out.write_all(contents)?;
     out.sync_all()?;
     drop(out);
     fs::rename(&staging, path)?;

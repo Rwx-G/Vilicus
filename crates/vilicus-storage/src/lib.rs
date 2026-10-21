@@ -31,6 +31,7 @@ mod authorizer;
 mod core_schema;
 mod error;
 mod event;
+mod failure_mark;
 mod ffi;
 mod file;
 mod handle;

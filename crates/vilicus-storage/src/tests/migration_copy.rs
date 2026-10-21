@@ -515,3 +515,61 @@ fn a_state_precedes_every_later_one_and_no_other() {
         assert!(!at.precedes(other), "{at} not before {other}");
     }
 }
+
+/// Story 3.9: the mark of a failed migration sits beside the file, never in it, is read back as
+/// written, is replaced by a later mark, refused when malformed and removed with what an
+/// interrupted write left; removing no mark is no error.
+#[test]
+fn a_failed_migration_mark_is_written_beside_the_file_read_back_and_cleared() {
+    let dir = scratch_dir("failure-mark");
+    let file = create_module_file(&dir);
+    let before = fs::read(file.path()).expect("read the file");
+    assert_eq!(
+        maintenance::failed_migration_mark(&file).expect("read"),
+        None
+    );
+    let mark = maintenance::FailedMigrationMark {
+        code: [7; 32],
+        track: MigrationTrack::Module,
+        version: 3,
+    };
+    maintenance::mark_failed_migration(&file, mark).expect("mark");
+    assert_eq!(
+        maintenance::failed_migration_mark(&file).expect("read"),
+        Some(mark)
+    );
+    assert_eq!(
+        maintenance::failed_migration_mark_path(&file),
+        dir.join(format!("{}.migration-failed", file.file_name()))
+    );
+    assert_eq!(fs::read(file.path()).expect("read the file"), before);
+    let later = maintenance::FailedMigrationMark {
+        code: [8; 32],
+        track: MigrationTrack::Core,
+        version: 1,
+    };
+    maintenance::mark_failed_migration(&file, later).expect("mark again");
+    assert_eq!(
+        maintenance::failed_migration_mark(&file).expect("read"),
+        Some(later)
+    );
+    fs::write(
+        maintenance::failed_migration_mark_path(&file),
+        "vilicus failed migration 1\n",
+    )
+    .expect("damage the mark");
+    assert!(matches!(
+        maintenance::failed_migration_mark(&file),
+        Err(Error::MalformedFailureMark(_))
+    ));
+    let staging = dir.join(format!("{}.migration-failed.tmp", file.file_name()));
+    fs::write(&staging, "torn").expect("an interrupted write");
+    maintenance::clear_failed_migration_mark(&file).expect("clear");
+    assert_eq!(
+        maintenance::failed_migration_mark(&file).expect("read"),
+        None
+    );
+    assert!(!staging.exists());
+    maintenance::clear_failed_migration_mark(&file).expect("clear nothing");
+    assert_eq!(fs::read(file.path()).expect("read the file"), before);
+}

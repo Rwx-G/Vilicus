@@ -54,8 +54,8 @@ use vilicus_storage::{
     OutboxKind, OutboxPurge, OutboxRow, OutboxState, Partition, PendingRow, SqlValue, Write,
 };
 use vilicus_types::{
-    AvailabilityState, EVENT_DELIVERY_ATTEMPTS, Id, ModuleName, OUTBOX_RETENTION, Principal,
-    Source, UtcMillis,
+    AvailabilityState, ClientFacingError, EVENT_DELIVERY_ATTEMPTS, Id, ModuleName,
+    OUTBOX_RETENTION, Principal, RetryClass, Source, UtcMillis,
 };
 
 use crate::alert::InstanceAdminAlert;
@@ -588,7 +588,9 @@ impl<'a> Pass<'a> {
     /// One attempt to deliver `event` to `consumer` of `module`, on `handle`, the consumer
     /// module's file: the consumer's code in a call of its own, principal `Event`, inside the
     /// boundary of AD-9. A panic or an overrun of the consumer's code faults its module, with an
-    /// alert, and fails the attempt; a panic of the Core around it unwinds on, out of the pass. An
+    /// alert, and fails the attempt; a typed API read of a file on its way to serving (a retryable
+    /// `module_unavailable`) makes no attempt, the event waiting, while one of a file in a lasting
+    /// state fails the attempt; a panic of the Core around it unwinds on, out of the pass. An
     /// event whose provenance does not decode fails its delivery without running the consumer, so
     /// it ends in the dead letters rather than block the outbox (AD-29).
     fn consume(
@@ -648,6 +650,13 @@ impl<'a> Pass<'a> {
                 })
             }
             Err(HandlerError::Unavailable(unavailable)) => Attempt::NotReady(unavailable.state()),
+            // A file the consumer read through a typed API was on its way to serving: the event
+            // waits for it, as for a consumer that is not ready, and no attempt counts (AD-54).
+            Err(HandlerError::Refused(RecordError::Unavailable(unavailable)))
+                if unavailable.retry_class() == RetryClass::Retryable =>
+            {
+                Attempt::NotReady(unavailable.state())
+            }
             Err(HandlerError::Refused(error)) => Attempt::Failed(FailureCause::Refused(error)),
             Err(_) => Attempt::Failed(FailureCause::Refused(RecordError::InconsistentCall)),
         }

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use vilicus_module_api::{
-    Consumer, DataType, Field, FieldKind, ModuleDeclaration, Query, ReadRecord, Records,
+    Consumer, DataType, Event, Field, FieldKind, ModuleDeclaration, Query, ReadRecord, Records,
     Structured, Table, Topic, Value, WriteError,
 };
 use vilicus_storage::{CallKey, Handle, KeyEpoch, Migration, ModuleFile, Partition, Read, Write};
@@ -19,6 +19,7 @@ use vilicus_types::{
 use super::{ApiFiles, Apis, read_scope};
 use crate::availability::{ModuleStates, Stage, StageRefused};
 use crate::boundary::{Boundary, HandlerError};
+use crate::bus::{ConsumerCode, ConsumerFiles, DeliveryOutcome, Link, LinkTable, deliver_outbox};
 use crate::record::tests::{KEY, create_sql, noon, scratch_dir};
 use crate::record::tests_call::{TestStamper, ella, noe};
 use crate::record::{
@@ -1032,4 +1033,136 @@ fn a_read_keeps_the_file_it_reads_from_being_migrated() {
             .set_stage(generation, &shop, Stage::Ready)
             .expect("the writer is released");
     }
+}
+
+/// The household's write handles of the fixture, as a delivery pass holds them.
+struct HouseholdFiles<'a>(&'a Fixture);
+
+impl ConsumerFiles for HouseholdFiles<'_> {
+    fn open(&self, module: &ModuleName) -> Option<&Handle<Write>> {
+        self.0.writers.iter().find(|handle| {
+            handle.file().module() == module && handle.file().partition() == Partition::Household
+        })
+    }
+}
+
+/// No link is requested.
+struct NoLinks;
+
+impl LinkTable for NoLinks {
+    fn register(&mut self, _: &Link) -> Result<(), vilicus_storage::Error> {
+        Ok(())
+    }
+}
+
+/// `stock`'s consumer: it reads the item whose id the event's payload carries through `shop`'s
+/// query, and keeps its label.
+struct StockCode;
+
+impl ConsumerCode for StockCode {
+    fn consume(
+        &mut self,
+        _: &'static ModuleDeclaration,
+        _: &'static Consumer,
+        event: &Event<'_>,
+        records: &mut dyn Records,
+    ) -> Result<(), WriteError> {
+        let id = <[u8; 16]>::try_from(event.payload)
+            .ok()
+            .and_then(|bytes| Id::from_bytes(bytes).ok())
+            .ok_or(WriteError::Failed)?;
+        let item = records.read("shop", "item", id)?;
+        let label = item.field("label").cloned().ok_or(WriteError::Failed)?;
+        records.insert("notes", &[("title", label)], &[])?;
+        Ok(())
+    }
+}
+
+/// Review item 2 (AD-29, AD-54): a consumer whose typed read meets a file on its way to serving
+/// (`locked`, retryable) makes no attempt, and its event waits, then is delivered once the file
+/// serves; a file in a lasting state (`deactivated`, not retryable) fails the attempt.
+#[test]
+fn a_consumer_reading_a_file_on_its_way_to_serving_waits_without_a_failed_attempt() {
+    let fixture = Fixture::new("api-consumer");
+    let item = fixture.items[1];
+    let notes = fixture.writer("notes", Partition::Household);
+    let emit = || {
+        fixture
+            .rule_call(
+                "notes",
+                Partition::Household,
+                &fixture.invocation(),
+                |records| {
+                    records.read("shop", "item", item)?;
+                    let note = records.insert("notes", &[("title", text("Pommes"))], &[])?;
+                    records.emit(NOTE_ADDED, note.id, &item.to_bytes())
+                },
+            )
+            .map(|result| match result {
+                CallResult::Committed(outcome) => outcome.value,
+                other => panic!("{other:?}"),
+            })
+            .expect("the call commits")
+    };
+    let deliver = || {
+        deliver_outbox(
+            &fixture.registry,
+            notes,
+            &HouseholdFiles(&fixture),
+            &fixture.boundary(),
+            &mut StockCode,
+            &mut NoLinks,
+            &mut *fixture.stamper.borrow_mut(),
+        )
+        .expect("the pass runs")
+    };
+    let shop = ModuleName::from_static("shop");
+    let generation = fixture.states.generation(Partition::Household);
+    let first = emit();
+    fixture
+        .states
+        .set_stage(generation, &shop, Stage::Locked)
+        .expect("no call runs");
+    let report = deliver();
+    assert_eq!(report.deliveries.len(), 1);
+    assert!(
+        matches!(
+            report.deliveries[0].outcome,
+            DeliveryOutcome::NotReady {
+                state: AvailabilityState::Locked
+            }
+        ),
+        "{:?}",
+        report.deliveries[0].outcome
+    );
+    assert_eq!(notes.delivery(first, "stock.count").expect("read"), None);
+
+    fixture
+        .states
+        .set_stage(generation, &shop, Stage::Ready)
+        .expect("no call runs");
+    let report = deliver();
+    assert!(matches!(
+        report.deliveries[0].outcome,
+        DeliveryOutcome::Delivered
+    ));
+
+    let second = emit();
+    fixture.states.deactivate(&shop, Partition::Household);
+    let report = deliver();
+    assert!(
+        matches!(
+            report.deliveries[0].outcome,
+            DeliveryOutcome::Failed { attempts: 1, .. }
+        ),
+        "{:?}",
+        report.deliveries[0].outcome
+    );
+    assert_eq!(
+        notes
+            .delivery(second, "stock.count")
+            .expect("read")
+            .map(|row| row.attempts),
+        Some(1)
+    );
 }

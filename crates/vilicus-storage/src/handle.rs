@@ -21,7 +21,9 @@ use std::thread;
 use std::time::Duration;
 
 use rusqlite::config::DbConfig;
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Params, Row, Statement};
+use vilicus_types::{Id, UtcMillis};
 use zeroize::Zeroizing;
 
 use crate::authorizer::{self, Policy};
@@ -444,7 +446,8 @@ pub fn open<R: Role>(file: &ModuleFile, key: &[u8; 32]) -> Result<Handle<R>> {
 
 /// Creates `file` with its raw `key` and key epoch, and returns its write handle.
 ///
-/// The file is built under [`ModuleFile::staging_path`] with its `_meta` table and closed, then
+/// The file is built under [`ModuleFile::staging_path`] with its Core tables, `_meta` and
+/// `_vocabulary`, and closed, then
 /// its sidecar is written, then it is renamed into place, so the final name exists only once the
 /// file and its sidecar are durable. A crash leaves a staging file, alone or with a sidecar: that
 /// is an interrupted `create`, which never held module data, and the next `create` discards it.
@@ -478,14 +481,15 @@ pub fn create(file: &ModuleFile, key: &[u8; 32], epoch: KeyEpoch) -> Result<Hand
     open::<Write>(file, key)
 }
 
-/// The staging file of `create`: keyed, set up like a writer, holding `_meta`, closed after a
-/// TRUNCATE checkpoint so the database file alone holds it.
+/// The staging file of `create`: keyed, set up like a writer, holding the Core tables, closed
+/// after a TRUNCATE checkpoint so the database file alone holds them.
 fn build_new_file(staging: &Path, key: &[u8; 32], epoch: KeyEpoch) -> Result<()> {
     let (connection, _) = connect_path(staging, key, Setup::Role(RoleKind::Write), true)?;
     let built = connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             CREATE TABLE _meta (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;",
+             CREATE TABLE _meta (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;
+             CREATE TABLE _vocabulary (vocabulary TEXT NOT NULL, label TEXT NOT NULL, confirmed_by BLOB NOT NULL, confirmed_at INTEGER NOT NULL, PRIMARY KEY (vocabulary, label)) STRICT, WITHOUT ROWID;",
         )
         .and_then(|()| {
             [
@@ -584,6 +588,27 @@ impl<R: Role> Handle<R> {
         Ok(self.connection().execute_batch(sql)?)
     }
 
+    /// Runs one statement with `values` bound to its parameters in order, and returns the number
+    /// of rows it changed. A value keeps its storage class unless the column's affinity converts
+    /// it, which the Core's validation makes moot by refusing a value of another class before it
+    /// reaches a statement.
+    pub fn execute_values(&self, sql: &str, values: &[SqlValue]) -> Result<usize> {
+        Ok(self
+            .connection()
+            .execute(sql, rusqlite::params_from_iter(values))?)
+    }
+
+    /// Runs a query with `values` bound to its parameters in order, and returns every row, each
+    /// column in its storage class.
+    pub fn query_values(&self, sql: &str, values: &[SqlValue]) -> Result<Vec<Vec<SqlValue>>> {
+        let mut statement = self.connection().prepare(sql)?;
+        let columns = statement.column_count();
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            (0..columns).map(|index| row.get(index)).collect()
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Runs a query and maps its first row with `map`.
     pub fn query_row<T>(
         &self,
@@ -648,12 +673,59 @@ impl Handle<Write> {
         Ok(())
     }
 
+    /// Records `label` as a confirmed label of the reviewed vocabulary `vocabulary` in this file,
+    /// confirmed by the member `confirmed_by` at `confirmed_at` (D104). The Core checks the
+    /// label's form, and that the file's module declares the vocabulary, before it calls this.
+    ///
+    /// `_vocabulary` is a Core table, written under the Core policy that module SQL never runs
+    /// under, in one `BEGIN IMMEDIATE` transaction. A label confirmed again keeps its first
+    /// confirmation.
+    pub fn confirm_vocabulary_label(
+        &self,
+        vocabulary: &str,
+        label: &str,
+        confirmed_by: Id,
+        confirmed_at: UtcMillis,
+    ) -> Result<()> {
+        let connection = self.connection();
+        authorizer::install(connection, Policy::Core)?;
+        let outcome = in_transaction(connection, || {
+            connection.execute(
+                "INSERT INTO _vocabulary (vocabulary, label, confirmed_by, confirmed_at) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT (vocabulary, label) DO NOTHING",
+                rusqlite::params![
+                    vocabulary,
+                    label,
+                    confirmed_by.to_bytes(),
+                    confirmed_at.as_millis()
+                ],
+            )?;
+            Ok(())
+        });
+        let restored = authorizer::install(connection, Policy::Write).map_err(Error::from);
+        outcome.and(restored)
+    }
+
     fn update_meta(&self, epoch: KeyEpoch) -> Result<()> {
         let connection = self.connection();
         authorizer::install(connection, Policy::Core)?;
         let outcome = write_meta(connection, epoch);
         let restored = authorizer::install(connection, Policy::Write).map_err(Error::from);
         outcome.and(restored)
+    }
+}
+
+/// Runs `body` in a `BEGIN IMMEDIATE` transaction, committed when it succeeds and rolled back
+/// otherwise; the original error is returned even if the rollback fails too.
+fn in_transaction(connection: &Connection, body: impl FnOnce() -> Result<()>) -> Result<()> {
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    match body() {
+        Ok(()) => connection.execute_batch("COMMIT").map_err(Error::from),
+        Err(error) => {
+            // SQLite ends the transaction with the connection either way.
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
     }
 }
 
@@ -732,6 +804,16 @@ impl<R: Inspect> Handle<R> {
     /// The schema version `_meta` records for `track`; 0 before the track's first migration.
     pub fn schema_version(&self, track: MigrationTrack) -> Result<u32> {
         read_schema_version(self.connection(), track)
+    }
+
+    /// True when `label` is a confirmed label of the reviewed vocabulary `vocabulary` in this
+    /// file, compared byte for byte: another case or another spelling is another label.
+    pub fn is_confirmed_label(&self, vocabulary: &str, label: &str) -> Result<bool> {
+        Ok(self.connection().query_row(
+            "SELECT EXISTS (SELECT 1 FROM _vocabulary WHERE vocabulary = ?1 AND label = ?2)",
+            [vocabulary, label],
+            |row| row.get(0),
+        )?)
     }
 }
 

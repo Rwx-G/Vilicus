@@ -9,8 +9,10 @@
 //! 256-bit key ([`ModuleFile`], [`open`], [`create`]). Every connection is set up before its
 //! authorizer goes on and reads every setting back ([`Settings`]); a [`Handle`] then runs in one
 //! role, [`Read`] (`SELECT` only), [`Write`] (rows only) or [`Migration`] (closed outside
-//! [`Handle::apply_versioned_migration`], which records each track's schema version in `_meta`). Read and write handles also read the file's [`Schema`],
-//! which the module registry compares with its declarations. Copies and VACUUM run on the Core
+//! [`Handle::apply_versioned_migration`], which records each track's schema version in `_meta`).
+//! Read and write handles also read the file's [`Schema`], which the module registry compares
+//! with its declarations, and the confirmed labels of its reviewed vocabularies, which a write
+//! handle records in the Core table `_vocabulary` (D104). Copies and VACUUM run on the Core
 //! maintenance path ([`maintenance`]). SQLCipher is compiled by this crate's build script from
 //! the amalgamation in `sqlcipher/` (D143).
 
@@ -32,6 +34,10 @@ pub use handle::{
 pub use schema::{
     ColumnInfo, ForeignKey, IndexColumn, IndexInfo, Schema, SchemaObject, TableInfo, TableKind,
 };
+
+/// A value in one of SQLite's storage classes, as [`Handle::execute_values`] binds it and
+/// [`Handle::query_values`] reads it back.
+pub use rusqlite::types::Value as SqlValue;
 
 #[cfg(test)]
 mod tests;

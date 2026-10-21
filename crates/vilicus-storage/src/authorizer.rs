@@ -10,7 +10,7 @@
 //! The Core tables of a module file ([`CORE_TABLES`], AD-26) are the Core's: no module SQL,
 //! write or migration, and no trigger body, which SQLite authorizes when it fires, may write,
 //! drop, alter, index or attach a trigger to them. Only [`Policy::Core`], which the Core installs
-//! around its own statements, writes `_meta`.
+//! around its own statements, writes them.
 
 use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -30,16 +30,19 @@ pub(crate) enum Policy {
     /// WAL, which `Handle::checkpoint_truncate` then reports as incomplete.
     Read,
     /// The Core's own fixed statements on [`CORE_TABLES`]: the key epoch and the schema versions
-    /// in `_meta`, and the transaction that holds them, nothing else.
+    /// in `_meta`, the confirmed vocabulary labels in `_vocabulary`, and the transaction that
+    /// holds them, nothing else.
     Core,
 }
 
-/// Tables the Core creates in every module file (AD-26) and that module SQL never changes.
+/// Tables the Core creates in every module file (AD-26) and that module SQL never changes:
+/// `_meta`, and `_vocabulary`, the labels an adult confirmed for the file's reviewed vocabularies
+/// (D104), with which a module that could write it would confirm its own labels.
 /// Compared ignoring ASCII case; the authorizer receives the table name without its schema, so
 /// `main._meta` is matched too. `_journal`, `_outbox`, `_consumed` and `_dead_letter` join this
 /// list with the stories that create them (3.6, 3.8). The module registry reads it to tell the
 /// Core's tables from a module's in a file's schema.
-pub const CORE_TABLES: &[&str] = &["_meta"];
+pub const CORE_TABLES: &[&str] = &["_meta", "_vocabulary"];
 
 /// Virtual table modules reviewed as usable by module SQL under some policy: `fts5`, whose tables
 /// a module migration may create once Story 3.7 applies D127. Today every `CREATE VIRTUAL TABLE`
@@ -282,7 +285,8 @@ fn row_write_allowed(policy: Policy, table_name: &str) -> bool {
 }
 
 /// Schema changes: the migration policy only, and never on [`CORE_TABLES`] (dropping, altering,
-/// indexing or attaching a trigger to `_meta` would defeat the epoch cross-check of AD-5).
+/// indexing or attaching a trigger to `_meta` would defeat the epoch cross-check of AD-5, and to
+/// `_vocabulary` would let a module confirm its own labels).
 fn schema_change_allowed(policy: Policy, table_name: Option<&str>) -> bool {
     policy == Policy::Migration && !table_name.is_some_and(|name| listed(CORE_TABLES, name))
 }

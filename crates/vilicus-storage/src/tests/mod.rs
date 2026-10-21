@@ -8,6 +8,7 @@ mod maintenance;
 mod replay;
 mod schema;
 mod setup;
+mod vocabulary;
 
 use std::fs;
 use std::path::{Path, PathBuf};

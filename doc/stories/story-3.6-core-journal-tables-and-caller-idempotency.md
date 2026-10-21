@@ -2,7 +2,7 @@
 title: 'Core journal tables and caller idempotency'
 epic: 3
 story: 6
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [AD-26, AD-28, FR-29, FR-24, D113, E17, NFR-3, D132, DC-75]

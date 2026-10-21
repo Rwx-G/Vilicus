@@ -2,7 +2,7 @@
 title: 'Forward-only migrations on copies'
 epic: 3
 story: 7
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-23, FR-54, AD-23, D21, D84, DC-50, E11, D126, D127, D132]

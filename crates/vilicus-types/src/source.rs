@@ -7,8 +7,8 @@ use crate::id::Id;
 use crate::name::{MODULE_NAME_MAX_LEN, NameError, is_module_name};
 
 /// Who produced a record, from the closed vocabulary of the spine conventions. Every identifier
-/// is an [`Id`]; [`Event`](Source::Event) carries the `call_id` of the call that delivered the
-/// event (spine AD-28).
+/// is an [`Id`]; [`Event`](Source::Event) carries the id of the event a consumer's call reacts to,
+/// whose `call_id` is the emitting call's (spine AD-27, conventions; D150).
 ///
 /// Serialized externally tagged, the tag being the vocabulary name: `"system"`, or a one-entry map
 /// such as `{"member": "<id>"}`. Deserialization accepts only those two forms: `system` as a
@@ -33,7 +33,7 @@ pub enum Source {
     ScheduledTask(Id),
     /// A playbook.
     Playbook(Id),
-    /// An event, by the call id that delivered it.
+    /// An event, by its id: the source of a consumer's call (spine AD-27, D150).
     Event(Id),
     /// A home rule.
     Rule(Id),
@@ -62,7 +62,7 @@ closed_set! {
         ScheduledTask => "scheduled_task",
         /// `playbook(id)`.
         Playbook => "playbook",
-        /// `event(call id)`.
+        /// `event(event id)`.
         Event => "event",
         /// `rule(id)`.
         Rule => "rule",

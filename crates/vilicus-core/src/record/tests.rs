@@ -12,7 +12,7 @@ use vilicus_module_api::{
     VOCABULARY_LABEL_MAX_LEN, Value, ValueError,
 };
 use vilicus_storage::{Handle, MigrationTrack, ModuleFile, SqlValue, TableKind, Write};
-use vilicus_types::{Id, Source, Taint, UtcMillis};
+use vilicus_types::{Id, Source, Taint, TextTaint, UtcMillis};
 
 use super::envelope::{EnvelopeRule, data_types_text, rule};
 use super::{RecordError, WriteKind, WritePath, check_stored_rows, confirm_label};
@@ -231,6 +231,7 @@ pub(super) fn envelope_of(data_types: &[DataType], id: Id) -> Vec<(&'static str,
                 EnvelopeRule::Id => Value::Blob(id.to_bytes().to_vec()),
                 EnvelopeRule::Source => Value::Text(Source::System.to_string()),
                 EnvelopeRule::Taint => Value::Text(Taint::External.as_str().into()),
+                EnvelopeRule::TextTaint => Value::Text(TextTaint::External.as_str().into()),
                 EnvelopeRule::DataTypes => Value::Text(data_types_text(data_types)),
                 EnvelopeRule::Author => Value::Null,
                 EnvelopeRule::Instant => Value::Integer(noon().as_millis()),
@@ -889,9 +890,10 @@ fn stored_rows_written_by_a_migration_are_checked() {
                 fields: ITEM_FIELDS,
             }],
             Some(format!(
-                "INSERT INTO items (id, source, taint, data_types, created_at, updated_at, rev, \
-                 label, status, room) VALUES (x'017f22e279b07cc398c4dc0c0c07398f', 'system', \
-                 'external', 'shopping_list', 0, 0, 1, 'Pommes', 'open', 'Cuisine');\n{back_fill}"
+                "INSERT INTO items (id, source, taint, text_taint, data_types, created_at, \
+                 updated_at, rev, label, status, room) VALUES \
+                 (x'017f22e279b07cc398c4dc0c0c07398f', 'system', 'external', 'external', \
+                 'shopping_list', 0, 0, 1, 'Pommes', 'open', 'Cuisine');\n{back_fill}"
             )),
         )
     };
@@ -1007,7 +1009,7 @@ fn the_fuzz_test_runs_on_files_it_creates() {
 
 /// Story 3.4 review, M1: the row writer holds the envelope to its stored form, and the check of
 /// stored rows reads the envelope back too, so a migration's back-fill cannot forge an id, a
-/// `source`, a `taint` or the data types of a record.
+/// `source`, a label or the data types of a record, nor store a `text_taint` below the `taint`.
 #[test]
 fn the_envelope_is_held_to_its_stored_form_on_write_and_when_read_back() {
     let probe = probe();
@@ -1024,6 +1026,8 @@ fn the_envelope_is_held_to_its_stored_form_on_write_and_when_read_back() {
             Some(()),
         ),
         ("taint", text("member"), Some(())),
+        ("text_taint", text("member"), Some(())),
+        ("text_taint", text("trusted"), Some(())),
         ("data_types", text("nonsense"), Some(())),
         ("data_types", text("health"), Some(())),
         (
@@ -1072,20 +1076,20 @@ fn the_envelope_is_held_to_its_stored_form_on_write_and_when_read_back() {
                 fields: ITEM_FIELDS,
             }],
             Some(format!(
-                "INSERT INTO items (id, source, taint, data_types, author, created_at, updated_at, \
-                 rev, label, status) VALUES ({values}, 'Pommes', 'open');"
+                "INSERT INTO items (id, source, taint, text_taint, data_types, author, created_at, \
+                 updated_at, rev, label, status) VALUES ({values}, 'Pommes', 'open');"
             )),
         )
     };
-    let valid =
-        "x'017f22e279b07cc398c4dc0c0c07398f', 'system', 'trusted', 'shopping_list', NULL, 0, 0, 1";
+    let valid = "x'017f22e279b07cc398c4dc0c0c07398f', 'system', 'trusted', 'approved_draft', \
+                 'shopping_list', NULL, 0, 0, 1";
     let clean = back_filled("cleanenvelope", valid);
     let (_, handle) = open_new(clean, "envelope-clean");
     check_stored_rows(&handle, clean).expect("a back-fill in the stored form passes");
     for (name, values, column) in [
         (
             "laundry",
-            "x'0102', 'forged source', 'trusted', 'nonsense', NULL, -5, 0, 1",
+            "x'0102', 'forged source', 'trusted', 'trusted', 'nonsense', NULL, -5, 0, 1",
             "id",
         ),
         (
@@ -1097,6 +1101,19 @@ fn the_envelope_is_held_to_its_stored_form_on_write_and_when_read_back() {
             "membertaint",
             &valid.replace("'trusted'", "'member'"),
             "taint",
+        ),
+        (
+            "membertext",
+            &valid.replace("'approved_draft'", "'member'"),
+            "text_taint",
+        ),
+        (
+            "belowtaint",
+            &valid.replace(
+                "'trusted', 'approved_draft'",
+                "'external', 'approved_draft'",
+            ),
+            "text_taint",
         ),
         (
             "othertype",

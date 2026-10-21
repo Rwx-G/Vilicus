@@ -3,8 +3,8 @@
 //! values of its declared fields and the ids of the records a write is derived from, and nothing
 //! else. The Core implements this port over its storage layer: in the call's write transaction it
 //! checks every value against its declaration, stamps the envelope (id, `source`, `author`, times,
-//! `rev`), and computes `taint` and `data_types` from who makes the call and from the inputs
-//! (AD-6, AD-7). No method takes an envelope value, so a module cannot choose its own provenance,
+//! `rev`), and computes `taint`, `text_taint` and `data_types` from who makes the call and from
+//! the inputs (AD-6, AD-7). No method takes an envelope value, so a module cannot choose its own provenance,
 //! and no method runs SQL.
 //!
 //! A module's code holds a `&mut dyn Records` for the duration of one call:
@@ -41,7 +41,7 @@ use crate::value::{Value, ValueError};
 /// refused with [`WriteError::CallRefused`].
 ///
 /// `fields` names declared fields only, each once; `inputs` are the ids of the records the write
-/// is derived from, which the Core reads to compute the stored `taint` and `data_types` (AD-7,
+/// is derived from, which the Core reads to compute the stored labels and `data_types` (AD-7,
 /// I9, I43). A call that no member makes or approves, other than a plugin's or an adapter's,
 /// declares at least one input on every insert and update, or the write is refused.
 pub trait Records {

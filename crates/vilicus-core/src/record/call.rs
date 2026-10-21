@@ -295,7 +295,14 @@ impl CallRecords<'_> {
         let envelope = [
             ("id", Value::Blob(id.to_bytes().to_vec())),
             ("source", Value::Text(self.call.source.to_string())),
-            ("taint", Value::Text(stamp.taint.as_str().to_owned())),
+            (
+                "taint",
+                Value::Text(stamp.labels.taint().as_str().to_owned()),
+            ),
+            (
+                "text_taint",
+                Value::Text(stamp.labels.text_taint().as_str().to_owned()),
+            ),
             (
                 "data_types",
                 Value::Text(data_types_text(&stamp.data_types)),
@@ -348,7 +355,14 @@ impl CallRecords<'_> {
         let now = self.stamper.now();
         let envelope = [
             ("source", Value::Text(self.call.source.to_string())),
-            ("taint", Value::Text(stamp.taint.as_str().to_owned())),
+            (
+                "taint",
+                Value::Text(stamp.labels.taint().as_str().to_owned()),
+            ),
+            (
+                "text_taint",
+                Value::Text(stamp.labels.text_taint().as_str().to_owned()),
+            ),
             (
                 "data_types",
                 Value::Text(data_types_text(&stamp.data_types)),
@@ -471,7 +485,7 @@ impl CallRecords<'_> {
 
 /// The envelope columns a record's provenance is read from, in the order [`provenance_of`] takes
 /// them.
-const PROVENANCE_COLUMNS: [&str; 3] = ["taint", "author", "data_types"];
+const PROVENANCE_COLUMNS: [&str; 4] = ["taint", "text_taint", "author", "data_types"];
 
 /// Reads the record `id` of `table` that an update giving `fields` changes: its provenance, and
 /// whether the update keeps a value it holds; and its revision.
@@ -557,9 +571,9 @@ fn free_text_of(table: &'static Table, values: impl Iterator<Item = Value>) -> V
         .collect()
 }
 
-/// The provenance of the record `id` of `table` from its stored `taint`, `author` and
-/// `data_types`, the next three of `columns`, each held to its stored form; its free text is the
-/// caller's to read.
+/// The provenance of the record `id` of `table` from its stored `taint`, `text_taint`, `author`
+/// and `data_types`, the next four of `columns`, each held to its stored form and the labels to
+/// each other; its free text is the caller's to read.
 fn provenance_of(
     table: &'static Table,
     id: Id,
@@ -578,14 +592,8 @@ fn provenance_of(
         table: table.name,
         column,
     };
-    let taint = match next("taint")? {
-        Value::Text(text) => Taint::ALL
-            .iter()
-            .copied()
-            .find(|taint| taint.as_str() == text),
-        _ => None,
-    }
-    .ok_or(malformed("taint"))?;
+    let taint = next("taint")?;
+    let labels = envelope::check_labels(table, &taint, &next("text_taint")?)?;
     let author = match next("author")? {
         Value::Blob(bytes) => Some(
             <[u8; 16]>::try_from(bytes.as_slice())
@@ -610,7 +618,7 @@ fn provenance_of(
     .ok_or(malformed("data_types"))?;
     Ok(RecordProvenance {
         id,
-        taint,
+        labels,
         author,
         data_types,
         free_text: Vec::new(),

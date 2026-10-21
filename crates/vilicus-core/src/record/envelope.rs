@@ -9,12 +9,13 @@
 //! - `source`: the text of [`Source`](vilicus_types::Source), such as `system` or
 //!   `member(<id>)`;
 //! - `taint`: a name of the stored set [`Taint`] (`member` is a read-time view, never stored);
+//! - `text_taint`: a name of [`TextTaint`], never below the row's `taint` ([`check_labels`]);
 //! - `data_types`: the names of the record's data types, each once, in the order of
 //!   [`DataType::ALL`], separated by commas, each one the record kind declares;
 //! - `created_at`, `updated_at`: UTC milliseconds within years 0000 to 9999; `rev`: 1 or more.
 
 use vilicus_module_api::{DataType, EnvelopeColumn, SqlType, Table, Value, ValueError};
-use vilicus_types::{Id, Rev, Source, Taint, UtcMillis};
+use vilicus_types::{Id, RecordLabels, Rev, Source, Taint, TextTaint, UtcMillis};
 
 use super::RecordError;
 
@@ -24,6 +25,7 @@ pub(crate) enum EnvelopeRule {
     Id,
     Source,
     Taint,
+    TextTaint,
     DataTypes,
     Author,
     Instant,
@@ -37,6 +39,7 @@ pub(crate) fn rule(name: &str) -> Option<EnvelopeRule> {
         "id" => EnvelopeRule::Id,
         "source" => EnvelopeRule::Source,
         "taint" => EnvelopeRule::Taint,
+        "text_taint" => EnvelopeRule::TextTaint,
         "data_types" => EnvelopeRule::DataTypes,
         "author" => EnvelopeRule::Author,
         "created_at" | "updated_at" => EnvelopeRule::Instant,
@@ -84,16 +87,53 @@ pub(crate) fn check(
             .map(drop)
             .ok_or(invalid(ValueError::OutOfRange)),
         (Some(EnvelopeRule::Source), Value::Text(text)) if Source::parse(text).is_ok() => Ok(()),
-        (Some(EnvelopeRule::Taint), Value::Text(text))
-            if Taint::ALL.iter().any(|taint| taint.as_str() == text) =>
-        {
-            Ok(())
-        }
+        (Some(EnvelopeRule::Taint), Value::Text(text)) if stored_taint(text).is_some() => Ok(()),
+        (Some(EnvelopeRule::TextTaint), Value::Text(text)) if text_taint(text).is_some() => Ok(()),
         (Some(EnvelopeRule::DataTypes), Value::Text(text)) if is_data_types_of(text, table) => {
             Ok(())
         }
         _ => Err(malformed),
     }
+}
+
+/// Checks the two labels of a row, each already in its stored form: `text_taint` is never below
+/// `taint`, so the stricter of the two is always `text_taint` (AD-6).
+pub(crate) fn check_labels(
+    table: &'static Table,
+    taint: &Value,
+    text: &Value,
+) -> Result<RecordLabels, RecordError> {
+    let taint = match taint {
+        Value::Text(name) => stored_taint(name),
+        _ => None,
+    }
+    .ok_or(RecordError::InvalidEnvelope {
+        table: table.name,
+        column: "taint",
+    })?;
+    match text {
+        Value::Text(name) => text_taint(name),
+        _ => None,
+    }
+    .and_then(|text_taint| RecordLabels::new(taint, text_taint))
+    .ok_or(RecordError::InvalidEnvelope {
+        table: table.name,
+        column: "text_taint",
+    })
+}
+
+fn stored_taint(name: &str) -> Option<Taint> {
+    Taint::ALL
+        .iter()
+        .copied()
+        .find(|taint| taint.as_str() == name)
+}
+
+fn text_taint(name: &str) -> Option<TextTaint> {
+    TextTaint::ALL
+        .iter()
+        .copied()
+        .find(|taint| taint.as_str() == name)
 }
 
 /// The stored text of a set of data types: their names in the order of [`DataType::ALL`], each

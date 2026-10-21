@@ -1,19 +1,21 @@
 //! The provenance the Core stamps on a write (AD-6, AD-7, D45, D70, D99, D103, D104, I9, I21,
-//! I35, I43): a record's stored `taint`, `data_types` and `author`, computed from the [`Call`] and
+//! I35, I43): a record's stored labels, `data_types` and `author`, computed from the [`Call`] and
 //! from the records the write is derived from, never chosen by a module or a model.
 //!
-//! A record has one `taint`. A write whose parts carry different labels (structured fields a
-//! member approved and free text drafted in a tainted session) stores the most restrictive of
-//! them, so no part of a record reads as more trusted than it is. An update never lowers a
-//! record's label: promoting an `external` record stays with the host CLI (D45, D112), however
-//! much of it the update rewrites. And an update that keeps some of a record's content keeps its
-//! author, so editing one field of another member's record does not make their text the editor's.
+//! A record has two labels ([`RecordLabels`]): `taint` for its structured fields and `text_taint`
+//! for the record read with its free text, never below `taint`. A member's approval stores the
+//! structured fields `trusted` while free text drafted in a tainted session keeps an `external`
+//! label, `approved_draft` (D99, I9, I35); model text no member approved is `external`, even from
+//! a clean session (`doc/architecture.md` section 5.4, rule 2). An update never lowers a label:
+//! promoting an `external` record stays with the host CLI (D45, D112), however much of it the
+//! update rewrites. And an update that keeps some of a record's content keeps its author, so
+//! editing one field of another member's record does not make their text the editor's.
 
 use core::fmt;
 use std::collections::HashSet;
 
 use vilicus_module_api::{DataType, FieldKind, Table, Value};
-use vilicus_types::{EffectiveTaint, Id, Principal, Taint};
+use vilicus_types::{EffectiveTaint, Id, Principal, RecordLabels, Taint, TextTaint};
 
 use super::RecordError;
 use super::call::{Authority, Call};
@@ -22,7 +24,7 @@ use super::call::{Authority, Call};
 /// `external` when the field repeats it verbatim (D104).
 pub const DRAFT_RUN_WORDS: usize = 8;
 
-/// The provenance of a stored record that a write reads: its id, its stored taint, its author,
+/// The provenance of a stored record that a write reads: its id, its stored labels, its author,
 /// its data types and its free text. The Core reads it from the file in the write transaction,
 /// or, for a record of another file, keeps it from the read that served the record to the call;
 /// a module never gives one.
@@ -30,8 +32,8 @@ pub const DRAFT_RUN_WORDS: usize = 8;
 pub struct RecordProvenance {
     /// The record's id.
     pub id: Id,
-    /// Its stored taint.
-    pub taint: Taint,
+    /// Its stored labels.
+    pub labels: RecordLabels,
     /// Its author, if any.
     pub author: Option<Id>,
     /// Its data types.
@@ -48,11 +50,23 @@ impl fmt::Debug for RecordProvenance {
         formatter
             .debug_struct("RecordProvenance")
             .field("id", &self.id)
-            .field("taint", &self.taint)
+            .field("labels", &self.labels)
             .field("author", &self.author)
             .field("data_types", &self.data_types)
             .field("free_text", &self.free_text.len())
             .finish()
+    }
+}
+
+impl RecordProvenance {
+    /// The label a derivation acting for `viewer` counts this record with: the whole record,
+    /// free text included, as `viewer` sees it, a `member` record storing `external` (AD-7).
+    fn derived_taint(&self, viewer: Option<Id>) -> Taint {
+        stored_taint(EffectiveTaint::for_viewer(
+            self.labels.overall(),
+            self.author,
+            viewer,
+        ))
     }
 }
 
@@ -69,7 +83,7 @@ pub(crate) struct Stored {
 /// The envelope values a write's provenance decides.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Stamp {
-    pub(crate) taint: Taint,
+    pub(crate) labels: RecordLabels,
     pub(crate) data_types: Vec<DataType>,
     pub(crate) author: Option<Id>,
 }
@@ -95,9 +109,9 @@ pub(crate) fn stamp(
     inputs: &[RecordProvenance],
     stored: Option<&Stored>,
 ) -> Result<Stamp, RecordError> {
-    let written = written_taint(call, table, fields, inputs, stored);
-    let taint = match stored {
-        Some(stored) => most_restrictive(written, stored.provenance.taint),
+    let written = written_labels(call, table, fields, inputs, stored);
+    let labels = match stored {
+        Some(stored) => written.most_restrictive(stored.provenance.labels),
         None => written,
     };
     let declared = matches!(
@@ -126,35 +140,36 @@ pub(crate) fn stamp(
         _ => writer,
     };
     Ok(Stamp {
-        taint,
+        labels,
         data_types,
         author,
     })
 }
 
-/// The label of what the write itself gives, before an update raises it to the record's.
-fn written_taint(
+/// The labels of what the write itself gives, before an update raises them to the record's.
+fn written_labels(
     call: &Call,
     table: &'static Table,
     fields: &[(&str, Value)],
     inputs: &[RecordProvenance],
     stored: Option<&Stored>,
-) -> Taint {
+) -> RecordLabels {
     if is_outside_content(call.principal) {
-        return Taint::External;
+        return RecordLabels::EXTERNAL;
     }
     match &call.authority {
         Authority::OwnAction { member } => {
             let copied = untrusted_text(inputs, *member);
-            free_texts(table, fields)
+            let text = free_texts(table, fields)
                 .map(|text| {
                     if repeats_a_run(text, &copied) {
-                        Taint::External
+                        TextTaint::External
                     } else {
-                        Taint::Trusted
+                        TextTaint::Trusted
                     }
                 })
-                .fold(Taint::Trusted, most_restrictive)
+                .fold(TextTaint::Trusted, TextTaint::most_restrictive);
+            RecordLabels::of(Taint::Trusted, text)
         }
         Authority::Approved {
             member,
@@ -162,28 +177,33 @@ fn written_taint(
             drafts,
         } => {
             let copied = untrusted_text(inputs, *member);
-            free_texts(table, fields)
+            let text = free_texts(table, fields)
                 .map(|text| {
                     if repeats_a_run(text, &copied) {
-                        Taint::External
+                        TextTaint::External
                     } else {
                         approved_text_taint(call.session, text, written, drafts)
                     }
                 })
-                .fold(Taint::Trusted, most_restrictive)
+                .fold(TextTaint::Trusted, TextTaint::most_restrictive);
+            RecordLabels::of(Taint::Trusted, text)
         }
-        Authority::Unapproved { acting_for, .. } => inputs
-            .iter()
-            .chain(stored.map(|stored| &stored.provenance))
-            .map(|input| {
-                stored_taint(EffectiveTaint::for_viewer(
-                    input.taint,
-                    input.author,
-                    *acting_for,
-                ))
-            })
-            .chain(consumes(call).then(|| stored_taint(call.consumed.taint)))
-            .fold(call.session, most_restrictive),
+        Authority::Unapproved { acting_for, .. } => {
+            let structured = inputs
+                .iter()
+                .chain(stored.map(|stored| &stored.provenance))
+                .map(|input| input.derived_taint(*acting_for))
+                .chain(consumes(call).then(|| stored_taint(call.consumed.taint)))
+                .fold(call.session, most_restrictive);
+            let model_text =
+                call.principal == Principal::AiTask && free_texts(table, fields).next().is_some();
+            let text = if model_text {
+                TextTaint::External
+            } else {
+                structured.into()
+            };
+            RecordLabels::of(structured, text)
+        }
     }
 }
 
@@ -211,10 +231,7 @@ fn consumes(call: &Call) -> bool {
 fn untrusted_text(inputs: &[RecordProvenance], member: Id) -> Vec<&str> {
     inputs
         .iter()
-        .filter(|input| {
-            EffectiveTaint::for_viewer(input.taint, input.author, Some(member))
-                != EffectiveTaint::Trusted
-        })
+        .filter(|input| input.derived_taint(Some(member)) != Taint::Trusted)
         .flat_map(|input| input.free_text.iter().map(String::as_str))
         .collect()
 }
@@ -253,15 +270,22 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The label of a free text of an approved write (D99, D104): text drafted, or drafted then
-/// edited, keeps the session's taint; only text the member wrote in full in an empty field is
-/// `trusted`, unless it repeats a run of a draft, which is `external` like the draft.
-fn approved_text_taint(session: Taint, text: &str, written: &[String], drafts: &[String]) -> Taint {
+/// The label of a free text of an approved write (D99, D104): from a tainted session, text
+/// drafted, or drafted then edited, is an approved draft, `external` but readable by a planner as
+/// quoted data; only text the member wrote in full in an empty field is `trusted`, unless it
+/// repeats a run of a draft, which makes it an approved draft too. From a session that is not
+/// tainted, the approved text is `trusted`.
+fn approved_text_taint(
+    session: Taint,
+    text: &str,
+    written: &[String],
+    drafts: &[String],
+) -> TextTaint {
     let written_in_full = written.iter().any(|member_text| member_text == text);
     if session == Taint::Trusted || (written_in_full && !repeats_a_run(text, drafts)) {
-        Taint::Trusted
+        TextTaint::Trusted
     } else {
-        Taint::External
+        TextTaint::ApprovedDraft
     }
 }
 

@@ -215,9 +215,9 @@ const LITERAL: ModuleDeclaration = ModuleDeclaration {
     fts5_tables: &[],
     migrations: &[Migration {
         sql: "CREATE TABLE entries (id BLOB NOT NULL PRIMARY KEY, source TEXT NOT NULL, \
-              taint TEXT NOT NULL, data_types TEXT NOT NULL, author BLOB, \
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, rev INTEGER NOT NULL, \
-              body TEXT NOT NULL) STRICT;",
+              taint TEXT NOT NULL, text_taint TEXT NOT NULL, data_types TEXT NOT NULL, \
+              author BLOB, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, \
+              rev INTEGER NOT NULL, body TEXT NOT NULL) STRICT;",
     }],
     matrix_sections: &[],
     tools: &[],
@@ -355,6 +355,7 @@ fn a_table_missing_an_envelope_column_fails_registration() {
 fn an_envelope_column_of_another_shape_fails_registration() {
     for (column, replacement) in [
         ("taint", "taint INTEGER NOT NULL"),
+        ("text_taint", "text_taint TEXT"),
         ("source", "source TEXT"),
         ("id", "id BLOB NOT NULL"),
         ("author", "author BLOB NOT NULL"),
@@ -715,6 +716,24 @@ fn clauses_with_behaviour_fail_registration() {
             base.replacen(
                 "source TEXT NOT NULL, taint TEXT NOT NULL",
                 "taint TEXT NOT NULL, source TEXT NOT NULL",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+        (
+            base.replacen(
+                "taint TEXT NOT NULL, text_taint TEXT NOT NULL",
+                "text_taint TEXT NOT NULL, taint TEXT NOT NULL",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+        (
+            base.replacen(
+                "text_taint TEXT NOT NULL",
+                "text_taint TEXT NOT NULL DEFAULT 'trusted'",
                 1,
             ),
             "",

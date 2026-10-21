@@ -5,9 +5,9 @@
 //! file's write handle, and gives the module's code the port of `vilicus-module-api`,
 //! [`Records`](vilicus_module_api::Records): insert, update by id with the expected revision,
 //! delete by id. For each write the Core stamps the envelope (id, `source`, `author`, times,
-//! `rev`) and computes `taint` and `data_types` from the [`Call`] (who makes it, on what
-//! authority) and from the records the write is derived from; the module gives field values and
-//! input ids only. A refused write rolls back the whole call.
+//! `rev`) and computes `taint`, `text_taint` and `data_types` from the [`Call`] (who makes it, on
+//! what authority) and from the records the write is derived from; the module gives field values
+//! and input ids only. A refused write rolls back the whole call.
 //!
 //! The row writer holds each field a write gives to its declaration (D98, D104, I40), and each
 //! envelope value to its stored form (`envelope`, D146), and refuses the whole write with a typed
@@ -117,8 +117,9 @@ pub enum RecordError {
         /// The rule the value breaks.
         error: ValueError,
     },
-    /// An envelope value is outside its stored form: a `source`, `taint` or `data_types` text the
-    /// Core does not write, or data types the record kind does not declare (AD-6).
+    /// An envelope value is outside its stored form: a `source`, `taint`, `text_taint` or
+    /// `data_types` text the Core does not write, a `text_taint` below the `taint`, or data types
+    /// the record kind does not declare (AD-6).
     InvalidEnvelope {
         /// The table.
         table: &'static str,
@@ -448,9 +449,16 @@ pub(crate) fn check_stored_rows<R: Inspect>(
         )?;
         for row in rows {
             let mut stored = row.into_iter().map(from_stored);
+            let mut labels = (Value::Null, Value::Null);
             for (column, value) in ENVELOPE.iter().zip(stored.by_ref()) {
                 envelope::check(table, column, &value)?;
+                match envelope::rule(column.name) {
+                    Some(envelope::EnvelopeRule::Taint) => labels.0 = value,
+                    Some(envelope::EnvelopeRule::TextTaint) => labels.1 = value,
+                    _ => {}
+                }
             }
+            envelope::check_labels(table, &labels.0, &labels.1)?;
             for (field, value) in table.fields.iter().zip(stored) {
                 check_value(handle, table, field, &value)?;
             }
@@ -631,7 +639,36 @@ fn check_envelope<'a>(
             column: missing.name,
         });
     }
+    check_given_labels(table, &checked)?;
     Ok(checked)
+}
+
+/// The two labels of a write go together: given both, `text_taint` is not below `taint`; given
+/// one, the other is missing, so no write can leave a row's labels apart (AD-6).
+fn check_given_labels(table: &'static Table, checked: &[Checked<'_>]) -> Result<(), RecordError> {
+    let given = |wanted| {
+        checked
+            .iter()
+            .find(|given| envelope::rule(given.column) == Some(wanted))
+            .map(|given| given.value)
+    };
+    match (
+        given(envelope::EnvelopeRule::Taint),
+        given(envelope::EnvelopeRule::TextTaint),
+    ) {
+        (None, None) => Ok(()),
+        (Some(taint), Some(text_taint)) => {
+            envelope::check_labels(table, taint, text_taint).map(drop)
+        }
+        (Some(_), None) => Err(RecordError::MissingColumn {
+            table: table.name,
+            column: "text_taint",
+        }),
+        (None, Some(_)) => Err(RecordError::MissingColumn {
+            table: table.name,
+            column: "taint",
+        }),
+    }
 }
 
 /// The values to bind, in the order of `columns`.

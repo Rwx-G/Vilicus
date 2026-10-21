@@ -62,13 +62,15 @@ const fn envelope(
 }
 
 /// The record envelope every module table carries, in the order of AD-6. Ids are 16-byte UUIDv7
-/// blobs and times UTC integer milliseconds (spine conventions); `author` is empty for the
-/// principals the conventions name, so it may be `NULL`. The Core stamps every column on every
+/// blobs and times UTC integer milliseconds (spine conventions); `taint` labels the record's
+/// structured fields and `text_taint` the record read with its free text; `author` is empty for
+/// the principals the conventions name, so it may be `NULL`. The Core stamps every column on every
 /// write of the typed record API ([`Records`](crate::Records)), in the stored forms of D146.
 pub const ENVELOPE: &[EnvelopeColumn] = &[
     envelope("id", SqlType::Blob, true, true),
     envelope("source", SqlType::Text, true, false),
     envelope("taint", SqlType::Text, true, false),
+    envelope("text_taint", SqlType::Text, true, false),
     envelope("data_types", SqlType::Text, true, false),
     envelope("author", SqlType::Blob, false, false),
     envelope("created_at", SqlType::Integer, true, false),

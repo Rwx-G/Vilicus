@@ -15,8 +15,8 @@
 //!
 //! A module writes its records only through the typed record API, [`Records`] (AD-9): insert,
 //! update by id with the expected [`Rev`], delete by id. It gives field values and the ids of
-//! the records a write is derived from; the Core stamps the envelope and computes `taint` and
-//! `data_types` (AD-6, AD-7). A write gives each field a [`Value`], which [`Field::check_value`]
+//! the records a write is derived from; the Core stamps the envelope and computes `taint`,
+//! `text_taint` and `data_types` (AD-6, AD-7). A write gives each field a [`Value`], which [`Field::check_value`]
 //! holds to the field's declaration (FR-58, D98): the Core runs it on every write, and checks in
 //! the write transaction that a reviewed-vocabulary label is one an adult confirmed (D104).
 

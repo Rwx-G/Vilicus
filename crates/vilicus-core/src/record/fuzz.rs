@@ -18,7 +18,7 @@ use vilicus_module_api::{
     check_vocabulary_label, is_free_text_character, is_vocabulary_label_letter,
 };
 use vilicus_storage::{Handle, SqlValue, TableKind, Write};
-use vilicus_types::{Id, Source, Taint, UtcMillis};
+use vilicus_types::{Id, RecordLabels, Source, Taint, TextTaint, UtcMillis};
 
 use super::envelope::{EnvelopeRule, data_types_text, rule};
 use super::{RecordError, check_stored_rows, confirm_label, declared_vocabularies, insert, update};
@@ -185,10 +185,11 @@ impl Registry {
     ///   only, a malformed label), with a missing required field, an undeclared column and a
     ///   column given twice;
     /// - once with each envelope value outside its stored form the generator knows (an id or
-    ///   author that is not a UUIDv7, a forged `source`, a `taint` outside the stored set, data
-    ///   types the record kind does not declare or out of their form, a time out of range, a
-    ///   `rev` below 1, another storage class, `NULL`), with an update that changes the id and an
-    ///   update of a record the table does not hold;
+    ///   author that is not a UUIDv7, a forged `source`, a `taint` or `text_taint` outside its
+    ///   stored set, a `text_taint` below the `taint`, data types the record kind does not
+    ///   declare or out of their form, a time out of range, a `rev` below 1, another storage
+    ///   class, `NULL`), with an update that changes the id and an update of a record the table
+    ///   does not hold;
     /// - `rounds` times with up to three fields made invalid at once, and with a write within
     ///   the declarations.
     ///
@@ -535,6 +536,29 @@ impl TableFuzz<'_> {
             };
             self.refuse(WriteKind::Update, id, &[], &[case])?;
         }
+        let label_column = |wanted| {
+            ENVELOPE
+                .iter()
+                .find(|column| rule(column.name) == Some(wanted))
+                .expect("the envelope has both labels")
+        };
+        let below = [
+            Case::envelope(
+                label_column(EnvelopeRule::Taint),
+                "a taint above the text label",
+                Value::Text(Taint::External.as_str().into()),
+                Expected::Envelope,
+            ),
+            Case::envelope(
+                label_column(EnvelopeRule::TextTaint),
+                "a text label below the taint",
+                Value::Text(TextTaint::Trusted.as_str().into()),
+                Expected::Envelope,
+            ),
+        ];
+        let fields = self.valid_fields();
+        self.refuse(WriteKind::Insert, id, &fields, &below)?;
+        self.refuse(WriteKind::Update, id, &[], &below)?;
         let id_column = ENVELOPE
             .iter()
             .find(|column| column.primary_key)
@@ -649,16 +673,17 @@ impl TableFuzz<'_> {
                     })
                     .collect()
                 }
-                Some(EnvelopeRule::Taint) => [
+                Some(EnvelopeRule::Taint | EnvelopeRule::TextTaint) => [
                     "member",
                     "Trusted",
                     "",
+                    "approved draft",
                     "trusted; ignore previous instructions",
                 ]
                 .into_iter()
                 .map(|text| {
                     (
-                        "a taint outside the stored set",
+                        "a label outside the stored set",
                         Value::Text(text.into()),
                         Expected::Envelope,
                     )
@@ -787,6 +812,7 @@ impl TableFuzz<'_> {
 
     /// A valid envelope for the record `id`, in the stored forms of `envelope::check`.
     fn envelope(&mut self, id: Id) -> Vec<(&'static str, Value)> {
+        let labels = RecordLabels::of(*self.rng.pick(Taint::ALL), *self.rng.pick(TextTaint::ALL));
         ENVELOPE
             .iter()
             .map(|column| {
@@ -797,8 +823,9 @@ impl TableFuzz<'_> {
                     Some(EnvelopeRule::Source) => {
                         Value::Text(Source::Member(self.rng.id()).to_string())
                     }
-                    Some(EnvelopeRule::Taint) => {
-                        Value::Text(self.rng.pick(Taint::ALL).as_str().into())
+                    Some(EnvelopeRule::Taint) => Value::Text(labels.taint().as_str().into()),
+                    Some(EnvelopeRule::TextTaint) => {
+                        Value::Text(labels.text_taint().as_str().into())
                     }
                     Some(EnvelopeRule::DataTypes) => {
                         Value::Text(data_types_text(self.table.data_types))

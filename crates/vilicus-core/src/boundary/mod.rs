@@ -19,6 +19,7 @@
 #[cfg(test)]
 mod tests;
 
+use std::any::Any;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::Duration;
@@ -63,6 +64,30 @@ impl Drop for Mark {
     fn drop(&mut self) {
         IN_MODULE_CODE.with(|mark| mark.set(self.previous));
     }
+}
+
+/// How many times a panic payload of the module's code is dropped again when its drop panics,
+/// before the last payload is leaked: a payload is module code, and its drop may panic in turn.
+const PAYLOAD_DROPS: usize = 8;
+
+/// The payload the boundary unwinds with when the module's code caught a panic of the Core's
+/// record port and returned: the Core failed, so the call is rolled back and the module is not
+/// faulted.
+const CORE_PANIC_CAUGHT: &str = "a panic of the Core in the record port was caught by module code";
+
+/// Drops `payload`, a panic payload of the module's code, as module code: with the thread marked
+/// and inside `catch_unwind`, so a payload whose drop panics never unwinds into the Core. Each
+/// payload such a drop yields is dropped the same way, at most [`PAYLOAD_DROPS`] times, after
+/// which the last one is leaked.
+fn drop_module_payload(mut payload: Box<dyn Any + Send>) {
+    for _ in 0..PAYLOAD_DROPS {
+        let _module = Mark::set(true);
+        match catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+            Ok(()) => return,
+            Err(next) => payload = next,
+        }
+    }
+    std::mem::forget(payload);
 }
 
 /// The record port as the module's code holds it inside the boundary: each method is the Core's
@@ -215,7 +240,8 @@ impl Boundary<'_> {
     /// module for the partition ([`HandlerError::Faulted`]); a refusal or an error of `body`
     /// rolls it back and is [`HandlerError::Refused`]. A panic of the Core, in a method of the
     /// record port or around `body`, unwinds out of the boundary, the call rolled back and the
-    /// module not faulted.
+    /// module not faulted, even when the module's code caught it and returned. The payload of the
+    /// module's panic is dropped as module code.
     pub fn run<T>(
         &self,
         handle: &Handle<Write>,
@@ -252,10 +278,12 @@ impl Boundary<'_> {
             };
             match returned {
                 Err(payload) if core_panicked.get() => resume_unwind(payload),
-                Err(_) => {
+                Err(payload) => {
+                    drop_module_payload(payload);
                     fault = Some(Fault::Panicked);
                     Err(WriteError::Failed)
                 }
+                Ok(_) if core_panicked.get() => resume_unwind(Box::new(CORE_PANIC_CAUGHT)),
                 Ok(_) if self.clock.now() > deadline => {
                     fault = Some(Fault::TimeBudget);
                     Err(WriteError::Failed)

@@ -1012,3 +1012,130 @@ fn a_module_faulted_in_one_partition_leaves_the_others_serving() {
         .expect("read");
     assert!(raw.is_empty());
 }
+
+// Story 3.9 review.
+
+/// Where the last `Bomb` was dropped: 1 in module code, 2 in the Core's.
+static BOMB_DROPPED_IN: AtomicU64 = AtomicU64::new(0);
+
+/// A panic payload whose drop panics again.
+struct Bomb;
+
+impl Drop for Bomb {
+    fn drop(&mut self) {
+        BOMB_DROPPED_IN.store(if in_module_code() { 1 } else { 2 }, Ordering::SeqCst);
+        panic!("the payload's drop panics");
+    }
+}
+
+/// Review item 1: a module that panics with a payload whose drop panics in turn is caught like any
+/// panic: the payload is dropped as module code, nothing unwinds out of the boundary, the call is
+/// rolled back and the module faulted with its alert.
+#[test]
+fn a_panic_payload_whose_drop_panics_stays_inside_the_boundary() {
+    let fixture = Fixture::new("payload-bomb");
+    let module = fixture.registry.modules()[0];
+    let invocation = fixture.invocation();
+    let boundary = fixture.boundary();
+    let tasks = &fixture.tasks;
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        boundary.run(
+            tasks,
+            module,
+            &own_action(),
+            &invocation,
+            &mut *fixture.stamper.borrow_mut(),
+            |records| -> Result<(), WriteError> {
+                records.insert("tasks", &title("Pommes"), &[])?;
+                std::panic::panic_any(Bomb)
+            },
+        )
+    }));
+    let Ok(result) = unwound else {
+        panic!("the module's panic unwound out of the boundary");
+    };
+    assert!(
+        matches!(
+            result,
+            Err(HandlerError::Faulted {
+                fault: Fault::Panicked,
+                alert: Some(_),
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        BOMB_DROPPED_IN.load(Ordering::SeqCst),
+        1,
+        "dropped as module code"
+    );
+    assert!(!in_module_code());
+    assert_eq!(rows(tasks, "SELECT id FROM tasks"), 0, "rolled back");
+    assert_eq!(
+        fixture
+            .states
+            .state(tasks.file().module(), Partition::Household),
+        AvailabilityState::Faulted
+    );
+}
+
+/// Review item 4: a panic of the Core in the record port that the module's code catches and goes
+/// on from is still the Core's: the call is rolled back, whatever the module wrote after it, the
+/// panic unwinds out of the boundary, and the module is not faulted.
+#[test]
+fn a_panic_of_the_core_the_module_catches_still_rolls_the_call_back() {
+    /// A clock that fails at its second reading, the first write's.
+    struct Failing {
+        inner: TestStamper,
+        readings: u32,
+    }
+    impl Stamper for Failing {
+        fn now(&mut self) -> UtcMillis {
+            self.readings += 1;
+            assert!(self.readings != 2, "the Core fails");
+            self.inner.now()
+        }
+        fn id_random(&mut self) -> [u8; 10] {
+            self.inner.id_random()
+        }
+    }
+    let fixture = Fixture::new("core-panic-caught");
+    let module = fixture.registry.modules()[0];
+    let invocation = fixture.invocation();
+    let boundary = fixture.boundary();
+    let tasks = &fixture.tasks;
+    let mut failing = Failing {
+        inner: TestStamper::at(noon()),
+        readings: 0,
+    };
+    let mut caught = false;
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        boundary.run(
+            tasks,
+            module,
+            &own_action(),
+            &invocation,
+            &mut failing,
+            |records| {
+                caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    records.insert("tasks", &title("Pommes"), &[])
+                }))
+                .is_err();
+                records.insert("tasks", &title("Poires"), &[])?;
+                Ok(())
+            },
+        )
+    }));
+    assert!(caught, "the module's code caught the Core's panic");
+    assert!(
+        unwound.is_err(),
+        "the Core's panic unwinds out of the boundary"
+    );
+    assert_eq!(rows(tasks, "SELECT id FROM tasks"), 0, "rolled back");
+    assert_eq!(
+        fixture
+            .states
+            .state(tasks.file().module(), Partition::Household),
+        AvailabilityState::Ready
+    );
+}

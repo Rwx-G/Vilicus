@@ -9,7 +9,7 @@
 use core::fmt;
 
 use vilicus_storage::{MigrationTrack, ModuleFile, Partition};
-use vilicus_types::{Id, ModuleName};
+use vilicus_types::{AvailabilityState, Id, ModuleName};
 
 use crate::availability::Fault;
 
@@ -78,6 +78,28 @@ pub enum InstanceAdminAlert {
         file_name: String,
         /// What the module's code did.
         fault: Fault,
+    },
+    /// An event of the file stayed pending past the outbox's retention for a consumer whose
+    /// file is in a lasting state: it is moved to that consumer's dead letters, so the outbox
+    /// does not grow without bound behind a consumer that may never return (D150), and
+    /// `vilicus events replay <dead letter>` re-delivers it.
+    EventExpired {
+        /// The emitting module.
+        module: ModuleName,
+        /// The partition.
+        partition: Partition,
+        /// The file name, `<module>.<partition>.db`.
+        file_name: String,
+        /// The dead letter.
+        dead_letter: Id,
+        /// The event.
+        event: Id,
+        /// The event's topic.
+        topic: String,
+        /// The consumer, `<module>.<consumer>`.
+        consumer: String,
+        /// The state of the consumer's file.
+        state: AvailabilityState,
     },
     /// A pending row of the file's outbox whose id does not decode: no delivery can be recorded
     /// for it, so it is closed `refused` rather than left to block the rows after it (AD-29).
@@ -224,6 +246,19 @@ impl fmt::Display for InstanceAdminAlert {
                 formatter,
                 "{file_name}: the module's code {fault}; its call was rolled back, and the module \
                  is faulted for this partition and receives no further call there"
+            ),
+            Self::EventExpired {
+                file_name,
+                dead_letter,
+                event,
+                topic,
+                consumer,
+                state,
+                ..
+            } => write!(
+                formatter,
+                "{file_name}: event {event} of {topic} outlived the outbox's retention while \
+                 {consumer} is {state}; it is dead letter {dead_letter}"
             ),
             Self::MalformedOutboxRow { file_name, seq, .. } => write!(
                 formatter,

@@ -7,24 +7,37 @@
 //! (AC4); a link is registered after the commit, in the partition that owns the data (AC5); and a
 //! consumer's write is an `Event` call of the emitting call's id, author and inputs' taint, at
 //! most tier 1, within its partition (AC6).
+//!
+//! Story 3.9: an event to a consumer in any state but `ready` stays without a failed attempt
+//! (AC2), and is dead-lettered past the retention behind a lasting state (D150); a consumer that
+//! panics or overruns its budget faults its module (AC4, AC5); the bound consumers of the handler
+//! table are what the bus runs.
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use vilicus_module_api::{
-    Consumer, DataType, Event, Field, FieldKind, ModuleDeclaration, Records, Structured, Table,
-    Topic, Value, WriteError,
+    Consumer, ConsumerHandler, DataType, Event, Field, FieldKind, ModuleCode, ModuleDeclaration,
+    Records, Structured, Table, Topic, Value, WriteError,
 };
 use vilicus_storage::{
     DeliveryState, Handle, KeyEpoch, Migration, ModuleFile, OutboxState, Partition, SqlValue, Write,
 };
-use vilicus_types::{CallId, Id, ModuleName, Principal, Source, Taint, UtcMillis};
+use vilicus_types::{
+    AvailabilityState, CallId, HANDLER_TIME_BUDGET, Id, ModuleName, OUTBOX_RETENTION, Principal,
+    Source, Taint, UtcMillis,
+};
 
 use super::{
     ConsumerCode, ConsumerFiles, DeliveryError, DeliveryOutcome, DeliveryReport, FailureCause,
     Link, LinkOutcome, LinkTable, MAX_DELIVERY_ATTEMPTS, deliver_outbox, purge_expired_outbox,
 };
 use crate::alert::InstanceAdminAlert;
+use crate::availability::{Fault, ModuleStates, MonotonicClock, Stage};
+use crate::boundary::Boundary;
+use crate::handlers::Handlers;
 use crate::record::tests::{KEY, create_sql, noon, raw_connection, raw_rows, scratch_dir};
 use crate::record::tests_call::{TestStamper, ella, member_id, noe};
 use crate::record::{
@@ -194,13 +207,48 @@ fn new_file(
     file
 }
 
-/// The files of one partition as the Core holds them: every handle, some modules locked.
+/// A monotonic clock that never moves: no call of these tests nears its time budget.
+struct Still;
+
+impl MonotonicClock for Still {
+    fn now(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+/// The files of one partition as the Core holds them: every handle, and the availability state
+/// of each file, ready but for the modules locked.
 struct Files {
     handles: Vec<Handle<Write>>,
-    locked: Vec<&'static str>,
+    states: ModuleStates,
 }
 
 impl Files {
+    fn new(handles: Vec<Handle<Write>>, locked: Vec<&'static str>) -> Self {
+        let states = ModuleStates::new();
+        for handle in &handles {
+            if !locked.contains(&handle.file().module().as_str()) {
+                states
+                    .set_stage(
+                        handle.file().module(),
+                        handle.file().partition(),
+                        Stage::Ready,
+                    )
+                    .expect("no call runs");
+            }
+        }
+        Self { handles, states }
+    }
+
+    /// The boundary the files' calls run in.
+    fn boundary(&self) -> Boundary<'_> {
+        Boundary {
+            states: &self.states,
+            clock: &Still,
+            budget: HANDLER_TIME_BUDGET,
+        }
+    }
+
     fn of(&self, module: &str) -> &Handle<Write> {
         self.handles
             .iter()
@@ -210,10 +258,7 @@ impl Files {
 }
 
 impl ConsumerFiles for Files {
-    fn ready(&self, module: &ModuleName) -> Option<&Handle<Write>> {
-        if self.locked.contains(&module.as_str()) {
-            return None;
-        }
+    fn open(&self, module: &ModuleName) -> Option<&Handle<Write>> {
         self.handles
             .iter()
             .find(|handle| handle.file().module() == module)
@@ -236,6 +281,8 @@ struct Code {
     emits: bool,
     /// Each delivery the code saw: the consumer, the event, its version, its emitter.
     seen: Vec<(String, Id, u32, String)>,
+    /// A clock each delivery moves past the handler time budget.
+    slow: Option<std::sync::Arc<Ticking>>,
 }
 
 impl ConsumerCode for Code {
@@ -259,6 +306,9 @@ impl ConsumerCode for Code {
             *left -= 1;
             assert!(!self.panics, "the consumer fails");
             return Err(WriteError::Failed);
+        }
+        if let Some(clock) = &self.slow {
+            clock.advance(HANDLER_TIME_BUDGET + Duration::from_millis(1));
         }
         if self.effect {
             records.request_effect("notify", b"key", b"")?;
@@ -390,6 +440,7 @@ fn deliver(
         registry,
         files.of("notes"),
         files,
+        &files.boundary(),
         code,
         &mut links,
         stamper,
@@ -410,7 +461,8 @@ fn outcomes(report: &DeliveryReport) -> Vec<(Id, &str, &'static str)> {
                 DeliveryOutcome::AlreadyConsumed => "already consumed",
                 DeliveryOutcome::Failed { .. } => "failed",
                 DeliveryOutcome::DeadLettered { .. } => "dead letter",
-                DeliveryOutcome::NotReady => "not ready",
+                DeliveryOutcome::NotReady { .. } => "not ready",
+                DeliveryOutcome::Expired { .. } => "expired",
                 DeliveryOutcome::Waiting => "waiting",
             };
             (delivery.event, delivery.consumer.as_str(), outcome)
@@ -430,10 +482,7 @@ fn standard(label: &str) -> (Registry, Files, TestStamper) {
     let handles = partition_files(&scratch_dir(label), Partition::Household, &registry);
     (
         registry,
-        Files {
-            handles,
-            locked: Vec::new(),
-        },
+        Files::new(handles, Vec::new()),
         TestStamper::at(noon()),
     )
 }
@@ -630,10 +679,7 @@ fn a_change_and_its_event_commit_together_and_are_delivered_after_a_crash() {
         "the change and its row are in the one file"
     );
 
-    let files = Files {
-        handles,
-        locked: vec!["tasks", "meals"],
-    };
+    let files = Files::new(handles, vec!["tasks", "meals"]);
     let mut code = Code::default();
     let locked = deliver(&registry, &files, &mut code, &mut stamper);
     assert_eq!(
@@ -666,10 +712,7 @@ fn a_change_and_its_event_commit_together_and_are_delivered_after_a_crash() {
             registry.open::<Write>(&file, &KEY).expect("open again")
         })
         .collect();
-    let files = Files {
-        handles,
-        locked: Vec::new(),
-    };
+    let files = Files::new(handles, Vec::new());
     let report = deliver(&registry, &files, &mut code, &mut stamper);
     assert_eq!(report.closed, [event]);
     assert_eq!(titles(files.of("tasks"), "tasks"), 1);
@@ -706,10 +749,10 @@ fn delivery_waits_for_the_migrations_of_the_source_and_the_consumer() {
     let tasks_file = new_file(&directory, tasks, Partition::Household, 1);
     let source = vilicus_storage::open::<Write>(&notes_file, &KEY).expect("open");
     let (_, event, _) = add_note(&source, notes, &own_action(ella()), &mut stamper, ADDED);
-    let files = Files {
-        handles: vec![vilicus_storage::open::<Write>(&tasks_file, &KEY).expect("open")],
-        locked: Vec::new(),
-    };
+    let files = Files::new(
+        vec![vilicus_storage::open::<Write>(&tasks_file, &KEY).expect("open")],
+        Vec::new(),
+    );
     let mut code = Code::default();
     let mut links = Links {
         source: notes_file.clone(),
@@ -719,6 +762,7 @@ fn delivery_waits_for_the_migrations_of_the_source_and_the_consumer() {
         &registry,
         &source,
         &files,
+        &files.boundary(),
         &mut code,
         &mut links,
         &mut stamper,
@@ -745,6 +789,7 @@ fn delivery_waits_for_the_migrations_of_the_source_and_the_consumer() {
         &registry,
         &source,
         &files,
+        &files.boundary(),
         &mut code,
         &mut links,
         &mut stamper,
@@ -753,14 +798,15 @@ fn delivery_waits_for_the_migrations_of_the_source_and_the_consumer() {
     assert_eq!(outcomes(&waiting), [(event, "tasks.react", "not ready")]);
     drop(files);
     migrate(&tasks_file, tasks);
-    let files = Files {
-        handles: vec![registry.open::<Write>(&tasks_file, &KEY).expect("open")],
-        locked: Vec::new(),
-    };
+    let files = Files::new(
+        vec![registry.open::<Write>(&tasks_file, &KEY).expect("open")],
+        Vec::new(),
+    );
     let delivered = deliver_outbox(
         &registry,
         &source,
         &files,
+        &files.boundary(),
         &mut code,
         &mut links,
         &mut stamper,
@@ -872,92 +918,83 @@ fn a_consumer_processing_an_event_twice_produces_one_effect() {
 
 #[test]
 fn a_consumer_failing_an_event_five_times_dead_letters_it_and_later_events_proceed() {
-    for panics in [false, true] {
-        let (registry, files, mut stamper) = standard(&format!("dead-{panics}"));
-        let handle = files.of("notes");
-        let (_, failing, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
-        let (_, later, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
-        let mut code = Code {
-            panics,
-            ..Code::default()
-        };
-        code.failures
-            .insert(("tasks.react".into(), failing), u32::MAX);
-        for attempt in 1..MAX_DELIVERY_ATTEMPTS {
-            let report = deliver(&registry, &files, &mut code, &mut stamper);
-            let tasks: Vec<_> = report
-                .deliveries
-                .iter()
-                .filter(|delivery| delivery.consumer == "tasks.react")
-                .collect();
-            assert!(
-                matches!(
-                    &tasks[0].outcome,
-                    DeliveryOutcome::Failed { attempts, cause }
-                        if *attempts == attempt
-                            && matches!(
-                                (cause, panics),
-                                (FailureCause::Panicked, true)
-                                    | (FailureCause::Refused(RecordError::Aborted(_)), false)
-                            )
-                ),
-                "{:?}",
-                tasks[0].outcome
-            );
-            assert!(matches!(tasks[1].outcome, DeliveryOutcome::Waiting));
-            assert!(report.alerts.is_empty());
-        }
-        let last = deliver(&registry, &files, &mut code, &mut stamper);
-        let letters = handle.dead_letters().expect("read");
-        assert_eq!(letters.len(), 1);
-        let letter = &letters[0];
-        assert_eq!(
-            (letter.event, letter.consumer.as_str(), letter.attempts),
-            (failing, "tasks.react", MAX_DELIVERY_ATTEMPTS)
-        );
-        assert_eq!(
-            outcomes(&last),
-            [
-                (failing, "tasks.react", "dead letter"),
-                (later, "tasks.react", "delivered"),
-            ],
-            "the later event proceeds in the same pass"
-        );
-        assert_eq!(
-            last.alerts,
-            [InstanceAdminAlert::DeadLetter {
-                module: ModuleName::from_static("notes"),
-                partition: Partition::Household,
-                file_name: "notes.household.db".into(),
-                dead_letter: letter.id,
-                event: failing,
-                topic: ADDED.into(),
-                consumer: "tasks.react".into(),
-            }]
-        );
-        assert_eq!(
-            last.closed,
-            [failing, later],
-            "a dead letter closes its delivery"
-        );
-        assert_eq!(
-            handle
-                .delivery(failing, "tasks.react")
-                .expect("read")
-                .map(|d| d.state),
-            Some(DeliveryState::DeadLetter)
-        );
-        assert_eq!(
-            titles(files.of("tasks"), "tasks"),
-            1,
-            "the consumer tolerates the gap"
-        );
+    let (registry, files, mut stamper) = standard("dead");
+    let handle = files.of("notes");
+    let (_, failing, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let (_, later, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let mut code = Code::default();
+    code.failures
+        .insert(("tasks.react".into(), failing), u32::MAX);
+    for attempt in 1..MAX_DELIVERY_ATTEMPTS {
+        let report = deliver(&registry, &files, &mut code, &mut stamper);
+        let tasks: Vec<_> = report
+            .deliveries
+            .iter()
+            .filter(|delivery| delivery.consumer == "tasks.react")
+            .collect();
         assert!(
-            deliver(&registry, &files, &mut code, &mut stamper)
-                .deliveries
-                .is_empty()
+            matches!(
+                &tasks[0].outcome,
+                DeliveryOutcome::Failed { attempts, cause }
+                    if *attempts == attempt
+                        && matches!(cause, FailureCause::Refused(RecordError::Aborted(_)))
+            ),
+            "{:?}",
+            tasks[0].outcome
         );
+        assert!(matches!(tasks[1].outcome, DeliveryOutcome::Waiting));
+        assert!(report.alerts.is_empty());
     }
+    let last = deliver(&registry, &files, &mut code, &mut stamper);
+    let letters = handle.dead_letters().expect("read");
+    assert_eq!(letters.len(), 1);
+    let letter = &letters[0];
+    assert_eq!(
+        (letter.event, letter.consumer.as_str(), letter.attempts),
+        (failing, "tasks.react", MAX_DELIVERY_ATTEMPTS)
+    );
+    assert_eq!(
+        outcomes(&last),
+        [
+            (failing, "tasks.react", "dead letter"),
+            (later, "tasks.react", "delivered"),
+        ],
+        "the later event proceeds in the same pass"
+    );
+    assert_eq!(
+        last.alerts,
+        [InstanceAdminAlert::DeadLetter {
+            module: ModuleName::from_static("notes"),
+            partition: Partition::Household,
+            file_name: "notes.household.db".into(),
+            dead_letter: letter.id,
+            event: failing,
+            topic: ADDED.into(),
+            consumer: "tasks.react".into(),
+        }]
+    );
+    assert_eq!(
+        last.closed,
+        [failing, later],
+        "a dead letter closes its delivery"
+    );
+    assert_eq!(
+        handle
+            .delivery(failing, "tasks.react")
+            .expect("read")
+            .map(|d| d.state),
+        Some(DeliveryState::DeadLetter)
+    );
+    assert_eq!(
+        titles(files.of("tasks"), "tasks"),
+        1,
+        "the consumer tolerates the gap"
+    );
+    assert!(
+        deliver(&registry, &files, &mut code, &mut stamper)
+            .deliveries
+            .is_empty()
+    );
 }
 
 // AC5
@@ -967,14 +1004,14 @@ fn a_link_is_registered_after_the_commit_in_the_partition_that_owns_the_data() {
     let directory = scratch_dir("links");
     let registry = registry(vec![notes(), tasks(), meals()]);
     let mut stamper = TestStamper::at(noon());
-    let files = Files {
-        handles: partition_files(&directory, Partition::Household, &registry),
-        locked: Vec::new(),
-    };
-    let elsewhere = Files {
-        handles: partition_files(&directory, Partition::Member(ella()), &registry),
-        locked: Vec::new(),
-    };
+    let files = Files::new(
+        partition_files(&directory, Partition::Household, &registry),
+        Vec::new(),
+    );
+    let elsewhere = Files::new(
+        partition_files(&directory, Partition::Member(ella()), &registry),
+        Vec::new(),
+    );
     let insert_task = |handle: &Handle<Write>, stamper: &mut TestStamper| {
         let (_, result) = run(handle, tasks(), &own_action(ella()), stamper, |records| {
             records.insert("tasks", &title("Courses"), &[])
@@ -1022,15 +1059,13 @@ fn a_link_is_registered_after_the_commit_in_the_partition_that_owns_the_data() {
         source: source.file().clone(),
         registered: Vec::new(),
     };
-    let locked_meals = Files {
-        handles: files.handles,
-        locked: vec!["meals"],
-    };
+    let locked_meals = Files::new(files.handles, vec!["meals"]);
     let mut code = Code::default();
     let report = deliver_outbox(
         &registry,
         locked_meals.of("notes"),
         &locked_meals,
+        &locked_meals.boundary(),
         &mut code,
         &mut table,
         &mut stamper,
@@ -1092,14 +1127,12 @@ fn a_link_is_registered_after_the_commit_in_the_partition_that_owns_the_data() {
             (waiting, OutboxState::Pending),
         ]
     );
-    let unlocked = Files {
-        handles: locked_meals.handles,
-        locked: Vec::new(),
-    };
+    let unlocked = Files::new(locked_meals.handles, Vec::new());
     let report = deliver_outbox(
         &registry,
         unlocked.of("notes"),
         &unlocked,
+        &unlocked.boundary(),
         &mut code,
         &mut table,
         &mut stamper,
@@ -1277,14 +1310,14 @@ fn no_event_is_delivered_outside_its_source_partition() {
     let directory = scratch_dir("partitions");
     let registry = registry(vec![notes(), tasks(), meals()]);
     let mut stamper = TestStamper::at(noon());
-    let household = Files {
-        handles: partition_files(&directory, Partition::Household, &registry),
-        locked: Vec::new(),
-    };
-    let personal = Files {
-        handles: partition_files(&directory, Partition::Member(ella()), &registry),
-        locked: Vec::new(),
-    };
+    let household = Files::new(
+        partition_files(&directory, Partition::Household, &registry),
+        Vec::new(),
+    );
+    let personal = Files::new(
+        partition_files(&directory, Partition::Member(ella()), &registry),
+        Vec::new(),
+    );
     let (_, household_event, _) = add_note(
         household.of("notes"),
         notes(),
@@ -1306,11 +1339,11 @@ fn no_event_is_delivered_outside_its_source_partition() {
         consumers: &'a Files,
     }
     impl ConsumerFiles for Mixed<'_> {
-        fn ready(&self, module: &ModuleName) -> Option<&Handle<Write>> {
+        fn open(&self, module: &ModuleName) -> Option<&Handle<Write>> {
             if module.as_str() == "notes" {
-                self.source.ready(module)
+                self.source.open(module)
             } else {
-                self.consumers.ready(module)
+                self.consumers.open(module)
             }
         }
     }
@@ -1324,6 +1357,7 @@ fn no_event_is_delivered_outside_its_source_partition() {
         &registry,
         household.of("notes"),
         &mixed,
+        &household.boundary(),
         &mut code,
         &mut links,
         &mut stamper,
@@ -1338,7 +1372,7 @@ fn no_event_is_delivered_outside_its_source_partition() {
     /// Files that offer another module's file for every consumer.
     struct Wrong<'a>(&'a Files);
     impl ConsumerFiles for Wrong<'_> {
-        fn ready(&self, _: &ModuleName) -> Option<&Handle<Write>> {
+        fn open(&self, _: &ModuleName) -> Option<&Handle<Write>> {
             Some(self.0.of("meals"))
         }
     }
@@ -1346,6 +1380,7 @@ fn no_event_is_delivered_outside_its_source_partition() {
         &registry,
         household.of("notes"),
         &Wrong(&household),
+        &household.boundary(),
         &mut code,
         &mut links,
         &mut stamper,
@@ -1376,6 +1411,7 @@ fn no_event_is_delivered_outside_its_source_partition() {
         &registry,
         personal.of("notes"),
         &personal,
+        &personal.boundary(),
         &mut code,
         &mut no_links(&personal),
         &mut stamper,
@@ -1709,6 +1745,7 @@ fn a_failing_link_table_keeps_the_request_and_the_pass_goes_on() {
         &registry,
         handle,
         &files,
+        &files.boundary(),
         &mut Code::default(),
         &mut Unavailable,
         &mut stamper,
@@ -1727,6 +1764,7 @@ fn a_failing_link_table_keeps_the_request_and_the_pass_goes_on() {
         &registry,
         handle,
         &files,
+        &files.boundary(),
         &mut code,
         &mut table,
         &mut stamper,
@@ -1783,6 +1821,7 @@ fn a_link_from_a_record_deleted_before_the_pass_is_refused() {
         &registry,
         handle,
         &files,
+        &files.boundary(),
         &mut Code::default(),
         &mut table,
         &mut stamper,
@@ -1836,6 +1875,7 @@ fn a_panic_of_the_core_is_not_counted_as_a_consumers_failure() {
             &registry,
             handle,
             &files,
+            &files.boundary(),
             &mut code,
             &mut links,
             &mut failing,
@@ -1862,10 +1902,10 @@ fn a_module_consumes_its_own_topic() {
     }];
     let own = declare("notes", NOTES, OWN_TOPICS, OWN_CONSUMERS, &[]);
     let registry = registry(vec![own]);
-    let files = Files {
-        handles: partition_files(&scratch_dir("own-topic"), Partition::Household, &registry),
-        locked: Vec::new(),
-    };
+    let files = Files::new(
+        partition_files(&scratch_dir("own-topic"), Partition::Household, &registry),
+        Vec::new(),
+    );
     let mut stamper = TestStamper::at(noon());
     let handle = files.of("notes");
     let (_, event, call_id) = add_note(handle, own, &own_action(ella()), &mut stamper, ADDED);
@@ -1987,5 +2027,400 @@ fn a_rule_and_an_ai_task_emit_events() {
             ),
         ],
         "the rule's validating adult; the task's member, from a tainted session"
+    );
+}
+
+// Story 3.9: delivery reads the availability states, consumers run inside the boundary of AD-9,
+// and an event behind a consumer in a lasting state is dead-lettered past the retention (D150).
+
+/// A monotonic clock a consumer's code moves, shared with the boundary of the pass.
+#[derive(Default)]
+struct Ticking {
+    millis: AtomicU64,
+}
+
+impl Ticking {
+    fn advance(&self, by: Duration) {
+        let millis = u64::try_from(by.as_millis()).expect("a short time");
+        self.millis.fetch_add(millis, Ordering::SeqCst);
+    }
+}
+
+impl MonotonicClock for Ticking {
+    fn now(&self) -> Duration {
+        Duration::from_millis(self.millis.load(Ordering::SeqCst))
+    }
+}
+
+/// Puts `module`'s file of `files` in `state`, through the transitions the Core makes.
+fn put(files: &Files, module: &'static str, state: AvailabilityState) {
+    let name = ModuleName::from_static(module);
+    let partition = files.of(module).file().partition();
+    let stage = |stage| {
+        files
+            .states
+            .set_stage(&name, partition, stage)
+            .expect("no call runs");
+    };
+    match state {
+        AvailabilityState::Locked => stage(Stage::Locked),
+        AvailabilityState::Opening => stage(Stage::Opening),
+        AvailabilityState::ReKeying => stage(Stage::ReKeying),
+        AvailabilityState::Migrating => stage(Stage::Migrating),
+        AvailabilityState::Ready => stage(Stage::Ready),
+        AvailabilityState::FailedMigration => stage(Stage::FailedMigration),
+        AvailabilityState::NewerThanCode => stage(Stage::NewerThanCode),
+        AvailabilityState::Faulted => {
+            files.states.mark_faulted(&name, partition, Fault::Panicked);
+        }
+        AvailabilityState::Deactivated => files.states.deactivate(&name, partition),
+    }
+}
+
+/// The state each delivery of `consumer` in `report` was not ready in, or how it ended.
+fn states_of(report: &DeliveryReport, consumer: &str) -> Vec<(Id, String)> {
+    report
+        .deliveries
+        .iter()
+        .filter(|delivery| delivery.consumer == consumer)
+        .map(|delivery| {
+            let outcome = match &delivery.outcome {
+                DeliveryOutcome::NotReady { state } => format!("not ready: {state}"),
+                DeliveryOutcome::Expired { state, .. } => format!("expired: {state}"),
+                DeliveryOutcome::Failed { attempts, cause } => {
+                    format!("failed {attempts}: {cause:?}")
+                }
+                DeliveryOutcome::Delivered => "delivered".to_owned(),
+                DeliveryOutcome::AlreadyConsumed => "already consumed".to_owned(),
+                DeliveryOutcome::DeadLettered { .. } => "dead letter".to_owned(),
+                DeliveryOutcome::Waiting => "waiting".to_owned(),
+            };
+            (delivery.event, outcome)
+        })
+        .collect()
+}
+
+fn not_ready_states() -> impl Iterator<Item = AvailabilityState> {
+    AvailabilityState::ALL
+        .iter()
+        .copied()
+        .filter(|state| *state != AvailabilityState::Ready)
+}
+
+/// AC2: for every state but `ready`, as the availability states report it, an event due to the
+/// consumer stays in the source outbox: its code does not run, no attempt is recorded, the event
+/// stays pending, and the other consumers are delivered; once the file is ready it is delivered.
+#[test]
+fn an_event_to_a_consumer_that_is_not_ready_stays_without_a_failed_attempt() {
+    for state in not_ready_states() {
+        let (registry, files, mut stamper) = standard(&format!("not-ready-{state}"));
+        put(&files, "tasks", state);
+        let handle = files.of("notes");
+        let (_, event, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+        let mut code = Code::default();
+        let report = deliver(&registry, &files, &mut code, &mut stamper);
+        assert_eq!(
+            states_of(&report, "tasks.react"),
+            [(event, format!("not ready: {state}"))]
+        );
+        assert_eq!(
+            states_of(&report, "meals.plan"),
+            [(event, "delivered".to_owned())]
+        );
+        assert!(report.alerts.is_empty(), "{state}");
+        assert!(report.closed.is_empty(), "{state}");
+        assert_eq!(handle.delivery(event, "tasks.react").expect("read"), None);
+        assert!(
+            code.seen
+                .iter()
+                .all(|(consumer, ..)| consumer != "tasks.react")
+        );
+        assert_eq!(titles(files.of("tasks"), "tasks"), 0);
+        let ready = Files::new(files.handles, Vec::new());
+        let report = deliver(&registry, &ready, &mut code, &mut stamper);
+        assert_eq!(
+            states_of(&report, "tasks.react"),
+            [(event, "delivered".to_owned())],
+            "{state}"
+        );
+        assert_eq!(report.closed, [event]);
+    }
+}
+
+/// D150: an event still pending past the outbox's retention for a consumer in a lasting state is
+/// moved to that consumer's dead letters, without an attempt and with an alert, and the
+/// consumer's later events are not held back by it; behind a state that is not lasting, or within
+/// the retention, it stays.
+#[test]
+fn an_event_outliving_the_retention_behind_a_lasting_state_is_dead_lettered() {
+    let retention = i64::try_from(OUTBOX_RETENTION.as_millis()).expect("in range");
+    for state in not_ready_states() {
+        let (registry, files, mut stamper) = standard(&format!("expired-{state}"));
+        put(&files, "tasks", state);
+        let handle = files.of("notes");
+        let (_, old, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+        stamper.later(retention);
+        let (_, young, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+        let mut code = Code::default();
+        let within = deliver(&registry, &files, &mut code, &mut stamper);
+        assert_eq!(
+            states_of(&within, "tasks.react"),
+            [
+                (old, format!("not ready: {state}")),
+                (young, "waiting".to_owned())
+            ],
+            "{state}: an event exactly as old as the retention stays"
+        );
+        stamper.later(1);
+        let past = deliver(&registry, &files, &mut code, &mut stamper);
+        let letters = handle.dead_letters().expect("read");
+        if state.is_lasting() {
+            assert_eq!(
+                states_of(&past, "tasks.react"),
+                [
+                    (old, format!("expired: {state}")),
+                    (young, format!("not ready: {state}"))
+                ],
+                "{state}"
+            );
+            assert_eq!(letters.len(), 1, "{state}");
+            assert_eq!(
+                (
+                    letters[0].event,
+                    letters[0].consumer.as_str(),
+                    letters[0].attempts
+                ),
+                (old, "tasks.react", 0)
+            );
+            assert_eq!(
+                past.alerts,
+                [InstanceAdminAlert::EventExpired {
+                    module: ModuleName::from_static("notes"),
+                    partition: Partition::Household,
+                    file_name: "notes.household.db".into(),
+                    dead_letter: letters[0].id,
+                    event: old,
+                    topic: ADDED.into(),
+                    consumer: "tasks.react".into(),
+                    state,
+                }]
+            );
+            assert_eq!(
+                past.closed,
+                [old],
+                "{state}: every consumer is done with it"
+            );
+        } else {
+            assert_eq!(
+                states_of(&past, "tasks.react"),
+                [
+                    (old, format!("not ready: {state}")),
+                    (young, "waiting".to_owned())
+                ],
+                "{state}: a state on its way to serving keeps its events"
+            );
+            assert!(letters.is_empty(), "{state}");
+            assert!(past.alerts.is_empty(), "{state}");
+            assert!(past.closed.is_empty(), "{state}");
+        }
+    }
+}
+
+/// AC4 for a consumer: its panic is caught, its call rolled back, its module faulted for the
+/// partition with an alert, the attempt counted; its later events then wait for it as for a
+/// consumer that is not ready, without a further attempt, while the other consumers go on.
+#[test]
+fn a_panicking_consumer_faults_its_module_and_its_events_wait() {
+    let (registry, files, mut stamper) = standard("consumer-panic");
+    let handle = files.of("notes");
+    let (_, first, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let (_, second, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let mut code = Code {
+        panics: true,
+        ..Code::default()
+    };
+    code.failures
+        .insert(("tasks.react".into(), first), u32::MAX);
+    let report = deliver(&registry, &files, &mut code, &mut stamper);
+    assert_eq!(
+        states_of(&report, "tasks.react"),
+        [
+            (first, "failed 1: Panicked".to_owned()),
+            (second, "waiting".to_owned())
+        ]
+    );
+    assert_eq!(
+        states_of(&report, "meals.plan"),
+        [
+            (first, "delivered".to_owned()),
+            (second, "delivered".to_owned())
+        ]
+    );
+    assert_eq!(
+        report.alerts,
+        [InstanceAdminAlert::ModuleFaulted {
+            module: ModuleName::from_static("tasks"),
+            partition: Partition::Household,
+            file_name: "tasks.household.db".into(),
+            fault: Fault::Panicked,
+        }]
+    );
+    assert_eq!(titles(files.of("tasks"), "tasks"), 0, "rolled back");
+    assert_eq!(
+        files
+            .states
+            .state(&ModuleName::from_static("tasks"), Partition::Household),
+        AvailabilityState::Faulted
+    );
+    let seen = code.seen.len();
+    let next = deliver(&registry, &files, &mut code, &mut stamper);
+    assert_eq!(
+        states_of(&next, "tasks.react"),
+        [
+            (first, "not ready: faulted".to_owned()),
+            (second, "waiting".to_owned())
+        ]
+    );
+    assert!(next.alerts.is_empty(), "the module faulted once");
+    assert_eq!(code.seen.len(), seen, "no further call reaches the module");
+    assert_eq!(
+        handle
+            .delivery(first, "tasks.react")
+            .expect("read")
+            .map(|delivery| delivery.attempts),
+        Some(1)
+    );
+}
+
+/// AC5 for a consumer: one that runs past the handler time budget is rolled back, its module
+/// faulted for the partition with an alert, and it receives no further event there.
+#[test]
+fn a_consumer_running_past_its_budget_faults_its_module() {
+    let (registry, files, mut stamper) = standard("consumer-overrun");
+    let handle = files.of("notes");
+    let (_, first, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let (_, second, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let clock = std::sync::Arc::new(Ticking::default());
+    let mut code = Code {
+        slow: Some(std::sync::Arc::clone(&clock)),
+        ..Code::default()
+    };
+    let boundary = Boundary {
+        states: &files.states,
+        clock: &*clock,
+        budget: HANDLER_TIME_BUDGET,
+    };
+    let mut links = no_links(&files);
+    let report = deliver_outbox(
+        &registry,
+        handle,
+        &files,
+        &boundary,
+        &mut code,
+        &mut links,
+        &mut stamper,
+    )
+    .expect("a delivery pass");
+    assert_eq!(
+        states_of(&report, "tasks.react"),
+        [
+            (first, "failed 1: TimeBudget".to_owned()),
+            (second, "waiting".to_owned())
+        ]
+    );
+    assert_eq!(
+        states_of(&report, "meals.plan")[0].1,
+        "failed 1: TimeBudget",
+        "the meals consumer overran too"
+    );
+    assert!(report.alerts.contains(&InstanceAdminAlert::ModuleFaulted {
+        module: ModuleName::from_static("tasks"),
+        partition: Partition::Household,
+        file_name: "tasks.household.db".into(),
+        fault: Fault::TimeBudget,
+    }));
+    assert_eq!(titles(files.of("tasks"), "tasks"), 0, "rolled back");
+    let next = deliver(&registry, &files, &mut code, &mut stamper);
+    assert_eq!(
+        states_of(&next, "tasks.react"),
+        [
+            (first, "not ready: faulted".to_owned()),
+            (second, "waiting".to_owned())
+        ]
+    );
+}
+
+/// The bound consumers of the handler table are what the bus runs: a consumer's function writes
+/// through the consumer's call, and a bound function that panics faults its module.
+#[test]
+fn the_handler_table_runs_the_bound_consumers() {
+    fn react(event: &Event<'_>, records: &mut dyn Records) -> Result<(), WriteError> {
+        records.insert(
+            "tasks",
+            &[("title", Value::Text(format!("after {}", event.topic)))],
+            &[event.record],
+        )?;
+        Ok(())
+    }
+    fn forget(_: &Event<'_>, _: &mut dyn Records) -> Result<(), WriteError> {
+        Ok(())
+    }
+    fn plan(_: &Event<'_>, _: &mut dyn Records) -> Result<(), WriteError> {
+        panic!("the meals consumer fails");
+    }
+    const TASKS_CODE: ModuleCode = ModuleCode {
+        module: "tasks",
+        tools: &[],
+        undo_handlers: &[],
+        consumers: &[
+            ConsumerHandler {
+                consumer: "react",
+                consume: react,
+            },
+            ConsumerHandler {
+                consumer: "forget",
+                consume: forget,
+            },
+        ],
+    };
+    const MEALS_CODE: ModuleCode = ModuleCode {
+        module: "meals",
+        tools: &[],
+        undo_handlers: &[],
+        consumers: &[ConsumerHandler {
+            consumer: "plan",
+            consume: plan,
+        }],
+    };
+    let (registry, files, mut stamper) = standard("bound");
+    let mut handlers =
+        Handlers::new(registry, &[&TASKS_CODE, &MEALS_CODE]).expect("the code binds");
+    let handle = files.of("notes");
+    let (_, event, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let mut links = no_links(&files);
+    let report = deliver_outbox(
+        &registry,
+        handle,
+        &files,
+        &files.boundary(),
+        &mut handlers,
+        &mut links,
+        &mut stamper,
+    )
+    .expect("a delivery pass");
+    assert_eq!(
+        states_of(&report, "tasks.react"),
+        [(event, "delivered".to_owned())]
+    );
+    assert_eq!(
+        states_of(&report, "meals.plan"),
+        [(event, "failed 1: Panicked".to_owned())]
+    );
+    assert_eq!(titles(files.of("tasks"), "tasks"), 1);
+    assert_eq!(
+        files
+            .states
+            .state(&ModuleName::from_static("meals"), Partition::Household),
+        AvailabilityState::Faulted
     );
 }

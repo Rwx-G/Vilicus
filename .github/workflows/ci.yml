@@ -43,6 +43,8 @@ jobs:
         run: python3 ci/check_supply_chain.py
       - name: Check vendor/ against Cargo.lock (D28)
         run: python3 ci/check_supply_chain.py --vendor
+      - name: Check the vendored SQLCipher source against its hashes (D143)
+        run: python3 ci/check_sqlcipher_source.py
       - name: Check that no release artefact carries test code (FR-109, D102)
         run: python3 ci/check_packaging.py
       - name: Check that every release gate carries a target tag (FR-109)

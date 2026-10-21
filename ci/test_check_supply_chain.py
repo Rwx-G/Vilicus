@@ -264,6 +264,7 @@ GATE_JOBS = {
             "python3 ci/check_workspace.py",
             "python3 ci/check_supply_chain.py",
             "python3 ci/check_supply_chain.py --vendor",
+            "python3 ci/check_sqlcipher_source.py",
             "python3 ci/check_packaging.py",
             "python3 ci/release_gates.py check",
         ),

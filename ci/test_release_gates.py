@@ -144,6 +144,12 @@ class ArtefactTest(unittest.TestCase):
         for target, command in zip(rg.TARGETS, commands):
             with self.subTest(target=target):
                 self.assertEqual(command[:5], ["cargo", "build", "--frozen", "--config", str(cw.VENDORED_CONFIG_FILE)])
+                # Review of Story 3.10: a workspace build unifies the features test crates enable,
+                # `testing` of vilicus-core among them, into the shipped binary; each artefact is
+                # built from its own packages only, with no feature flag.
+                self.assertEqual(command[5::2], ["--package"] * len(packages[target]))
+                for unified in ("--workspace", "--all", "--all-features", "--features", "-F"):
+                    self.assertNotIn(unified, command)
                 built = set(command[6::2])
                 self.assertEqual(built, set(packages[target]))
                 if target == "package":

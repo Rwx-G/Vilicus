@@ -2,7 +2,7 @@
 title: 'Structured field validation and reviewed vocabularies'
 epic: 3
 story: 4
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-58, DC-53, DC-59, D98, D104, I40]

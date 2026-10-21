@@ -42,3 +42,6 @@ aws-lc-sys = "dependency of aws-lc-rs; build script compiles the bundled AWS-LC 
 # The fuzzing runtime of vilicus-fuzz (Story 2.7, owner approval), behind its `libfuzzer` feature,
 # which only the nightly `fuzz` job enables. Never in a release artefact.
 libfuzzer-sys = "fuzzing runtime of vilicus-fuzz; with its default `link_libfuzzer` feature, the build script compiles the bundled libFuzzer C++ sources (libfuzzer/*.cpp) with cc as C++17 into OUT_DIR and links them statically, or links the library CUSTOM_LIBFUZZER_PATH names when set (the fuzz job never sets it); no network"
+# SQLite access for vilicus-storage (Story 3.1, spine Stack), with SQLCipher 4.19.0 compiled from the
+# vendored amalgamation of crates/vilicus-storage/sqlcipher/ (D143).
+libsqlite3-sys = "dependency of rusqlite with its `sqlcipher` and `bundled_bindings` features (no `bundled`): the build script copies the prebuilt bindings of its sqlcipher/ directory to OUT_DIR, probes pkg-config for a `sqlcipher` library (none in the pinned image or on the CI runner) and prints `rustc-link-lib=dylib=sqlcipher`, which resolves to the archive vilicus-storage builds; it compiles nothing, and its own SQLCipher 4.14.0 sources are not used; no network"

@@ -48,6 +48,11 @@ version = "0.46.0"
 criteria = "safe-to-run"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
 
+[[exemptions.bitflags]]
+version = "2.13.2"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.40.2 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff bitflags 2.11.1 2.13.2` (12 files changed, 641 insertions(+), 92 deletions(-))."
+
 [[exemptions.cc]]
 version = "1.9.0"
 criteria = "safe-to-deploy"
@@ -133,6 +138,11 @@ version = "0.4.13"
 criteria = "safe-to-run"
 notes = "Not reviewed in this project (Story 2.7), exempted at this exact version only. Fuzzing tree of vilicus-fuzz (owner approval), never in a release artefact; its build script compiles the bundled libFuzzer C++ sources with cc; required by vilicus-fuzz. cargo vet suggests `cargo vet diff libfuzzer-sys 0.4.7 0.4.13` (39 files changed, 728 insertions(+), 657 deletions(-))."
 
+[[exemptions.libsqlite3-sys]]
+version = "0.38.2"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. The SQLite bindings of rusqlite 0.40.2 (spine Stack), used with its `sqlcipher` and `bundled_bindings` features: its build script probes pkg-config for sqlcipher, copies prebuilt bindings and asks for -lsqlcipher; the SQLCipher it ships is not compiled (vilicus-storage compiles the vendored 4.19.0, D143); required by rusqlite. cargo vet suggests `cargo vet inspect libsqlite3-sys 0.38.2` (598760 lines, mostly the unused SQLite and SQLCipher amalgamations)."
+
 [[exemptions.log]]
 version = "0.4.34"
 criteria = "safe-to-deploy"
@@ -168,6 +178,11 @@ version = "6.0.0"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by getrandom. cargo vet suggests `cargo vet inspect r-efi 6.0.0` (9953 lines)."
 
+[[exemptions.rusqlite]]
+version = "0.40.2"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. The SQLite crate of the spine Stack, a normal dependency of vilicus-storage. cargo vet suggests `cargo vet inspect rusqlite 0.40.2` (23729 lines)."
+
 [[exemptions.rustversion]]
 version = "1.0.23"
 criteria = "safe-to-deploy"
@@ -197,6 +212,11 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 version = "0.4.12"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by futures-util. cargo vet suggests `cargo vet diff slab 0.4.8 0.4.12` (7 files changed, 256 insertions(+), 90 deletions(-))."
+
+[[exemptions.smallvec]]
+version = "1.16.3"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.40.2 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff smallvec 1.15.2 1.16.3` (6 files changed, 618 insertions(+), 421 deletions(-))."
 
 [[exemptions.syn]]
 version = "2.0.119"
@@ -285,8 +305,8 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 
 [[exemptions.zeroize]]
 version = "1.9.1"
-criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by aws-lc-rs. cargo vet suggests `cargo vet diff zeroize 1.8.2 1.9.1` (13 files changed, 635 insertions(+), 217 deletions(-))."
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Stories 2.5 and 3.1), exempted at this exact version only. A normal dependency of vilicus-storage since Story 3.1 (key buffers wiped on drop, spine Stack), so safe-to-deploy; also in the dev-dependency tree of vilicus-proto, required by aws-lc-rs. cargo vet suggests `cargo vet diff zeroize 1.8.2 1.9.1` (13 files changed, 635 insertions(+), 217 deletions(-))."
 
 [[exemptions.zmij]]
 version = "1.0.23"

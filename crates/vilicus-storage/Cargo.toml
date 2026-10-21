@@ -20,3 +20,5 @@ undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 vilicus-types.workspace = true
+rusqlite.workspace = true
+zeroize.workspace = true

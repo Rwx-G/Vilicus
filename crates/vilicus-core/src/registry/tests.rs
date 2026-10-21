@@ -156,6 +156,8 @@ fn sample() -> ModuleDeclaration {
             ))),
         ]),
         matrix_sections: &[],
+        topics: &[],
+        consumers: &[],
         tools: &[],
     }
 }
@@ -193,6 +195,8 @@ const EMPTY: ModuleDeclaration = ModuleDeclaration {
     fts5_tables: &[],
     migrations: &[],
     matrix_sections: &[],
+    topics: &[],
+    consumers: &[],
     tools: &[],
 };
 
@@ -218,6 +222,8 @@ const LITERAL: ModuleDeclaration = ModuleDeclaration {
         ),
     }],
     matrix_sections: &[],
+    topics: &[],
+    consumers: &[],
     tools: &[],
 };
 
@@ -1308,4 +1314,144 @@ fn an_index_a_migration_puts_on_a_shadow_table_is_refused() {
         "fts5-shadow-index",
     );
     assert!(matches!(&outcome, Err(FileError::Schema(_))), "{outcome:?}");
+}
+
+// Story 3.8: the access list of each topic decides which consumers its events reach (D20).
+
+/// A module that declares only `topics` and `consumers`.
+const fn events_only(
+    name: &'static str,
+    topics: &'static [vilicus_module_api::Topic],
+    consumers: &'static [vilicus_module_api::Consumer],
+) -> ModuleDeclaration {
+    ModuleDeclaration {
+        name,
+        tables: &[],
+        fts5_tables: &[],
+        migrations: &[],
+        matrix_sections: &[],
+        tools: &[],
+        topics,
+        consumers,
+    }
+}
+
+const NOTES: ModuleDeclaration = events_only(
+    "notes",
+    &[
+        vilicus_module_api::Topic {
+            name: "notes.note.added",
+            version: 1,
+            consumers: &["meals", "budget", "tasks"],
+        },
+        vilicus_module_api::Topic {
+            name: "notes.note.removed",
+            version: 1,
+            consumers: &["tasks"],
+        },
+    ],
+    &[],
+);
+
+const TASKS: ModuleDeclaration = events_only(
+    "tasks",
+    &[],
+    &[
+        vilicus_module_api::Consumer {
+            name: "react",
+            topic: "notes.note.added",
+        },
+        vilicus_module_api::Consumer {
+            name: "forget",
+            topic: "notes.note.removed",
+        },
+    ],
+);
+
+const MEALS: ModuleDeclaration = events_only(
+    "meals",
+    &[],
+    &[vilicus_module_api::Consumer {
+        name: "plan",
+        topic: "notes.note.added",
+    }],
+);
+
+const BUILT: Registry = match Registry::new(&[&NOTES, &TASKS, &MEALS]) {
+    Ok(registry) => registry,
+    Err(error) => panic!("{}", error.rule()),
+};
+
+#[test]
+fn a_topics_access_list_decides_which_consumers_its_events_reach() {
+    let receivers = |topic: &str| -> Vec<(&str, &str)> {
+        BUILT
+            .receivers(&NOTES, topic)
+            .into_iter()
+            .map(|(module, consumer)| (module.name, consumer.name))
+            .collect()
+    };
+    assert_eq!(
+        receivers("notes.note.added"),
+        [("meals", "plan"), ("tasks", "react")],
+        "in the order of the list; budget is not registered"
+    );
+    assert_eq!(receivers("notes.note.removed"), [("tasks", "forget")]);
+    assert!(receivers("notes.note.archived").is_empty());
+    assert!(
+        BUILT.receivers(&TASKS, "notes.note.added").is_empty(),
+        "only the emitter's declaration gives a topic receivers"
+    );
+    assert_eq!(
+        BUILT
+            .topic("notes.note.removed")
+            .map(|(module, topic)| (module.name, topic.version)),
+        Some(("notes", 1))
+    );
+    assert!(BUILT.topic("tasks.task.added").is_none());
+}
+
+#[test]
+fn a_consumer_needs_a_registered_topic_whose_access_list_names_its_module() {
+    const STRAY: ModuleDeclaration = events_only(
+        "meals",
+        &[],
+        &[vilicus_module_api::Consumer {
+            name: "forget",
+            topic: "notes.note.removed",
+        }],
+    );
+    let refused = RegistryError::ConsumerNotAllowed {
+        module: "meals",
+        topic: "notes.note.removed",
+    };
+    assert_eq!(Registry::new(&[&NOTES, &STRAY]).err(), Some(refused));
+    assert_eq!(
+        refused.to_string(),
+        "a consumer consumes a topic whose access list does not name its module: meals \
+         (notes.note.removed)"
+    );
+    const UNKNOWN: ModuleDeclaration = events_only(
+        "meals",
+        &[],
+        &[vilicus_module_api::Consumer {
+            name: "plan",
+            topic: "notes.note.archived",
+        }],
+    );
+    assert_eq!(
+        Registry::new(&[&NOTES, &UNKNOWN]).err(),
+        Some(RegistryError::UnknownTopic {
+            module: "meals",
+            topic: "notes.note.archived",
+        })
+    );
+    assert_eq!(
+        Registry::new(&[&TASKS]).err(),
+        Some(RegistryError::UnknownTopic {
+            module: "tasks",
+            topic: "notes.note.added",
+        }),
+        "a consumer of a module the registry does not hold"
+    );
 }

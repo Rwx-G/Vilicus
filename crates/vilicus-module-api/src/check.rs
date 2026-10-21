@@ -1,5 +1,6 @@
 //! The rules a module declaration must meet before the registry accepts it (FR-18, FR-21, FR-22,
-//! FR-58, FR-60, FR-68, AD-6, AD-8, AD-9, AD-48, I13, I18, D46, D98, D103, D104, D127), as `const`
+//! FR-24, FR-58, FR-60, FR-68, AD-6, AD-8, AD-9, AD-29, AD-48, I13, I18, D20, D46, D98, D103,
+//! D104, D127), as `const`
 //! functions: a module checks its own declaration in a `const` item, where a refusal stops the
 //! build, and the Core's registry runs the same check on every module it is built from.
 //!
@@ -16,6 +17,7 @@ use crate::declaration::{
     ENVELOPE, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table, ModuleDeclaration,
     Structured, Table,
 };
+use crate::event::{Consumer, Topic, is_topic};
 use crate::tool::{Confirmation, Tool};
 
 /// Longest identifier accepted for a table, a field, an FTS5 table or column, an enumeration
@@ -62,6 +64,8 @@ pub enum IdentifierKind {
     Tool,
     /// The undo handler a tool names.
     UndoHandler,
+    /// A consumer of events.
+    Consumer,
 }
 
 impl IdentifierKind {
@@ -75,6 +79,7 @@ impl IdentifierKind {
             Self::Vocabulary => "vocabulary name",
             Self::Tool => "tool",
             Self::UndoHandler => "undo handler",
+            Self::Consumer => "consumer",
         }
     }
 }
@@ -298,6 +303,46 @@ pub enum DeclarationError {
         /// The tool.
         tool: &'static str,
     },
+    /// A topic name is outside the grammar `<module>.<entity>.<past_verb>`, or a consumer names
+    /// such a topic.
+    InvalidTopic {
+        /// The topic.
+        topic: &'static str,
+    },
+    /// A module declares a topic of another module: the Core stamps the real emitter, so a
+    /// module emits its own topics only (D20).
+    ForeignTopic {
+        /// The topic.
+        topic: &'static str,
+    },
+    /// A topic declares payload version 0; versions start at 1 (AD-29).
+    TopicWithoutVersion {
+        /// The topic.
+        topic: &'static str,
+    },
+    /// Two topics of the module share a name.
+    DuplicateTopic {
+        /// The topic.
+        topic: &'static str,
+    },
+    /// A topic's access list names something other than a module name, or a module twice.
+    InvalidTopicConsumer {
+        /// The topic.
+        topic: &'static str,
+        /// The entry refused.
+        module: &'static str,
+    },
+    /// Two consumers of the module share a name.
+    DuplicateConsumer {
+        /// The consumer.
+        consumer: &'static str,
+    },
+    /// Two consumers of the module consume one topic: a module has one consumer per topic, so
+    /// each delivery to the module is one call.
+    TwoConsumersOfOneTopic {
+        /// The topic.
+        topic: &'static str,
+    },
 }
 
 impl DeclarationError {
@@ -364,6 +409,17 @@ impl DeclarationError {
                 "a tool's matrix row is in a section its module does not claim"
             }
             Self::InvalidMatrixAction { .. } => "a tool's matrix row has no valid action text",
+            Self::InvalidTopic { .. } => {
+                "a topic is outside the <module>.<entity>.<past_verb> grammar"
+            }
+            Self::ForeignTopic { .. } => "a module declares a topic of another module",
+            Self::TopicWithoutVersion { .. } => "a topic declares payload version 0",
+            Self::DuplicateTopic { .. } => "two topics share a name",
+            Self::InvalidTopicConsumer { .. } => {
+                "a topic's access list names something other than a module, or a module twice"
+            }
+            Self::DuplicateConsumer { .. } => "two consumers share a name",
+            Self::TwoConsumersOfOneTopic { .. } => "two consumers of a module consume one topic",
         }
     }
 }
@@ -424,6 +480,15 @@ impl fmt::Display for DeclarationError {
             Self::MatrixRowOutsideModuleSections { tool, section } => {
                 write!(formatter, ": {tool} (section {section})")
             }
+            Self::InvalidTopic { topic }
+            | Self::ForeignTopic { topic }
+            | Self::TopicWithoutVersion { topic }
+            | Self::DuplicateTopic { topic }
+            | Self::TwoConsumersOfOneTopic { topic } => write!(formatter, ": {topic:?}"),
+            Self::InvalidTopicConsumer { topic, module } => {
+                write!(formatter, ": {topic} ({module:?})")
+            }
+            Self::DuplicateConsumer { consumer } => write!(formatter, ": {consumer}"),
         }
     }
 }
@@ -478,6 +543,16 @@ impl ModuleDeclaration {
             }
             index += 1;
         }
+        index = 0;
+        while index < self.topics.len() {
+            check!(validate_topic(self, index));
+            index += 1;
+        }
+        index = 0;
+        while index < self.consumers.len() {
+            check!(validate_consumer(self.consumers, index));
+            index += 1;
+        }
         Ok(())
     }
 
@@ -508,6 +583,8 @@ impl ModuleDeclaration {
     ///         sha256: sha256_hex("bd3ae7e55c50de674128958bd6bdb1da23a2c490ad40895aeccdac1da6575bc7"),
     ///     }],
     ///     matrix_sections: &["7"],
+    ///     topics: &[],
+    ///     consumers: &[],
     ///     tools: &[Tool {
     ///         name: "create_note",
     ///         arguments: &[Field {
@@ -541,6 +618,8 @@ impl ModuleDeclaration {
     ///         sha256: sha256_hex("504c31b0d64a5a28102bc23da76c8128190f99fec66184760eb62fd388c051a6"),
     ///     }],
     ///     matrix_sections: &[],
+    ///     topics: &[],
+    ///     consumers: &[],
     ///     tools: &[],
     /// };
     /// const _: () = MODULE.assert_valid();
@@ -590,6 +669,8 @@ impl ModuleDeclaration {
     ///     fts5_tables: &[],
     ///     migrations: &[],
     ///     matrix_sections: &["10"],
+    ///     topics: &[],
+    ///     consumers: &[],
     ///     tools: &[Tool {
     ///         name: "install_plugin",
     ///         arguments: &[],
@@ -614,6 +695,8 @@ impl ModuleDeclaration {
     ///     fts5_tables: &[],
     ///     migrations: &[],
     ///     matrix_sections: &["2"],
+    ///     topics: &[],
+    ///     consumers: &[],
     ///     tools: &[Tool {
     ///         name: "purge_tasks",
     ///         arguments: &[],
@@ -1000,6 +1083,78 @@ const fn has_field(table: &Table, name: &str) -> bool {
 }
 
 /// The identifier grammar of [`DeclarationError::InvalidIdentifier`].
+/// The rules of the topic at `index` of `module`: its name in the topic grammar and of the
+/// module, a version from 1, unique in the module, and an access list of distinct module names.
+const fn validate_topic(module: &ModuleDeclaration, index: usize) -> Result<(), DeclarationError> {
+    let topic: &Topic = &module.topics[index];
+    let name = topic.name;
+    if !is_topic(name) {
+        return Err(DeclarationError::InvalidTopic { topic: name });
+    }
+    let prefix = module.name.as_bytes();
+    if name.len() <= prefix.len()
+        || name.as_bytes()[prefix.len()] != b'.'
+        || !same_bytes(name.as_bytes().split_at(prefix.len()).0, prefix)
+    {
+        return Err(DeclarationError::ForeignTopic { topic: name });
+    }
+    if topic.version == 0 {
+        return Err(DeclarationError::TopicWithoutVersion { topic: name });
+    }
+    let mut other = index + 1;
+    while other < module.topics.len() {
+        if same(name, module.topics[other].name) {
+            return Err(DeclarationError::DuplicateTopic { topic: name });
+        }
+        other += 1;
+    }
+    let mut entry = 0;
+    while entry < topic.consumers.len() {
+        let consumer = topic.consumers[entry];
+        let mut later = entry + 1;
+        let mut repeated = false;
+        while later < topic.consumers.len() {
+            repeated = repeated || same(consumer, topic.consumers[later]);
+            later += 1;
+        }
+        if repeated || !ModuleName::is_valid(consumer) {
+            return Err(DeclarationError::InvalidTopicConsumer {
+                topic: name,
+                module: consumer,
+            });
+        }
+        entry += 1;
+    }
+    Ok(())
+}
+
+/// The rules of the consumer at `index` of `consumers`: an identifier, unique, of a topic in
+/// the topic grammar that no other consumer of the module consumes.
+const fn validate_consumer(consumers: &[Consumer], index: usize) -> Result<(), DeclarationError> {
+    let consumer = &consumers[index];
+    check!(identifier(IdentifierKind::Consumer, consumer.name));
+    if !is_topic(consumer.topic) {
+        return Err(DeclarationError::InvalidTopic {
+            topic: consumer.topic,
+        });
+    }
+    let mut other = index + 1;
+    while other < consumers.len() {
+        if same(consumer.name, consumers[other].name) {
+            return Err(DeclarationError::DuplicateConsumer {
+                consumer: consumer.name,
+            });
+        }
+        if same(consumer.topic, consumers[other].topic) {
+            return Err(DeclarationError::TwoConsumersOfOneTopic {
+                topic: consumer.topic,
+            });
+        }
+        other += 1;
+    }
+    Ok(())
+}
+
 const fn identifier(kind: IdentifierKind, name: &'static str) -> Result<(), DeclarationError> {
     if is_identifier(name) {
         Ok(())

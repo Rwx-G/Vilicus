@@ -9,7 +9,9 @@
 //! or free text; its [`Fts5Table`]s; its [`Migration`]s, each with its frozen hash; its
 //! [`Tool`]s, each with its tier,
 //! network effect, exception class, [`Confirmation`] and capability [`MatrixRow`], and the
-//! capability matrix sections it implements. Every table also carries the record [`ENVELOPE`],
+//! capability matrix sections it implements; the event [`Topic`]s it emits, each with its payload
+//! version and the modules allowed to consume it, and its [`Consumer`]s. Every table also carries
+//! the record [`ENVELOPE`],
 //! which the Core stamps. [`ModuleDeclaration::assert_valid`] applies the rules of the contract at
 //! build time, and the Core's registry applies them again, then compares the declaration with the
 //! schema the migrations produce and the tools with `doc/capability-matrix.md`.
@@ -23,6 +25,7 @@
 
 mod check;
 mod declaration;
+mod event;
 mod records;
 mod tool;
 mod value;
@@ -36,6 +39,7 @@ pub use declaration::{
     ENVELOPE, EnvelopeColumn, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table,
     Fts5Tokenizer, Migration, ModuleDeclaration, SqlType, Structured, Table,
 };
+pub use event::{Consumer, Event, Topic, is_topic, topic_module};
 pub use records::{Records, WriteError, Written};
 pub use tool::{Confirmation, MatrixRow, Tool};
 pub use value::{Value, ValueError, check_vocabulary_label, is_free_text_character};

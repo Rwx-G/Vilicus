@@ -1,7 +1,9 @@
 //! The module registry (FR-22, AD-9): the modules compiled into the binary, with their schema,
-//! migrations, record kinds and tools, the checks that hold every module file to its declaration,
-//! and the capability matrix check that holds every tool to its row of
-//! `doc/capability-matrix.md` ([`CapabilityMatrix`]).
+//! migrations, record kinds, tools and event topics, the checks that hold every module file to
+//! its declaration, and the capability matrix check that holds every tool to its row of
+//! `doc/capability-matrix.md` ([`CapabilityMatrix`]). Each consumer of an event consumes a topic
+//! a registered module emits, whose access list names the consumer's module (D20): the registry
+//! is where the access lists of every topic decide which consumers its events reach.
 //!
 //! A [`Registry`] is built from a `'static` list of [`ModuleDeclaration`]s by a `const fn`, so a
 //! binary builds it in a `const` item from the declarations it names at build time, and a
@@ -20,6 +22,8 @@
 //!     fts5_tables: &[],
 //!     migrations: &[],
 //!     matrix_sections: &[],
+//!     topics: &[],
+//!     consumers: &[],
 //!     tools: &[],
 //! };
 //! const REGISTRY: Registry = match Registry::new(&[&NOTES]) {
@@ -56,7 +60,7 @@ mod tests;
 use core::fmt;
 use std::path::Path;
 
-use vilicus_module_api::{DeclarationError, ModuleDeclaration};
+use vilicus_module_api::{Consumer, DeclarationError, ModuleDeclaration, Topic};
 use vilicus_storage::maintenance::SchemaVersions;
 use vilicus_storage::{
     CORE_SCHEMA_VERSION, FrozenMigration, Handle, Inspect, KeyEpoch, Migration, MigrationTrack,
@@ -101,6 +105,20 @@ pub enum RegistryError {
         /// The section.
         section: &'static str,
     },
+    /// A consumer consumes a topic no registered module emits.
+    UnknownTopic {
+        /// The consumer's module.
+        module: &'static str,
+        /// The topic.
+        topic: &'static str,
+    },
+    /// A consumer consumes a topic whose access list does not name its module (D20).
+    ConsumerNotAllowed {
+        /// The consumer's module.
+        module: &'static str,
+        /// The topic.
+        topic: &'static str,
+    },
 }
 
 impl RegistryError {
@@ -110,6 +128,10 @@ impl RegistryError {
             Self::Declaration { error, .. } => error.rule(),
             Self::DuplicateModule { .. } => "two modules share a name",
             Self::DuplicateMatrixSection { .. } => "two modules claim a capability matrix section",
+            Self::UnknownTopic { .. } => "a consumer consumes a topic no module emits",
+            Self::ConsumerNotAllowed { .. } => {
+                "a consumer consumes a topic whose access list does not name its module"
+            }
         }
     }
 }
@@ -123,6 +145,9 @@ impl fmt::Display for RegistryError {
             }
             Self::DuplicateMatrixSection { module, section } => {
                 write!(formatter, "{}: {module} (section {section})", self.rule())
+            }
+            Self::UnknownTopic { module, topic } | Self::ConsumerNotAllowed { module, topic } => {
+                write!(formatter, "{}: {module} ({topic})", self.rule())
             }
         }
     }
@@ -308,7 +333,51 @@ impl Registry {
             }
             index += 1;
         }
+        index = 0;
+        while index < modules.len() {
+            let module = modules[index];
+            let mut consumer = 0;
+            while consumer < module.consumers.len() {
+                if let Err(error) = check_consumer(modules, module, &module.consumers[consumer]) {
+                    return Err(error);
+                }
+                consumer += 1;
+            }
+            index += 1;
+        }
         Ok(Self { modules })
+    }
+
+    /// The topic named `name`, with the module that emits it.
+    pub fn topic(&self, name: &str) -> Option<(&'static ModuleDeclaration, &'static Topic)> {
+        self.modules
+            .iter()
+            .find_map(|&module| module.topic(name).map(|topic| (module, topic)))
+    }
+
+    /// The consumers the events of `topic`, emitted by `emitter`, reach: the consumer of the topic
+    /// of each module its access list names, in the order of that list (D20). Empty when the
+    /// emitter no longer declares the topic.
+    pub fn receivers(
+        &self,
+        emitter: &ModuleDeclaration,
+        topic: &str,
+    ) -> Vec<(&'static ModuleDeclaration, &'static Consumer)> {
+        let Some(declared) = emitter.topic(topic) else {
+            return Vec::new();
+        };
+        declared
+            .consumers
+            .iter()
+            .filter_map(|name| {
+                self.modules
+                    .iter()
+                    .find(|module| module.name == *name)
+                    .and_then(|&module| {
+                        module.consumer_of(topic).map(|consumer| (module, consumer))
+                    })
+            })
+            .collect()
     }
 
     /// The registry's tool table: every tool of every module, in declaration order. The
@@ -517,6 +586,42 @@ pub(crate) fn frozen(sql: &'static str) -> vilicus_module_api::Migration {
         sql,
         sha256: vilicus_crypto::sha256(sql.as_bytes()),
     }
+}
+
+/// Refuses `consumer` of `module` unless a module of `modules` emits its topic and that topic's
+/// access list names `module` (D20).
+const fn check_consumer(
+    modules: &[&'static ModuleDeclaration],
+    module: &'static ModuleDeclaration,
+    consumer: &'static Consumer,
+) -> Result<(), RegistryError> {
+    let mut index = 0;
+    while index < modules.len() {
+        let emitter = modules[index];
+        let mut topic = 0;
+        while topic < emitter.topics.len() {
+            let declared = &emitter.topics[topic];
+            if same(declared.name, consumer.topic) {
+                let mut entry = 0;
+                while entry < declared.consumers.len() {
+                    if same(declared.consumers[entry], module.name) {
+                        return Ok(());
+                    }
+                    entry += 1;
+                }
+                return Err(RegistryError::ConsumerNotAllowed {
+                    module: module.name,
+                    topic: consumer.topic,
+                });
+            }
+            topic += 1;
+        }
+        index += 1;
+    }
+    Err(RegistryError::UnknownTopic {
+        module: module.name,
+        topic: consumer.topic,
+    })
 }
 
 /// A capability matrix section both modules claim.

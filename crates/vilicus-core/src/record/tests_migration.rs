@@ -90,6 +90,8 @@ fn shop(second: Option<&str>, fts5: bool) -> &'static ModuleDeclaration {
         fts5_tables: if fts5 { vec![SEARCH].leak() } else { &[] },
         migrations: migrations.leak(),
         matrix_sections: &[],
+        topics: &[],
+        consumers: &[],
         tools: &[],
     }))
 }

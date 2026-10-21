@@ -83,6 +83,8 @@ const VALID: ModuleDeclaration = ModuleDeclaration {
         },
     ],
     matrix_sections: &["6", "10a"],
+    topics: &[],
+    consumers: &[],
     tools: &[READ_TOOL, WRITE_TOOL, CART_TOOL, LIGHT_TOOL],
 };
 
@@ -1160,5 +1162,196 @@ fn a_read_that_fetches_declares_no_network_effect() {
     assert_eq!(
         change,
         Err(DeclarationError::NetworkEffectBelowTier2 { tool: "add_item" })
+    );
+}
+
+// Story 3.8: the rules of event topics and consumers.
+
+/// `VALID` with `topics` and `consumers`.
+fn with_events(topics: Vec<Topic>, consumers: Vec<Consumer>) -> ModuleDeclaration {
+    ModuleDeclaration {
+        topics: leak(topics),
+        consumers: leak(consumers),
+        ..VALID
+    }
+}
+
+fn topic(name: &'static str) -> Topic {
+    Topic {
+        name,
+        version: 1,
+        consumers: &["tasks", "sample"],
+    }
+}
+
+fn consumer(name: &'static str, topic: &'static str) -> Consumer {
+    Consumer { name, topic }
+}
+
+#[test]
+fn topic_names_follow_the_grammar_of_the_conventions() {
+    for accepted in [
+        "sample.item.added",
+        "meals.plan.updated",
+        "home.device.state_changed",
+    ] {
+        assert!(is_topic(accepted), "{accepted}");
+    }
+    for refused in [
+        "",
+        "sample",
+        "sample.item",
+        "sample.item.added.twice",
+        "Sample.item.added",
+        "sample..added",
+        "sample.item.",
+        ".item.added",
+        "sample.Item.added",
+        "sample.item.added ",
+        "sample_x.item.added",
+    ] {
+        assert!(!is_topic(refused), "{refused:?}");
+    }
+    assert_eq!(topic_module("meals.plan.updated"), Some("meals"));
+    assert_eq!(topic_module("meals.plan"), None);
+}
+
+#[test]
+fn a_declaration_with_topics_and_consumers_that_meet_every_rule_is_accepted() {
+    let declaration = with_events(
+        vec![topic("sample.item.added"), topic("sample.item.removed")],
+        vec![
+            consumer("react", "tasks.task.added"),
+            consumer("own", "sample.item.added"),
+        ],
+    );
+    assert_eq!(declaration.validate(), Ok(()));
+    assert_eq!(
+        declaration
+            .topic("sample.item.added")
+            .map(|topic| topic.version),
+        Some(1)
+    );
+    assert!(declaration.topic("tasks.task.added").is_none());
+    assert_eq!(
+        declaration
+            .consumer_of("tasks.task.added")
+            .map(|consumer| consumer.name),
+        Some("react")
+    );
+    assert!(declaration.consumer_of("sample.item.removed").is_none());
+}
+
+#[test]
+fn topics_that_break_a_rule_are_refused() {
+    let outcome = |topics: Vec<Topic>| with_events(topics, Vec::new()).validate();
+    assert_eq!(
+        outcome(vec![topic("sample.item")]),
+        Err(DeclarationError::InvalidTopic {
+            topic: "sample.item"
+        })
+    );
+    assert_eq!(
+        outcome(vec![topic("tasks.task.added")]),
+        Err(DeclarationError::ForeignTopic {
+            topic: "tasks.task.added"
+        }),
+        "the emitter is the declaring module"
+    );
+    assert_eq!(
+        outcome(vec![topic("samples.item.added")]),
+        Err(DeclarationError::ForeignTopic {
+            topic: "samples.item.added"
+        }),
+        "a module name that merely starts with the module's"
+    );
+    assert_eq!(
+        outcome(vec![Topic {
+            version: 0,
+            ..topic("sample.item.added")
+        }]),
+        Err(DeclarationError::TopicWithoutVersion {
+            topic: "sample.item.added"
+        })
+    );
+    assert_eq!(
+        outcome(vec![topic("sample.item.added"), topic("sample.item.added")]),
+        Err(DeclarationError::DuplicateTopic {
+            topic: "sample.item.added"
+        })
+    );
+    for (consumers, entry) in [
+        (&["tasks", "Tasks"][..], "Tasks"),
+        (&["tasks", "meals", "tasks"][..], "tasks"),
+        (&[""][..], ""),
+    ] {
+        assert_eq!(
+            outcome(vec![Topic {
+                consumers,
+                ..topic("sample.item.added")
+            }]),
+            Err(DeclarationError::InvalidTopicConsumer {
+                topic: "sample.item.added",
+                module: entry,
+            })
+        );
+    }
+}
+
+#[test]
+fn consumers_that_break_a_rule_are_refused() {
+    let outcome = |consumers: Vec<Consumer>| with_events(Vec::new(), consumers).validate();
+    assert_eq!(
+        outcome(vec![consumer("React", "tasks.task.added")]),
+        Err(DeclarationError::InvalidIdentifier {
+            kind: IdentifierKind::Consumer,
+            name: "React"
+        })
+    );
+    assert_eq!(
+        outcome(vec![consumer("react", "tasks.added")]),
+        Err(DeclarationError::InvalidTopic {
+            topic: "tasks.added"
+        })
+    );
+    assert_eq!(
+        outcome(vec![
+            consumer("react", "tasks.task.added"),
+            consumer("react", "tasks.task.removed"),
+        ]),
+        Err(DeclarationError::DuplicateConsumer { consumer: "react" })
+    );
+    assert_eq!(
+        outcome(vec![
+            consumer("react", "tasks.task.added"),
+            consumer("again", "tasks.task.added"),
+        ]),
+        Err(DeclarationError::TwoConsumersOfOneTopic {
+            topic: "tasks.task.added"
+        })
+    );
+}
+
+#[test]
+fn every_event_error_names_its_rule_and_its_item() {
+    assert_eq!(
+        DeclarationError::ForeignTopic {
+            topic: "tasks.task.added"
+        }
+        .to_string(),
+        "a module declares a topic of another module: \"tasks.task.added\""
+    );
+    assert_eq!(
+        DeclarationError::InvalidTopicConsumer {
+            topic: "sample.item.added",
+            module: "Tasks",
+        }
+        .to_string(),
+        "a topic's access list names something other than a module, or a module twice: \
+         sample.item.added (\"Tasks\")"
+    );
+    assert_eq!(
+        DeclarationError::DuplicateConsumer { consumer: "react" }.to_string(),
+        "two consumers share a name: react"
     );
 }

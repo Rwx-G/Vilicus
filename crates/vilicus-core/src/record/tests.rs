@@ -166,6 +166,8 @@ pub(super) fn module(
         fts5_tables: &[],
         migrations: migrations.leak(),
         matrix_sections: &[],
+        topics: &[],
+        consumers: &[],
         tools: &[],
     }))
 }

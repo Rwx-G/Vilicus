@@ -80,6 +80,8 @@ fn module(name: &'static str, sections: Vec<&'static str>, tools: Vec<Tool>) -> 
         fts5_tables: &[],
         migrations: &[],
         matrix_sections: leak(sections),
+        topics: &[],
+        consumers: &[],
         tools: leak(tools),
     }
 }

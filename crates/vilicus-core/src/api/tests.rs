@@ -1,15 +1,15 @@
 //! Story 3.10, AC5 (AD-5, I6): a module reads another module's record only through the query that
 //! module declares, served by the Core: the query's access list names the caller, the file read is
-//! ready, its partition is in the caller's scope, and the record read counts as an input of every
-//! later write of the call.
+//! ready, its partition is in the caller's scope, the read keeps the file from being migrated, and
+//! the record read counts as an input of every later write, event and journal row of the call.
 
 use std::cell::RefCell;
 use std::path::Path;
 use std::time::Duration;
 
 use vilicus_module_api::{
-    DataType, Field, FieldKind, ModuleDeclaration, Query, ReadRecord, Records, Structured, Table,
-    Value, WriteError,
+    Consumer, DataType, Field, FieldKind, ModuleDeclaration, Query, ReadRecord, Records,
+    Structured, Table, Topic, Value, WriteError,
 };
 use vilicus_storage::{CallKey, Handle, KeyEpoch, Migration, ModuleFile, Partition, Read, Write};
 use vilicus_types::{
@@ -61,28 +61,65 @@ const NOTES: Table = Table {
     elevation_exempt: false,
 };
 
-/// `shop` offers one query, of its items' label alone, to `notes`; `stock` is not in its list.
-const ITEM_QUERY: Query = Query {
-    name: "item",
-    table: "items",
-    fields: &["label"],
-    callers: &["notes"],
+/// The `shop` diary: entries of the journal data type, which the provider policy keeps local.
+const DIARY: Table = Table {
+    name: "diary",
+    data_types: &[DataType::Journal],
+    fields: &[Field {
+        name: "body",
+        kind: FieldKind::FreeText { max_len: 200 },
+        optional: false,
+    }],
+    elevation_exempt: false,
 };
+
+/// `shop` offers its items' label alone to `notes` and `stock`, and its diary entries to `notes`
+/// only.
+const QUERIES: &[Query] = &[
+    Query {
+        name: "item",
+        table: "items",
+        fields: &["label"],
+        callers: &["notes", "stock"],
+    },
+    Query {
+        name: "entry",
+        table: "diary",
+        fields: &["body"],
+        callers: &["notes"],
+    },
+];
+
+const NOTE_ADDED: &str = "notes.note.added";
+
+const NOTE_TOPICS: &[Topic] = &[Topic {
+    name: NOTE_ADDED,
+    version: 1,
+    consumers: &["stock"],
+}];
+
+const STOCK_CONSUMERS: &[Consumer] = &[Consumer {
+    name: "count",
+    topic: NOTE_ADDED,
+}];
 
 fn module(
     name: &'static str,
-    table: &'static Table,
+    tables: &'static [Table],
+    topics: &'static [Topic],
+    consumers: &'static [Consumer],
     queries: &'static [Query],
 ) -> &'static ModuleDeclaration {
+    let create: Vec<String> = tables.iter().map(create_sql).collect();
     Box::leak(Box::new(ModuleDeclaration {
         name,
-        tables: std::slice::from_ref(table),
+        tables,
         fts5_tables: &[],
-        migrations: vec![frozen(create_sql(table).leak())].leak(),
+        migrations: vec![frozen(create.join("\n").leak())].leak(),
         matrix_sections: &[],
         tools: &[],
-        topics: &[],
-        consumers: &[],
+        topics,
+        consumers,
         queries,
     }))
 }
@@ -90,9 +127,9 @@ fn module(
 fn registry() -> Registry {
     Registry::new(
         vec![
-            module("shop", &ITEMS, std::slice::from_ref(&ITEM_QUERY)),
-            module("notes", &NOTES, &[]),
-            module("stock", &NOTES, &[]),
+            module("shop", &[ITEMS, DIARY], &[], &[], QUERIES),
+            module("notes", &[NOTES], NOTE_TOPICS, &[], &[]),
+            module("stock", &[NOTES], &[], STOCK_CONSUMERS, &[]),
         ]
         .leak(),
     )
@@ -145,6 +182,8 @@ struct Fixture {
     writers: Vec<Handle<Write>>,
     /// The item of each partition: Ella's, the household's, Noé's.
     items: [Id; 3],
+    /// The household's diary entry, of the journal data type.
+    entry: Id,
     stamper: RefCell<TestStamper>,
 }
 
@@ -173,6 +212,7 @@ impl Fixture {
         let mut writers = Vec::new();
         let mut handles = Vec::new();
         let mut items = Vec::new();
+        let mut entry = None;
         let files = [
             ("shop", ELLA()),
             ("shop", Partition::Household),
@@ -189,6 +229,14 @@ impl Fixture {
             let writer = registry.open::<Write>(&file, &KEY).expect("open");
             if name == "shop" {
                 items.push(plugin_item(declaration, &writer, partition, &mut stamper));
+                if partition == Partition::Household {
+                    entry = Some(plugin_write(
+                        declaration,
+                        &writer,
+                        &mut stamper,
+                        |records| records.insert("diary", &[("body", text("Une journée"))], &[]),
+                    ));
+                }
             }
             handles.push(registry.open::<Read>(&file, &KEY).expect("open"));
             states
@@ -205,6 +253,7 @@ impl Fixture {
             },
             writers,
             items: items.try_into().expect("three items"),
+            entry: entry.expect("the household's entry"),
             stamper: RefCell::new(stamper),
         }
     }
@@ -298,6 +347,27 @@ fn plugin_item(
     partition: Partition,
     stamper: &mut TestStamper,
 ) -> Id {
+    let label = format!("Pommes de {partition}");
+    plugin_write(shop, writer, stamper, |records| {
+        records.insert(
+            "items",
+            &[
+                ("label", Value::Text(label)),
+                ("quantity", Value::Integer(3)),
+            ],
+            &[],
+        )
+    })
+}
+
+/// Runs `insert` as a call of a plugin on the `shop` file of `writer`, so what it inserts is
+/// stored `external`, and returns the id it inserted.
+fn plugin_write(
+    shop: &'static ModuleDeclaration,
+    writer: &Handle<Write>,
+    stamper: &mut TestStamper,
+    insert: impl FnOnce(&mut dyn Records) -> Result<vilicus_module_api::Written, WriteError>,
+) -> Id {
     let call = Call {
         principal: Principal::Plugin,
         source: Source::Plugin(rule_id()),
@@ -316,17 +386,7 @@ fn plugin_item(
         request_hash: None,
         delivery: None,
     };
-    let label = format!("Pommes de {partition}");
-    match run_call(writer, shop, &call, &invocation, stamper, |records| {
-        records.insert(
-            "items",
-            &[
-                ("label", Value::Text(label)),
-                ("quantity", Value::Integer(3)),
-            ],
-            &[],
-        )
-    }) {
+    match run_call(writer, shop, &call, &invocation, stamper, insert) {
         Ok(CallResult::Committed(outcome)) => outcome.value.id,
         other => panic!("{other:?}"),
     }
@@ -425,7 +485,7 @@ fn a_read_is_refused_unless_the_module_offers_the_query_to_the_caller() {
     for (module, caller, query, expected) in [
         ("shop", "notes", "items", WriteError::UnknownQuery),
         ("absent", "notes", "item", WriteError::UnknownQuery),
-        ("shop", "stock", "item", WriteError::QueryNotAllowed),
+        ("shop", "stock", "entry", WriteError::QueryNotAllowed),
     ] {
         let mut seen = None;
         let result = fixture.rule_call(
@@ -448,7 +508,7 @@ fn a_read_is_refused_unless_the_module_offers_the_query_to_the_caller() {
             (WriteError::UnknownQuery, Err(HandlerError::Refused(RecordError::UnknownQuery)))
             | (
                 WriteError::QueryNotAllowed,
-                Err(HandlerError::Refused(RecordError::QueryNotAllowed { query: "item" })),
+                Err(HandlerError::Refused(RecordError::QueryNotAllowed { query: "entry" })),
             ) => {}
             (_, other) => panic!("{module}.{query} by {caller}: {other:?}"),
         }
@@ -742,4 +802,103 @@ fn a_read_of_a_snapshot_the_call_carries_never_lowers_it() {
     };
     assert_eq!(read_first(false), r#"[[Text("trusted")]]"#);
     assert_eq!(read_first(true), r#"[[Text("external")]]"#);
+}
+
+// Story 3.10 review: what a read leaves on the events, journal rows and deliveries of the call,
+// and the file it keeps from being migrated.
+
+/// A record read before the call, `trusted` and of no author: what the rule's writes name.
+fn read_before(id: Id) -> RecordProvenance {
+    RecordProvenance {
+        id,
+        labels: RecordLabels::TRUSTED,
+        author: None,
+        data_types: vec![DataType::ShoppingList],
+        free_text: Vec::new(),
+    }
+}
+
+fn earlier() -> Id {
+    Id::from_bytes([
+        0x01, 0x92, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 0x2b,
+    ])
+    .expect("a v7 id")
+}
+
+/// Runs `body` as a rule's call on the household's `notes` file, the call carrying a `trusted`
+/// record read before it, and returns the provenance of the one event the file then holds.
+fn emitted_after(
+    fixture: &Fixture,
+    body: impl FnOnce(&mut dyn Records) -> Result<(), WriteError>,
+) -> crate::record::JournaledInput {
+    let call = Call {
+        read: vec![read_before(earlier())],
+        ..rule()
+    };
+    let handle = fixture.writer("notes", Partition::Household);
+    let declaration = fixture
+        .registry
+        .module(handle.file().module())
+        .expect("registered");
+    let result = fixture.boundary().run(
+        handle,
+        declaration,
+        &call,
+        &fixture.invocation(),
+        &mut *fixture.stamper.borrow_mut(),
+        body,
+    );
+    assert!(matches!(result, Ok(CallResult::Committed(_))), "{result:?}");
+    let events = handle.outbox_events().expect("read the outbox");
+    assert_eq!(events.len(), 1);
+    let mut provenance = decode_inputs(&events[0].provenance).expect("decode");
+    assert_eq!(provenance.len(), 1);
+    provenance.remove(0)
+}
+
+/// Review item 1 (AD-7, AD-27, D152), the reviewer's probe: a call writes a `trusted` note, then
+/// reads an `external` item through the typed API, then emits an event about the note whose
+/// payload is the item's label. The event carries what the call read: `external`.
+#[test]
+fn an_event_emitted_after_a_read_carries_what_the_call_read() {
+    let fixture = Fixture::new("api-event-taint");
+    let item = fixture.items[1];
+    let provenance = emitted_after(&fixture, |records| {
+        let note = records.insert("notes", &[("title", text("Pommes"))], &[earlier()])?;
+        let read = records.read("shop", "item", item)?;
+        let Some(Value::Text(label)) = read.field("label").cloned() else {
+            panic!("{read:?}");
+        };
+        records.emit(NOTE_ADDED, note.id, label.as_bytes())?;
+        Ok(())
+    });
+    let stored = fixture
+        .writer("notes", Partition::Household)
+        .query_values("SELECT taint FROM notes", &[])
+        .expect("read");
+    assert_eq!(format!("{stored:?}"), r#"[[Text("trusted")]]"#);
+    assert_eq!(
+        (provenance.taint.as_str(), provenance.text_taint.as_str()),
+        ("external", "external")
+    );
+    assert_eq!(provenance.data_types, "shopping_list");
+}
+
+/// Review item 1 (D103, D152): an event emitted after the call read a record of a local-only
+/// data type keeps that data type, so a consumer's write and the provider policy see it.
+#[test]
+fn an_event_keeps_the_data_types_of_a_record_the_call_read() {
+    let fixture = Fixture::new("api-event-types");
+    let entry = fixture.entry;
+    let provenance = emitted_after(&fixture, |records| {
+        let note = records.insert("notes", &[("title", text("Pommes"))], &[earlier()])?;
+        let read = records.read("shop", "entry", entry)?;
+        let Some(Value::Text(body)) = read.field("body").cloned() else {
+            panic!("{read:?}");
+        };
+        records.emit(NOTE_ADDED, note.id, body.as_bytes())?;
+        Ok(())
+    });
+    assert_eq!(provenance.data_types, "journal,shopping_list");
+    assert_eq!(provenance.taint, "external");
 }

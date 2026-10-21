@@ -808,10 +808,12 @@ impl CallRecords<'_> {
     /// Writes an event of `topic` about `record` to the outbox (AD-10, AD-29): the topic is one the
     /// module declares, so the emitter is the module whose call this is, and the payload version
     /// is the topic's current one. The event carries the provenance of `record` as the call leaves
-    /// it, raised to what the call itself derives from ([`provenance::call_floor`]), its data
-    /// types joined by those an AI or plugin session consumed ([`provenance::floor`]), without
-    /// its free text, and the call's author and member: what a consumer's call derives from
-    /// (AD-27, D147). A consumer's call emits nothing; a payload is at most
+    /// it, combined with every record the call read so far through a typed API, since its payload
+    /// may hold what they hold ([`RecordProvenance::combined`]: the most restrictive labels, the
+    /// union of the data types, `external` for two authors), raised to what the call itself
+    /// derives from ([`provenance::call_floor`]), its data types joined by those an AI or plugin
+    /// session consumed ([`provenance::floor`]), without its free text, and the call's author and
+    /// member: what a consumer's call derives from (AD-27, D147, D152). A consumer's call emits nothing; a payload is at most
     /// `EVENT_PAYLOAD_MAX_LEN` bytes.
     fn emit_event(&mut self, topic: &str, record: Id, payload: &[u8]) -> Result<Id, RecordError> {
         if self.call.principal == Principal::Event {
@@ -827,7 +829,12 @@ impl CallRecords<'_> {
         if payload.len() > EVENT_PAYLOAD_MAX_LEN {
             return Err(RecordError::PayloadTooLong);
         }
-        let mut provenance = self.changed_record(record)?;
+        let mut provenance = self
+            .read_records
+            .iter()
+            .fold(self.changed_record(record)?, |provenance, read| {
+                provenance.combined(read)
+            });
         let floor = provenance::call_floor(self.call);
         provenance.labels = provenance.labels.most_restrictive(floor);
         provenance.data_types = provenance::floor(self.call, std::slice::from_ref(&provenance));

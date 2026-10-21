@@ -11,5 +11,6 @@
 //! record's envelope, taint and data types, and holds every field a write gives to its
 //! declaration (FR-18, FR-58, AD-6, AD-7).
 
+pub mod alert;
 pub mod record;
 pub mod registry;

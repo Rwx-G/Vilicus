@@ -37,14 +37,14 @@
 //! every write path of a registry's modules with values outside their declarations (AC4 of Story
 //! 3.4).
 
-// The row writer's own transactions, label confirmation (no surface in V0.1, FR-50) and the check
-// of stored rows (the migration runner of Story 3.7) have no caller but the tests and the write
-// path fuzz test yet.
+// The row writer's own transactions and label confirmation (no surface in V0.1, FR-50) have no
+// caller but the tests and the write path fuzz test yet; the check of stored rows has the
+// migration runner (Story 3.7).
 #![cfg_attr(
     not(any(test, feature = "testing")),
     allow(
         dead_code,
-        reason = "label confirmation and the check of stored rows have no caller outside tests yet"
+        reason = "label confirmation and the row writer's own transactions have no caller outside tests yet"
     )
 )]
 
@@ -66,6 +66,8 @@ mod tests_call;
 mod tests_deletion;
 #[cfg(test)]
 mod tests_journal;
+#[cfg(test)]
+mod tests_migration;
 
 use core::fmt;
 

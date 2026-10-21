@@ -46,6 +46,7 @@
 
 mod fts5;
 mod matrix;
+mod migrate;
 mod schema;
 mod sql;
 
@@ -56,16 +57,20 @@ use core::fmt;
 use std::path::Path;
 
 use vilicus_module_api::{DeclarationError, ModuleDeclaration};
+use vilicus_storage::maintenance::SchemaVersions;
 use vilicus_storage::{
     CORE_SCHEMA_VERSION, FrozenMigration, Handle, Inspect, KeyEpoch, Migration, MigrationTrack,
     ModuleFile, Partition, Read,
 };
 use vilicus_types::ModuleName;
 
+use crate::alert::InstanceAdminAlert;
+
 pub use matrix::{
     CapabilityMatrix, MatrixCheckError, MatrixDifference, MatrixEntry, MatrixError, MatrixSection,
     RegisteredTool, RowClass, RowTier,
 };
+pub use migrate::{FileMigration, FileToMigrate, MigrationError, MigrationRunError};
 pub use schema::SchemaError;
 
 /// The modules compiled into the binary.
@@ -206,6 +211,29 @@ impl fmt::Display for FileError {
                 "{track} migration {version} differs from its frozen hash or from the one the \
                  file ran"
             ),
+        }
+    }
+}
+
+impl FileError {
+    /// The instance admin alert of a refusal that stops the module for `file`'s partition until
+    /// a forward release: a file newer than the code (D21, AD-54 `newer than code`). Other
+    /// refusals are pending work or a defect of the file, reported by the migration runner.
+    pub fn admin_alert(&self, file: &ModuleFile) -> Option<InstanceAdminAlert> {
+        match *self {
+            Self::CoreNewerThanCode { found, latest } => Some(InstanceAdminAlert::newer_than_code(
+                file,
+                MigrationTrack::Core,
+                found,
+                latest,
+            )),
+            Self::NewerThanCode { found, latest } => Some(InstanceAdminAlert::newer_than_code(
+                file,
+                MigrationTrack::Module,
+                found,
+                latest,
+            )),
+            _ => None,
         }
     }
 }
@@ -406,6 +434,29 @@ pub(crate) fn frozen_migrations(
     Ok(module_migrations)
 }
 
+/// Refuses a file at `versions` whose record of frozen hashes, for either track, is not that of
+/// the code's migrations up to those versions (AD-23, D21): the Core's own for the Core track,
+/// `module`'s for the module track. The versions are within the code's.
+pub(crate) fn check_recorded_tracks<R: Inspect>(
+    handle: &Handle<R>,
+    module: &ModuleDeclaration,
+    versions: SchemaVersions,
+) -> Result<(), FileError> {
+    let core: Vec<[u8; 32]> = vilicus_storage::core_migrations()
+        .iter()
+        .take(versions.core as usize)
+        .map(|migration| migration.sha256)
+        .collect();
+    check_recorded(handle, MigrationTrack::Core, &core)?;
+    let module: Vec<[u8; 32]> = module
+        .migrations
+        .iter()
+        .take(versions.module as usize)
+        .map(|migration| migration.sha256)
+        .collect();
+    check_recorded(handle, MigrationTrack::Module, &module)
+}
+
 /// Refuses a file whose record of `track` is not the frozen hashes of `migrations`: the first
 /// version that differs, or that one side holds and the other does not.
 fn check_recorded<R: Inspect>(
@@ -447,17 +498,14 @@ fn check<R: Inspect>(module: &ModuleDeclaration, handle: &Handle<R>) -> Result<(
     if found > latest {
         return Err(FileError::NewerThanCode { found, latest });
     }
-    let core_hashes: Vec<[u8; 32]> = vilicus_storage::core_migrations()
-        .iter()
-        .map(|migration| migration.sha256)
-        .collect();
-    check_recorded(handle, MigrationTrack::Core, &core_hashes)?;
-    let module_hashes: Vec<[u8; 32]> = module
-        .migrations
-        .iter()
-        .map(|migration| migration.sha256)
-        .collect();
-    check_recorded(handle, MigrationTrack::Module, &module_hashes)?;
+    check_recorded_tracks(
+        handle,
+        module,
+        SchemaVersions {
+            core,
+            module: found,
+        },
+    )?;
     let snapshot = schema::Snapshot::read(handle, module)?;
     schema::compare(module, &snapshot).map_err(FileError::Schema)
 }

@@ -180,6 +180,12 @@ class WorkspaceTestCase(unittest.TestCase):
             self.workspace.add(name, directory, target_kind="bin" if node.shipped else "lib")
             names[node.id] = name
         for node in graph.nodes.values():
+            if names.get(node.id) == cw.REFERENCE_MODULE:
+                # The reference module is a module: it links the module port alone, although its
+                # node, shared with the test doubles, reaches the Core.
+                if cw.MODULE_PORT in self.workspace.packages:
+                    self.workspace.depend(cw.REFERENCE_MODULE, cw.MODULE_PORT)
+                continue
             for target in node.depends_on:
                 if node.id in names and target in names:
                     self.workspace.depend(names[node.id], names[target])
@@ -190,6 +196,13 @@ class WorkspaceTestCase(unittest.TestCase):
             any(f"forbidden edge {source} -> {target} " in v for v in violations),
             f"no violation names {source} -> {target}: {violations}",
         )
+
+    @staticmethod
+    def beside_the_reference_rule(violations: list[str]) -> list[str]:
+        """The violations a dependency of the reference module draws from the other checks: a
+        linked dependency other than the module port also breaks the reference rule, which
+        `ReferenceModuleTest` covers."""
+        return [violation for violation in violations if not violation.startswith("reference:")]
 
     def assert_single(self, violations: list[str], *fragments: str) -> None:
         self.assertEqual(len(violations), 1, violations)
@@ -223,6 +236,8 @@ class GraphTest(WorkspaceTestCase):
             for target_id in GRAPH.reachable(source.id):
                 target = GRAPH.nodes[target_id]
                 if not GRAPH.allows(source, target, "normal"):
+                    continue
+                if sample_crate(source)[0] == cw.REFERENCE_MODULE and sample_crate(target)[0] != cw.MODULE_PORT:
                     continue
                 with self.subTest(edge=f"{source.id} -> {target.id}"):
                     self.setUp()
@@ -328,6 +343,46 @@ class HandWrittenEdgeTest(WorkspaceTestCase):
                     self.assertEqual(violations, [])
                 else:
                     self.assert_single(violations, f"forbidden edge {source} -> vilicus-mod-reference (dev dependency")
+
+
+class ReferenceModuleTest(WorkspaceTestCase):
+    """Story 3.5 review, Story 3.10 (AD-9): the reference module links the module port alone,
+    although the testing node it shares with the test doubles reaches the Core."""
+
+    def test_the_repository_names_the_reference_module_of_the_testing_node(self) -> None:
+        self.assertIn(cw.REFERENCE_MODULE, GRAPH.nodes["testing"].crates)
+        self.assertIn(cw.MODULE_PORT, GRAPH.nodes["modapi"].crates)
+
+    def test_any_linked_dependency_but_the_module_port_fails(self) -> None:
+        targets = sorted(
+            {sample_crate(GRAPH.nodes[target])[0] for target in GRAPH.reachable("testing")} - {cw.MODULE_PORT}
+        )
+        self.assertIn("vilicus-core", targets)
+        for target in targets:
+            for kind in sorted(cw.LINKED_KINDS):
+                with self.subTest(target=target, kind=kind):
+                    self.setUp()
+                    self.full_graph()
+                    self.workspace.depend(cw.REFERENCE_MODULE, target, kind)
+                    violations = [v for v in self.workspace.check() if v.startswith("reference:")]
+                    self.assertEqual(
+                        violations,
+                        [
+                            f"reference: {cw.REFERENCE_MODULE} -> {target} ({kind} dependency); the reference "
+                            f"module is a module and links {cw.MODULE_PORT} alone (AD-9)"
+                        ],
+                    )
+
+    def test_a_registry_dependency_fails_too(self) -> None:
+        self.full_graph()
+        source = "registry+https://github.com/rust-lang/crates.io-index"
+        self.workspace.declare(cw.REFERENCE_MODULE, {"name": "rusqlite", "kind": None, "source": source})
+        self.assert_single(self.workspace.check(), f"reference: {cw.REFERENCE_MODULE} -> rusqlite (normal dependency)")
+
+    def test_the_module_port_and_dev_dependencies_pass(self) -> None:
+        self.full_graph()
+        self.workspace.depend(cw.REFERENCE_MODULE, "vilicus-core", "dev")
+        self.assertEqual(self.workspace.check(), [])
 
 
 class PrivateAndShippedTest(WorkspaceTestCase):
@@ -462,7 +517,7 @@ class IsolatedTest(WorkspaceTestCase):
                         isolated = self.add_isolated(table, names)
                         self.workspace.depend(names[node.id], isolated, kind)
                         self.assert_single(
-                            self.workspace.check(),
+                            self.beside_the_reference_rule(self.workspace.check()),
                             f"forbidden edge {names[node.id]} -> {isolated} ({kind} dependency",
                             f"[isolated.{table.id}]: no crate may depend on it",
                         )
@@ -561,7 +616,7 @@ class ExclusiveDependencyTest(WorkspaceTestCase):
                         names = self.full_graph()
                         self.depend_on_registry(names[node.id], name, kind)
                         self.assert_single(
-                            self.workspace.check(),
+                            self.beside_the_reference_rule(self.workspace.check()),
                             f"isolated: {names[node.id]} -> {name} ({kind} dependency); only {table.crates[0]}",
                         )
 

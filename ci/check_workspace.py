@@ -3,7 +3,9 @@
 
 - Crate graph (doc/architecture-spine.md AD-3, D140): every edge between workspace crates must be
   allowed by ci/crate_graph.toml, every required node has a crate, and no dev-only crate may sit
-  in the normal or build closure of a shipped crate. A crate that matches a node by its directory
+  in the normal or build closure of a shipped crate. The reference module is a module (AD-9):
+  vilicus-module-api is its only normal or build dependency, workspace or registry, although the
+  testing node it shares with the test doubles reaches the Core (Story 3.5 review). A crate that matches a node by its directory
   only (a crate under testing/ that is neither listed nor named vilicus-double-*) fails. A crate
   of an `[isolated.*]` table of ci/crate_graph.toml (the fuzz targets, Story 2.7) is outside the
   graph: no workspace crate may depend on it by any kind of edge, and it may depend only on what
@@ -84,6 +86,11 @@ VENDORED_SOURCE_CONFIG = {
 WALK_SKIPPED_DIRECTORIES = frozenset({".git", "target"})
 ROOT_TARGET_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin"})
 LINKED_KINDS = frozenset({"normal", "build"})
+# AD-9: a module reaches the Core through the module port alone. The graph keeps shipped modules
+# to it; the reference module shares the testing node, whose doubles may reach the Core, so this
+# check holds it to the port (Story 3.5 review). Its dev-dependencies may serve its tests.
+REFERENCE_MODULE = "vilicus-mod-reference"
+MODULE_PORT = "vilicus-module-api"
 
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT = re.compile(r"//[^\n]*")
@@ -629,6 +636,19 @@ def check_vendored_config(workspace_root: Path) -> list[str]:
     return []
 
 
+def check_reference_module(metadata: dict) -> list[str]:
+    """The reference module links the module port alone: any other normal or build dependency,
+    a workspace crate or a registry package, fails."""
+    return [
+        f"reference: {package['name']} -> {dep['name']} ({dep['kind'] or 'normal'} dependency); the reference "
+        f"module is a module and links {MODULE_PORT} alone (AD-9)"
+        for package in _members(metadata)
+        if package["name"] == REFERENCE_MODULE
+        for dep in package["dependencies"]
+        if (dep["kind"] or "normal") in LINKED_KINDS and dep["name"] != MODULE_PORT
+    ]
+
+
 def check_exclusive_dependencies(graph: Graph, metadata: dict) -> list[str]:
     """A package an isolated table keeps for its crates is reached by no other workspace crate:
     not as a dependency of any kind it declares, nor through the registry packages it resolves
@@ -681,6 +701,7 @@ def run_checks(
         *check_sources(metadata),
         *check_root_manifest(root_manifest),
         *check_graph(Graph.from_config(config), crates),
+        *check_reference_module(metadata),
         *check_shipped_sources(Graph.from_config(config), crates),
         *check_exclusive_dependencies(Graph.from_config(config), metadata),
         *check_manifests(crates, workspace_root, toolchain_channel, files),

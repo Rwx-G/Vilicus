@@ -12,7 +12,9 @@ use vilicus_module_api::{
     Value, WriteError,
 };
 use vilicus_storage::{CallKey, Handle, KeyEpoch, Migration, ModuleFile, Partition, Read, Write};
-use vilicus_types::{AvailabilityState, CallId, Id, ModuleName, Principal, Source, Taint};
+use vilicus_types::{
+    AvailabilityState, CallId, Id, ModuleName, Principal, RecordLabels, Source, Taint,
+};
 
 use super::{ApiFiles, Apis, read_scope};
 use crate::availability::{ModuleStates, Stage};
@@ -20,8 +22,8 @@ use crate::boundary::{Boundary, HandlerError};
 use crate::record::tests::{KEY, create_sql, noon, scratch_dir};
 use crate::record::tests_call::{TestStamper, ella, noe};
 use crate::record::{
-    Authority, Call, CallResult, Consumed, Invocation, RecordError, Stamper, decode_inputs,
-    run_call,
+    Authority, Call, CallResult, Consumed, Invocation, RecordError, RecordProvenance, Stamper,
+    decode_inputs, run_call,
 };
 use crate::registry::{Registry, frozen};
 
@@ -683,4 +685,61 @@ fn a_connection_of_another_file_is_never_read() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// AD-7, D151: a record a call carries as a snapshot and also reads through a typed API counts as
+/// both combined, the most restrictive of the two: a `trusted` snapshot, by Ella, of an item stored
+/// `external` never lowers the note derived from it for her.
+#[test]
+fn a_read_of_a_snapshot_the_call_carries_never_lowers_it() {
+    let fixture = Fixture::new("api-snapshot");
+    let item = fixture.items[1];
+    let call = Call {
+        implicit_inputs: vec![RecordProvenance {
+            id: item,
+            labels: RecordLabels::TRUSTED,
+            author: Some(ella()),
+            data_types: vec![DataType::ShoppingList],
+            free_text: Vec::new(),
+        }],
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for: Some(ella()),
+        },
+        ..rule()
+    };
+    let notes = fixture.writer("notes", Partition::Household);
+    let declaration = fixture
+        .registry
+        .module(notes.file().module())
+        .expect("registered");
+    let read_first = |read: bool| {
+        let result = fixture.boundary().run(
+            notes,
+            declaration,
+            &call,
+            &fixture.invocation(),
+            &mut *fixture.stamper.borrow_mut(),
+            |records| {
+                if read {
+                    records.read("shop", "item", item)?;
+                }
+                records.insert("notes", &[("title", text("Pommes"))], &[])
+            },
+        );
+        let Ok(CallResult::Committed(outcome)) = result else {
+            panic!("{result:?}");
+        };
+        let stored = notes
+            .query_values(
+                "SELECT taint FROM notes WHERE id = ?1",
+                &[vilicus_storage::SqlValue::Blob(
+                    outcome.value.id.to_bytes().to_vec(),
+                )],
+            )
+            .expect("read");
+        format!("{stored:?}")
+    };
+    assert_eq!(read_first(false), r#"[[Text("trusted")]]"#);
+    assert_eq!(read_first(true), r#"[[Text("external")]]"#);
 }

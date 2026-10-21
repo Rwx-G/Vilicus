@@ -176,3 +176,17 @@ fn a_keyed_connection_keeps_the_build_temp_store() {
         0
     );
 }
+
+/// Review nit: the library is compiled with the stack protector of `build.rs`, so its object
+/// calls `__stack_chk_fail`; `_FORTIFY_SOURCE` applies to optimized builds only, which the tests
+/// are not.
+#[test]
+fn the_library_is_compiled_with_the_stack_protector() {
+    let archive = std::fs::read(env!("VILICUS_SQLCIPHER_ARCHIVE")).expect("read the archive");
+    let needle = b"__stack_chk_fail";
+    assert!(
+        archive.windows(needle.len()).any(|window| window == needle),
+        "no stack protector reference in {}",
+        env!("VILICUS_SQLCIPHER_ARCHIVE")
+    );
+}

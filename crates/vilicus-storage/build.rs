@@ -2,16 +2,20 @@
 //! `libsqlcipher.a` that rusqlite's `sqlcipher` feature links (D143).
 //!
 //! The defines are those `libsqlite3-sys` 0.38.2 passes for `bundled-sqlcipher`, which the E11 and
-//! E17 spikes ran on, with extension loading compiled out (D126, Story 3.1 AC7) and the OpenSSL
-//! provider named explicitly. `CFLAGS` and `LIBSQLITE3_FLAGS` are not read: no environment
-//! variable can change what the library is compiled with. The source is checked against
-//! `sqlcipher/SHA256SUMS` by `ci/check_sqlcipher_source.py`, not here.
+//! E17 spikes ran on, with extension loading compiled out (D126, Story 3.1 AC7), URI filenames no
+//! longer on by default, and the OpenSSL provider named explicitly; the compile adds the usual
+//! hardening flags. `CC` and `AR` choose the compiler and the archiver; `CFLAGS` and
+//! `LIBSQLITE3_FLAGS` are not read, so no environment variable changes the defines or the flags.
+//! The source is checked against `sqlcipher/SHA256SUMS` by `ci/check_sqlcipher_source.py`, and
+//! against the release tag by the `sqlcipher-regenerate` CI job, not here.
 //!
 //! Linking: `libsqlite3-sys` asks for `-lsqlcipher` (dynamic) and nothing else. This script
 //! bundles the archive into this crate with `+whole-archive`, so every SQLite symbol is defined
 //! wherever this crate sits in the link order, and puts the archive on the search path, so that
 //! request resolves to the same archive instead of any system SQLCipher. `libcrypto` follows the
-//! archive in this crate's own link line, so `--as-needed` keeps it.
+//! archive in this crate's own link line, so `--as-needed` keeps it. A binary that links
+//! `rusqlite` without linking this crate gets no `-lcrypto` and fails to link; only this crate
+//! depends on `rusqlite`, and its tests are unit tests, which link it.
 
 use std::env;
 use std::ffi::OsString;
@@ -36,7 +40,8 @@ const DEFINES: &[&str] = &[
     "SQLITE_ENABLE_STAT4",
     "SQLITE_SOUNDEX",
     "SQLITE_THREADSAFE=1",
-    "SQLITE_USE_URI",
+    // `SQLITE_USE_URI` left out: no dependency opens a URI, and without it a filename is a path
+    // unless a connection asks for URIs with `SQLITE_OPEN_URI`, which this crate never does.
     "HAVE_USLEEP=1",
     "HAVE_ISNAN",
     "_POSIX_THREAD_SAFE_FUNCTIONS",
@@ -53,6 +58,16 @@ const DEFINES: &[&str] = &[
     "SQLCIPHER_CRYPTO_OPENSSL",
     "SQLITE_OMIT_LOAD_EXTENSION",
 ];
+
+/// Hardening flags of the compile, as Debian's own packages use them: stack protector, stack
+/// clash protection and position-independent code always; `_FORTIFY_SOURCE=2` when optimizing,
+/// which it requires (the toolchain's own default, 3 on Ubuntu, is undefined first).
+const HARDENING: &[&str] = &[
+    "-fPIC",
+    "-fstack-protector-strong",
+    "-fstack-clash-protection",
+];
+const FORTIFY: &[&str] = &["-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2"];
 
 fn main() {
     println!("cargo:rerun-if-changed={SOURCE}");
@@ -73,8 +88,13 @@ fn main() {
     let library = out_dir.join("libsqlcipher.a");
 
     let mut compile = Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()));
-    compile.args(["-c", "-fPIC", "-ffunction-sections", "-fdata-sections"]);
-    compile.arg(format!("-O{}", required("OPT_LEVEL").to_string_lossy()));
+    compile.args(["-c", "-ffunction-sections", "-fdata-sections"]);
+    compile.args(HARDENING);
+    let opt_level = required("OPT_LEVEL").to_string_lossy().into_owned();
+    compile.arg(format!("-O{opt_level}"));
+    if opt_level != "0" {
+        compile.args(FORTIFY);
+    }
     if env::var("DEBUG").is_ok_and(|debug| debug == "true") {
         compile.arg("-g");
     }
@@ -100,6 +120,10 @@ fn main() {
     println!(
         "cargo:rustc-env=VILICUS_SQLCIPHER_DEFINES={}",
         DEFINES.join(" ")
+    );
+    println!(
+        "cargo:rustc-env=VILICUS_SQLCIPHER_ARCHIVE={}",
+        display(&library)
     );
 }
 

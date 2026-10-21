@@ -3,6 +3,8 @@
 
 use core::fmt;
 
+use crate::id::Id;
+
 closed_set! {
     /// The taint stored with a record. `member` is not a stored value: it exists only as a
     /// read-time view, [`EffectiveTaint`], which cannot be converted back to this type or
@@ -60,6 +62,30 @@ pub enum EffectiveTaint {
 }
 
 impl EffectiveTaint {
+    /// The taint a record stored `stored` and written by `author` has for `viewer`, the member a
+    /// read or a derivation acts for (`doc/architecture.md` section 5.4, rule 4): a `trusted`
+    /// record authored by a member other than the viewer reads as `member`. With no viewer, every
+    /// `trusted` record a member authored is another member's. A record without an author keeps
+    /// its stored label.
+    ///
+    /// ```
+    /// use vilicus_types::{EffectiveTaint, Id, Taint};
+    ///
+    /// let ella: Id = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f".parse()?;
+    /// let noe: Id = "017f22e2-79b0-7cc3-98c4-dc0c0c07398e".parse()?;
+    /// let trusted = EffectiveTaint::for_viewer(Taint::Trusted, Some(ella), Some(ella));
+    /// assert_eq!(trusted, EffectiveTaint::Trusted);
+    /// let quoted = EffectiveTaint::for_viewer(Taint::Trusted, Some(ella), Some(noe));
+    /// assert_eq!(quoted, EffectiveTaint::Member);
+    /// # Ok::<(), vilicus_types::IdError>(())
+    /// ```
+    pub fn for_viewer(stored: Taint, author: Option<Id>, viewer: Option<Id>) -> Self {
+        match (stored, author) {
+            (Taint::Trusted, Some(author)) if viewer != Some(author) => Self::Member,
+            _ => stored.into(),
+        }
+    }
+
     /// The name of this view value, for display.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -114,6 +140,34 @@ mod tests {
             assert_eq!(EffectiveTaint::from(*taint).as_str(), taint.as_str());
         }
         assert_eq!(EffectiveTaint::Member.to_string(), "member");
+    }
+
+    #[test]
+    fn another_members_trusted_record_reads_as_member() {
+        let ella = Id::parse("017f22e2-79b0-7cc3-98c4-dc0c0c07398f").expect("an id");
+        let noe = Id::parse("017f22e2-79b0-7cc3-98c4-dc0c0c07398e").expect("an id");
+        let view = EffectiveTaint::for_viewer;
+        assert_eq!(
+            view(Taint::Trusted, Some(ella), Some(ella)),
+            EffectiveTaint::Trusted
+        );
+        assert_eq!(
+            view(Taint::Trusted, Some(ella), Some(noe)),
+            EffectiveTaint::Member
+        );
+        assert_eq!(
+            view(Taint::Trusted, Some(ella), None),
+            EffectiveTaint::Member
+        );
+        for viewer in [Some(ella), Some(noe), None] {
+            assert_eq!(view(Taint::Trusted, None, viewer), EffectiveTaint::Trusted);
+            for author in [Some(ella), Some(noe), None] {
+                assert_eq!(
+                    view(Taint::External, author, viewer),
+                    EffectiveTaint::External
+                );
+            }
+        }
     }
 
     #[test]

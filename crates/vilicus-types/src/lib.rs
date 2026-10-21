@@ -1,6 +1,6 @@
-//! Shared vocabulary of Vilicus: identifiers, time, taint, tier, principal, the `source`
-//! vocabulary, the closed sets every other crate maps to, the confirmed V0.1 values and the shape
-//! of an error that reaches a client.
+//! Shared vocabulary of Vilicus: identifiers, time, taint, tier, principal, record revisions,
+//! the `source` vocabulary, the closed sets every other crate maps to, the confirmed V0.1 values
+//! and the shape of an error that reaches a client.
 //!
 //! It holds no key and depends on no other workspace crate; every crate of the dependency graph
 //! reaches it (`doc/architecture-spine.md`, AD-3 and Consistency Conventions). It does no I/O and
@@ -89,6 +89,7 @@ mod label;
 mod limits;
 mod name;
 mod principal;
+mod rev;
 mod source;
 mod taint;
 mod tier;
@@ -112,6 +113,7 @@ pub use limits::{
 };
 pub use name::NameError;
 pub use principal::Principal;
+pub use rev::Rev;
 pub use source::{ModuleName, Source};
 pub use taint::{EffectiveTaint, Taint};
 pub use tier::Tier;

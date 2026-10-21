@@ -12,10 +12,15 @@
 //! which the Core stamps. [`ModuleDeclaration::assert_valid`] applies the rules of the contract at
 //! build time, and the Core's registry applies them again, then compares the declaration with the
 //! schema the migrations produce and the tools with `doc/capability-matrix.md`.
+//!
+//! A write gives each field a [`Value`], which [`Field::check_value`] holds to the field's
+//! declaration (FR-58, D98): the Core runs it on every write, and checks in the write transaction
+//! that a reviewed-vocabulary label is one an adult confirmed (D104).
 
 mod check;
 mod declaration;
 mod tool;
+mod value;
 
 pub use check::{
     CORE_MATRIX_SECTION, DeclarationError, FTS5_RESERVED_COLUMNS, IDENTIFIER_MAX_LEN,
@@ -26,6 +31,10 @@ pub use declaration::{
     Fts5Tokenizer, Migration, ModuleDeclaration, SqlType, Structured, Table,
 };
 pub use tool::{Confirmation, MatrixRow, Tool};
+pub use value::{
+    VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, Value, ValueError,
+    check_vocabulary_label, is_vocabulary_label_letter,
+};
 pub use vilicus_types::{DataType, ExceptionClass, Tier};
 
 #[cfg(test)]

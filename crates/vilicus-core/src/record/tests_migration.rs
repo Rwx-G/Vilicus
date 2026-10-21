@@ -2,7 +2,8 @@
 //! migrations on a copy swapped in, the original kept cold (AC2, AC3, AC8, D132), a failure that
 //! keeps the previous file and alerts while other files proceed (AC4), a file newer than the code
 //! (AC5), a changed migration (AC1), the free space (AC6) and the checks of the migrated copy
-//! (D127, D146).
+//! (D127, D146). Story 3.9: a failed migration held across runs by its mark until the code
+//! changes, and a failure of the host's state not held.
 
 use std::fs;
 use std::path::Path;
@@ -11,7 +12,7 @@ use vilicus_module_api::{
     DataType, Field, FieldKind, Fts5Content, Fts5Table, Fts5Tokenizer, ModuleDeclaration,
     Structured, Table, Value,
 };
-use vilicus_storage::maintenance::{SchemaVersions, VerifiedBackup};
+use vilicus_storage::maintenance::{self, FailedMigrationMark, SchemaVersions, VerifiedBackup};
 use vilicus_storage::{
     CORE_SCHEMA_VERSION, KeyEpoch, Migration, MigrationTrack, ModuleFile, Partition, Read, Write,
 };
@@ -22,6 +23,7 @@ use super::tests::{KEY, create_sql, envelope_of, registry_of, scratch_dir, text,
 use crate::alert::InstanceAdminAlert;
 use crate::registry::{
     FileError, FileMigration, FileToMigrate, MigrationError, MigrationRunError, frozen,
+    migration_code,
 };
 
 const CORE: u32 = CORE_SCHEMA_VERSION;
@@ -142,7 +144,8 @@ fn target(file: &ModuleFile) -> FileToMigrate<'_> {
     }
 }
 
-/// The bytes of the file and the names of its directory, every connection closed.
+/// The bytes of the file and the names of its directory, every connection closed. The mark of a
+/// failed migration beside a file (Story 3.9) is checked on its own.
 fn disk(file: &ModuleFile) -> (Vec<u8>, Vec<String>) {
     let mut names: Vec<String> = fs::read_dir(file.directory())
         .expect("list")
@@ -153,7 +156,11 @@ fn disk(file: &ModuleFile) -> (Vec<u8>, Vec<String>) {
                 .to_string_lossy()
                 .into_owned()
         })
-        .filter(|name| !name.ends_with("-shm") && !name.ends_with("-wal"))
+        .filter(|name| {
+            !name.ends_with("-shm")
+                && !name.ends_with("-wal")
+                && !name.ends_with(".migration-failed")
+        })
         .collect();
     names.sort();
     (fs::read(file.path()).expect("read"), names)
@@ -354,6 +361,19 @@ fn a_failed_migration_keeps_the_previous_file_and_the_others_proceed() {
         })
     ));
     assert_eq!(versions(&member).module, 2);
+    assert_eq!(
+        maintenance::failed_migration_mark(&household).expect("read"),
+        Some(FailedMigrationMark {
+            code: migration_code(v2),
+            track: MigrationTrack::Module,
+            version: 2,
+        }),
+        "Story 3.9: the failure is held beside the file"
+    );
+    assert_eq!(
+        maintenance::failed_migration_mark(&member).expect("read"),
+        None
+    );
 }
 
 /// AC5 (D21): a file newer than the code, on either track, is left alone by the runner, refused
@@ -658,5 +678,146 @@ fn a_refused_statement_ends_the_migration_with_nothing_written() {
         assert_eq!(disk(&file), before, "{sql}");
         assert_eq!(versions(&file).module, 1);
         assert_eq!(labels_at(&file.path()), ["before"]);
+    }
+}
+
+// Story 3.9: a failed migration is held across starts until the code changes.
+
+/// A file whose migration failed is held by its mark: the next run, as at the next start, reports
+/// it still failed under the same code without copying or migrating it or alerting again, and the
+/// Core still refuses it; a forward release, whose code differs, tries it again and the mark goes.
+#[test]
+fn a_failed_migration_is_held_across_runs_until_the_code_changes() {
+    let v1 = shop(None, false);
+    let failing = shop(Some("UPDATE items SET quantity = quantity * 1000;"), false);
+    let fixed = shop(Some("UPDATE items SET quantity = quantity * 10;"), false);
+    assert_ne!(migration_code(failing), migration_code(fixed));
+    let dir = scratch_dir("migrate-held");
+    let file = create_at(v1, &dir, Partition::Household);
+    insert_item(&file, v1, "five", 5);
+    let registry = registry_of(vec![failing]);
+    let first = registry.migrate_files(&[target(&file)]).expect("run");
+    assert!(
+        matches!(first.as_slice(), [FileMigration::Failed { .. }]),
+        "{first:?}"
+    );
+    let before = disk(&file);
+    let mark = maintenance::failed_migration_mark(&file)
+        .expect("read")
+        .expect("marked");
+    for _ in 0..2 {
+        let again = registry_of(vec![failing])
+            .migrate_files(&[target(&file)])
+            .expect("run");
+        let [FileMigration::StillFailed { mark: held }] = again.as_slice() else {
+            panic!("{again:?}");
+        };
+        assert_eq!(*held, mark);
+        assert_eq!(disk(&file), before, "nothing copied, migrated or swapped");
+    }
+    assert!(matches!(
+        registry.open::<Read>(&file, &KEY),
+        Err(FileError::MigrationPending { .. })
+    ));
+    let released = registry_of(vec![fixed])
+        .migrate_files(&[target(&file)])
+        .expect("run");
+    assert!(
+        matches!(released.as_slice(), [FileMigration::Migrated { .. }]),
+        "{released:?}"
+    );
+    assert_eq!(versions(&file).module, 2);
+    assert_eq!(
+        maintenance::failed_migration_mark(&file).expect("read"),
+        None
+    );
+}
+
+/// A failure of the host's state is not held: three cold copies no verified backup covers fail
+/// the migration without a mark, and a later run tries it again.
+#[test]
+fn a_failure_of_the_hosts_state_is_not_held() {
+    let v1 = shop(None, false);
+    let v2 = shop(Some(""), false);
+    let dir = scratch_dir("migrate-not-held");
+    let file = create_at(v1, &dir, Partition::Household);
+    for earlier in ["0.0", "0.1", "1.0"] {
+        fs::copy(
+            file.path(),
+            dir.join(format!("shop.household.db.pre-{earlier}")),
+        )
+        .expect("a cold copy");
+    }
+    let registry = registry_of(vec![v2]);
+    let outcomes = registry.migrate_files(&[target(&file)]).expect("run");
+    let [FileMigration::Failed { error, .. }] = outcomes.as_slice() else {
+        panic!("{outcomes:?}");
+    };
+    assert!(error.is_environmental(), "{error:?}");
+    assert_eq!(
+        maintenance::failed_migration_mark(&file).expect("read"),
+        None
+    );
+    let again = registry.migrate_files(&[target(&file)]).expect("run");
+    assert!(
+        matches!(again.as_slice(), [FileMigration::Failed { .. }]),
+        "tried again: {again:?}"
+    );
+}
+
+/// A mark that names another code, or that does not read, holds nothing: it is cleared and the
+/// migration runs; a mark beside a file with nothing to migrate is stale and cleared too.
+#[test]
+fn a_mark_of_another_code_or_malformed_is_cleared_and_the_migration_runs() {
+    let v1 = shop(None, false);
+    let v2 = shop(Some(""), false);
+    let registry = registry_of(vec![v2]);
+    for (label, written) in [
+        (
+            "other-code",
+            Some(FailedMigrationMark {
+                code: [0; 32],
+                track: MigrationTrack::Module,
+                version: 2,
+            }),
+        ),
+        ("malformed", None),
+    ] {
+        let dir = scratch_dir(&format!("migrate-mark-{label}"));
+        let file = create_at(v1, &dir, Partition::Household);
+        match written {
+            Some(mark) => maintenance::mark_failed_migration(&file, mark).expect("mark"),
+            None => fs::write(maintenance::failed_migration_mark_path(&file), "torn")
+                .expect("a torn mark"),
+        }
+        let outcomes = registry.migrate_files(&[target(&file)]).expect("run");
+        assert!(
+            matches!(outcomes.as_slice(), [FileMigration::Migrated { .. }]),
+            "{label}: {outcomes:?}"
+        );
+        assert_eq!(
+            maintenance::failed_migration_mark(&file).expect("read"),
+            None,
+            "{label}"
+        );
+        maintenance::mark_failed_migration(
+            &file,
+            FailedMigrationMark {
+                code: migration_code(v2),
+                track: MigrationTrack::Module,
+                version: 2,
+            },
+        )
+        .expect("a stale mark");
+        let current = registry.migrate_files(&[target(&file)]).expect("run");
+        assert!(
+            matches!(current.as_slice(), [FileMigration::Current]),
+            "{label}: {current:?}"
+        );
+        assert_eq!(
+            maintenance::failed_migration_mark(&file).expect("read"),
+            None,
+            "{label}: a file with nothing to migrate is held by no mark"
+        );
     }
 }

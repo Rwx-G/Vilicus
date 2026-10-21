@@ -9,13 +9,24 @@
 //! against the declaration and every FTS5 index checked, and only then swapped in. A file whose
 //! migration fails keeps its previous file untouched and gets a typed instance admin alert, and
 //! the next file proceeds.
+//!
+//! A failure the same code would meet again on the same file (a statement refused or failing on
+//! the file's content, a changed migration, a migrated copy outside its declaration) is held
+//! across starts (AD-54 `failed migration`): the runner marks it beside the file, naming the
+//! code, and while the mark names the code of the run the file is reported
+//! [`FileMigration::StillFailed`] without a copy, a migration or another alert. A forward release
+//! changes the code, so its first run tries the file again. A failure of the host's state (the
+//! disk, a lock, cold copies a verified backup does not cover yet) is not held: the next run tries
+//! the file again.
 
 use core::fmt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use vilicus_module_api::ModuleDeclaration;
-use vilicus_storage::maintenance::{self, ColdCopy, MigrationCopy, SchemaVersions, VerifiedBackup};
+use vilicus_storage::maintenance::{
+    self, ColdCopy, FailedMigrationMark, MigrationCopy, SchemaVersions, VerifiedBackup,
+};
 use vilicus_storage::{
     CORE_SCHEMA_VERSION, FrozenMigration, Migration, MigrationTrack, ModuleFile, Read, Write,
 };
@@ -82,6 +93,13 @@ pub enum FileMigration {
         /// The alert to the instance admin.
         alert: InstanceAdminAlert,
     },
+    /// The file's migration failed earlier under the same code, as the mark beside it says
+    /// (AD-54 `failed migration`): it is not tried again, and stays at its versions, until a
+    /// forward release changes the code. The alert was given when it failed.
+    StillFailed {
+        /// The mark of the failure.
+        mark: FailedMigrationMark,
+    },
 }
 
 /// Why one file's migration failed.
@@ -118,6 +136,21 @@ impl fmt::Display for MigrationError {
 }
 
 impl std::error::Error for MigrationError {}
+
+impl MigrationError {
+    /// True for a failure of the host's state rather than of the file and the code
+    /// ([`vilicus_storage::Error::is_environmental`]): the next run tries the file again, while
+    /// any other failure is held until the code changes.
+    pub fn is_environmental(&self) -> bool {
+        match self {
+            Self::Storage(error)
+            | Self::File(FileError::Storage(error))
+            | Self::StoredRow(RecordError::Storage(error))
+            | Self::Fts5Index { error, .. } => error.is_environmental(),
+            Self::File(_) | Self::StoredRow(_) => false,
+        }
+    }
+}
 
 impl From<vilicus_storage::Error> for MigrationError {
     fn from(error: vilicus_storage::Error) -> Self {
@@ -189,6 +222,7 @@ enum Standing {
     },
     NewerThanCode(InstanceAdminAlert),
     Failed(InstanceAdminAlert, MigrationError),
+    StillFailed(FailedMigrationMark),
 }
 
 impl Registry {
@@ -246,10 +280,16 @@ impl Registry {
             .map(|((target, module), standing)| match standing {
                 Standing::Current => FileMigration::Current,
                 Standing::NewerThanCode(alert) => FileMigration::NewerThanCode { alert },
-                Standing::Failed(alert, error) => FileMigration::Failed { alert, error },
+                Standing::StillFailed(mark) => FileMigration::StillFailed { mark },
+                Standing::Failed(alert, error) => held(module, target.file, alert, error),
                 Standing::Pending {
                     from, migrations, ..
-                } => self.migrate_on_copy(module, target, from, &migrations),
+                } => match self.migrate_on_copy(module, target, from, &migrations) {
+                    FileMigration::Failed { alert, error } => {
+                        held(module, target.file, alert, error)
+                    }
+                    other => other,
+                },
             })
             .collect())
     }
@@ -334,9 +374,54 @@ impl Registry {
     }
 }
 
+/// The identity of the code a file of `module` migrates under: the SHA-256 of the Core's
+/// version, the frozen hashes of the Core track's migrations and the module's declaration, its
+/// migrations included. A forward release changes it, by its version if by nothing else, so a
+/// failed migration's mark naming another code no longer holds the file.
+pub(crate) fn migration_code(module: &ModuleDeclaration) -> [u8; 32] {
+    let mut text = format!(
+        "vilicus migration code 1\ncore {}\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    for migration in vilicus_storage::core_migrations() {
+        for byte in migration.sha256 {
+            text.push_str(&format!("{byte:02x}"));
+        }
+        text.push('\n');
+    }
+    text.push_str(&format!("{module:?}"));
+    vilicus_crypto::sha256(text.as_bytes())
+}
+
+/// The outcome of a file whose migration failed with `error`: unless the failure is the host's,
+/// it is marked beside the file under the run's code, so the next run holds the file instead of
+/// trying the same migration again. A mark that cannot be written leaves the failure to be met
+/// again at the next run, with the previous file kept all the same.
+fn held(
+    module: &ModuleDeclaration,
+    file: &ModuleFile,
+    alert: InstanceAdminAlert,
+    error: MigrationError,
+) -> FileMigration {
+    if let InstanceAdminAlert::MigrationFailed { track, version, .. } = alert
+        && !error.is_environmental()
+    {
+        let mark = FailedMigrationMark {
+            code: migration_code(module),
+            track,
+            version,
+        };
+        // Not reported: without its mark, the failure is only met again at the next run.
+        let _ = maintenance::mark_failed_migration(file, mark);
+    }
+    FileMigration::Failed { alert, error }
+}
+
 /// Where `target` stands, once what an interrupted migration left beside it is cleared: the
 /// code's own migrations checked against their frozen hashes, then the file's versions and its
-/// record of frozen hashes, read on a read handle closed at once.
+/// record of frozen hashes, read on a read handle closed at once; a file with pending migrations
+/// whose mark of a failed migration names this code still failed, and a mark of another code, or
+/// beside a file with nothing pending, is cleared.
 fn standing(module: &'static ModuleDeclaration, target: &FileToMigrate<'_>) -> Standing {
     let file = target.file;
     if let Err(error) = maintenance::clear_interrupted_migration(file) {
@@ -379,7 +464,38 @@ fn standing(module: &'static ModuleDeclaration, target: &FileToMigrate<'_>) -> S
         core: CORE_SCHEMA_VERSION,
         module: module.latest_version(),
     };
-    match read() {
+    let outcome = read();
+    if let Ok((from, _)) = &outcome
+        && *from != latest
+        && from.core <= latest.core
+        && from.module <= latest.module
+    {
+        match maintenance::failed_migration_mark(file) {
+            Ok(Some(mark)) if mark.code == migration_code(module) => {
+                return Standing::StillFailed(mark);
+            }
+            Ok(None) => {}
+            Ok(Some(_)) | Err(vilicus_storage::Error::MalformedFailureMark(_)) => {
+                if let Err(error) = maintenance::clear_failed_migration_mark(file) {
+                    return Standing::Failed(
+                        InstanceAdminAlert::migration_failed(file, MigrationTrack::Module, 0),
+                        MigrationError::Storage(error),
+                    );
+                }
+            }
+            Err(error) => {
+                return Standing::Failed(
+                    InstanceAdminAlert::migration_failed(file, MigrationTrack::Module, 0),
+                    MigrationError::Storage(error),
+                );
+            }
+        }
+    } else if outcome.is_ok() {
+        // A file with nothing to migrate, or newer than the code, is held by no mark: one left
+        // beside it from an earlier state is stale.
+        let _ = maintenance::clear_failed_migration_mark(file);
+    }
+    match outcome {
         Ok((from, _)) if from == latest => Standing::Current,
         Ok((from, _)) if from.core > latest.core => Standing::NewerThanCode(
             InstanceAdminAlert::newer_than_code(file, MigrationTrack::Core, from.core, latest.core),

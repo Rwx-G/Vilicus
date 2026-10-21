@@ -74,6 +74,8 @@ pub use matrix::{
     CapabilityMatrix, MatrixCheckError, MatrixDifference, MatrixEntry, MatrixError, MatrixSection,
     RegisteredTool, RowClass, RowTier,
 };
+#[cfg(test)]
+pub(crate) use migrate::migration_code;
 pub use migrate::{FileMigration, FileToMigrate, MigrationError, MigrationRunError};
 pub use schema::SchemaError;
 

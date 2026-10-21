@@ -161,6 +161,11 @@ pub enum WriteError {
         /// The table.
         table: &'static str,
     },
+    /// A write has more inputs, declared and implicit together, than the Core accepts.
+    TooManyInputs {
+        /// The table.
+        table: &'static str,
+    },
     /// An input is a record the Core does not know: neither in this file nor among the records
     /// the call read.
     UnknownInput {
@@ -216,6 +221,12 @@ impl fmt::Display for WriteError {
             }
             Self::MissingInputs { table } => {
                 write!(formatter, "{table}: a derived write declares no input")
+            }
+            Self::TooManyInputs { table } => {
+                write!(
+                    formatter,
+                    "{table}: a write with more inputs than the Core accepts"
+                )
             }
             Self::UnknownInput { table } => {
                 write!(formatter, "{table}: an input record the Core does not know")

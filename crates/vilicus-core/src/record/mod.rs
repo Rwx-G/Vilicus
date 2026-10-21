@@ -78,7 +78,7 @@ use vilicus_types::{Id, UtcMillis};
 
 pub use call::{
     Authority, Call, CallOutcome, CallResult, Consumed, EarlierCall, EventDelivery, Invocation,
-    RecordChange, RequestedEffect, Stamper, run_call,
+    MAX_WRITE_INPUTS, RecordChange, RequestedEffect, Stamper, run_call,
 };
 pub use effect::{
     ReportTo, UnknownEffect, effects_to_perform, record_effect_outcome, retry_failed_effect,
@@ -185,6 +185,11 @@ pub enum RecordError {
         /// The table.
         table: &'static str,
     },
+    /// A write has more than `MAX_WRITE_INPUTS` inputs, declared and implicit together.
+    TooManyInputs {
+        /// The table.
+        table: &'static str,
+    },
     /// An input is neither a record of this file nor one the call read.
     UnknownInput {
         /// The table written to.
@@ -270,6 +275,12 @@ impl fmt::Display for RecordError {
             }
             Self::MissingInputs { table } => {
                 write!(formatter, "{table}: a derived write declares no input")
+            }
+            Self::TooManyInputs { table } => {
+                write!(
+                    formatter,
+                    "{table}: a write with more inputs than the Core accepts"
+                )
             }
             Self::UnknownInput { table } => {
                 write!(formatter, "{table}: an input record the Core does not know")

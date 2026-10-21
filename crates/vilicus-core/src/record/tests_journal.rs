@@ -19,8 +19,9 @@ use super::tests_call::{
     provenance, task,
 };
 use super::{
-    Authority, Call, CallResult, Consumed, EventDelivery, Invocation, RecordError, ReportTo,
-    decode_row, effects_to_perform, record_effect_outcome, retry_failed_effect, run_call,
+    Authority, Call, CallResult, Consumed, EventDelivery, Invocation, MAX_WRITE_INPUTS,
+    RecordError, ReportTo, decode_row, effects_to_perform, record_effect_outcome,
+    retry_failed_effect, run_call,
 };
 
 fn key<'a>(call: &'a Call, invocation: &Invocation) -> CallKey<'a> {
@@ -265,6 +266,157 @@ fn implicit_inputs_are_journaled_with_their_provenance() {
             ),
             (definition.id, true, "external", Some(noe()), "meals"),
         ]
+    );
+
+    // Review M3 and its nit: a delete journals the call's implicit inputs, and an implicit input
+    // the module names is the captured snapshot, marked implicit, counted once (D147).
+    let second = new_invocation(&rule);
+    let CallResult::Committed(outcome) =
+        run_call(&handle, module, &rule, &second, &mut stamper, |records| {
+            records.insert("notes", &note("Rappel"), &[definition.id, listed.id])?;
+            records.delete("notes", listed.id)
+        })
+        .expect("commits")
+    else {
+        panic!("a new call runs")
+    };
+    assert_eq!(outcome.changes[0].inputs, [definition.id, listed.id]);
+    assert_eq!(outcome.changes[1].inputs, [definition.id]);
+    let rows = handle.journaled_call(&key(&rule, &second)).expect("read");
+    let marks = |bytes: &[u8]| -> Vec<(Id, bool, String)> {
+        decode_inputs(bytes)
+            .expect("decode")
+            .into_iter()
+            .map(|input| (input.id, input.implicit, input.text_taint))
+            .collect()
+    };
+    assert_eq!(
+        marks(&rows[0].inputs),
+        [
+            (definition.id, true, "external".to_owned()),
+            (listed.id, false, "trusted".to_owned()),
+        ]
+    );
+    assert_eq!(rows[1].rev_after, None);
+    assert_eq!(
+        marks(&rows[1].inputs),
+        [(definition.id, true, "external".to_owned())]
+    );
+}
+
+/// Story 3.6 review, minor 1: a write of more than `MAX_WRITE_INPUTS` inputs, declared and
+/// implicit together, is refused with a typed error before any input is read.
+#[test]
+fn a_write_with_too_many_inputs_is_refused() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "too-many-inputs");
+    let mut stamper = TestStamper::at(noon());
+    let by = own_action(ella());
+    let empty = content(&handle);
+    let inputs: Vec<Id> = (0..=u16::try_from(MAX_WRITE_INPUTS).expect("small"))
+        .map(|n| {
+            let mut random = [0x44; 10];
+            random[8..].copy_from_slice(&n.to_be_bytes());
+            Id::new_v7(noon(), random).expect("after the epoch")
+        })
+        .collect();
+    assert_eq!(inputs.len(), MAX_WRITE_INPUTS + 1);
+    let outcome = run_call(
+        &handle,
+        module,
+        &by,
+        &new_invocation(&by),
+        &mut stamper,
+        |records| {
+            let refused = records.insert("notes", &note("Pommes"), &inputs);
+            assert_eq!(
+                refused,
+                Err(WriteError::TooManyInputs { table: "notes" }),
+                "the module learns why"
+            );
+            refused
+        },
+    );
+    assert!(
+        matches!(outcome, Err(RecordError::TooManyInputs { table: "notes" })),
+        "{outcome:?}"
+    );
+    let mut rule = consumer_call();
+    rule.principal = Principal::Rule;
+    rule.source = Source::Rule(task());
+    rule.implicit_inputs = vec![
+        provenance(
+            member_id(51),
+            Taint::Trusted,
+            Some(ella()),
+            &[DataType::Meals]
+        );
+        2
+    ];
+    let outcome = run_call(
+        &handle,
+        module,
+        &rule,
+        &new_invocation(&rule),
+        &mut stamper,
+        |records| records.insert("notes", &note("Pommes"), &inputs[..MAX_WRITE_INPUTS - 1]),
+    );
+    assert!(
+        matches!(outcome, Err(RecordError::TooManyInputs { .. })),
+        "implicit ones count: {outcome:?}"
+    );
+    assert_eq!(content(&handle), empty);
+}
+
+/// A clock that moves a day at every reading.
+struct RacingClock(TestStamper);
+
+impl super::Stamper for RacingClock {
+    fn now(&mut self) -> vilicus_types::UtcMillis {
+        self.0.later(24 * 60 * 60 * 1000);
+        super::Stamper::now(&mut self.0)
+    }
+
+    fn id_random(&mut self) -> [u8; 10] {
+        super::Stamper::id_random(&mut self.0)
+    }
+}
+
+/// Story 3.6 review, minor 4: every journal row of a call carries the call's start time, however
+/// long the call takes, so a retention cutoff keeps or deletes the whole call.
+#[test]
+fn every_journal_row_of_a_call_carries_its_start_time() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "start-time");
+    let mut clock = RacingClock(TestStamper::at(noon()));
+    let by = own_action(ella());
+    let invocation = new_invocation(&by);
+    run_call(&handle, module, &by, &invocation, &mut clock, |records| {
+        for title in ["Pommes", "Poires", "Prunes"] {
+            records.insert("notes", &note(title), &[])?;
+        }
+        Ok(())
+    })
+    .expect("commits");
+    let rows = handle.journaled_call(&key(&by, &invocation)).expect("read");
+    let started = stamper_time(noon(), 24 * 60 * 60 * 1000);
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.created_at == started), "{rows:?}");
+    let updated: Vec<vilicus_storage::SqlValue> =
+        super::tests::rows(&handle, "SELECT updated_at FROM notes ORDER BY updated_at")
+            .into_iter()
+            .map(|mut row| row.remove(0))
+            .collect();
+    assert_eq!(updated.len(), 3);
+    assert_ne!(
+        updated[0], updated[2],
+        "the writes themselves are later and later"
+    );
+    let cutoff = stamper_time(noon(), 3 * 24 * 60 * 60 * 1000);
+    assert_eq!(
+        handle.purge_journal(cutoff).expect("purge").deleted,
+        3,
+        "the whole call"
     );
 }
 

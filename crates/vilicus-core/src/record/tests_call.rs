@@ -726,13 +726,14 @@ fn a_refused_write_rolls_back_the_whole_call() {
     assert_eq!(rows(&handle, "SELECT id FROM notes").len(), 2);
 }
 
-/// A clock that panics on its second reading: a panic inside the Core, after a write of the call.
+/// A clock that panics on its third reading: the call's start, then the first write's, then a
+/// panic inside the Core, after a write of the call.
 struct PanickingStamper(TestStamper, u32);
 
 impl Stamper for PanickingStamper {
     fn now(&mut self) -> UtcMillis {
         self.1 += 1;
-        assert!(self.1 < 2, "the clock failed");
+        assert!(self.1 < 3, "the clock failed");
         self.0.now()
     }
 

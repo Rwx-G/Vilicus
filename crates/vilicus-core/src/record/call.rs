@@ -153,6 +153,11 @@ pub struct RequestedEffect {
     pub idempotency_key: Vec<u8>,
 }
 
+/// The most inputs one write may have, declared and implicit together: a write naming more is
+/// refused ([`RecordError::TooManyInputs`]). Far above what a derivation reads, and low enough
+/// that resolving and journaling them stays cheap.
+pub const MAX_WRITE_INPUTS: usize = 4096;
+
 /// A record a call changed: what the write journal of the call records (AD-26).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordChange {
@@ -249,12 +254,14 @@ pub fn run_call<T>(
         {
             return Ok(CallResult::AlreadyConsumed);
         }
+        let started = stamper.now();
         let mut records = CallRecords {
             handle,
             module,
             call,
             key,
             request_hash: invocation.request_hash,
+            started,
             stamper,
             changes: Vec::new(),
             effects: Vec::new(),
@@ -262,7 +269,6 @@ pub fn run_call<T>(
         };
         let returned = body(&mut records);
         let CallRecords {
-            stamper,
             changes,
             effects,
             refusal,
@@ -273,7 +279,7 @@ pub fn run_call<T>(
             (None, Err(error)) => Err(RecordError::Aborted(error)),
             (None, Ok(value)) => {
                 if let Some(delivery) = invocation.delivery {
-                    handle.record_consumed(delivery.event, delivery.consumer, stamper.now())?;
+                    handle.record_consumed(delivery.event, delivery.consumer, started)?;
                 }
                 Ok(CallResult::Committed(CallOutcome {
                     value,
@@ -437,6 +443,10 @@ struct CallRecords<'a> {
     call: &'a Call,
     key: CallKey<'a>,
     request_hash: Option<[u8; 32]>,
+    /// The time the call started, read once before the module's code runs: the time of every
+    /// journal row, effect intent and consumed event of the call, so a retention cutoff never
+    /// splits a call.
+    started: UtcMillis,
     stamper: &'a mut dyn Stamper,
     changes: Vec<RecordChange>,
     effects: Vec<RequestedEffect>,
@@ -502,7 +512,6 @@ impl CallRecords<'_> {
         inputs: &[Id],
     ) -> Result<Written, RecordError> {
         let table = declared_table(self.module, table)?;
-        let declared = inputs;
         let (input_ids, inputs) = self.resolve_inputs(table, inputs)?;
         let stamp = provenance::stamp(self.call, table, fields, &inputs, None)?;
         let now = self.stamper.now();
@@ -549,8 +558,7 @@ impl CallRecords<'_> {
             },
             None,
             after,
-            &journal::encode_inputs(&inputs, declared),
-            now,
+            &journal::encode_inputs(&inputs, &self.call.implicit_inputs)?,
         )?;
         Ok(Written {
             id,
@@ -567,7 +575,6 @@ impl CallRecords<'_> {
         inputs: &[Id],
     ) -> Result<Written, RecordError> {
         let table = declared_table(self.module, table)?;
-        let declared = inputs;
         let (input_ids, inputs) = self.resolve_inputs(table, inputs)?;
         let (stored, rev) = read_stored(self.handle, table, id)?;
         if rev != expected {
@@ -618,8 +625,7 @@ impl CallRecords<'_> {
             },
             before,
             after,
-            &journal::encode_inputs(&inputs, declared),
-            now,
+            &journal::encode_inputs(&inputs, &self.call.implicit_inputs)?,
         )?;
         Ok(Written { id, rev: next })
     }
@@ -640,31 +646,31 @@ impl CallRecords<'_> {
         let before = journal::image(self.handle, table, id)?;
         self.handle
             .execute_values(&format!("DELETE FROM {} WHERE id = ?1", table.name), &key)?;
-        let now = self.stamper.now();
+        let call = self.call;
+        let implicit = &call.implicit_inputs;
+        let inputs = journal::encode_inputs(implicit, implicit)?;
         self.journal(
             RecordChange {
                 table: table.name,
                 id,
                 before: Some(rev),
                 after: None,
-                inputs: Vec::new(),
+                inputs: implicit.iter().map(|input| input.id).collect(),
             },
             before,
             None,
-            &journal::encode_inputs(&[], &[]),
-            now,
+            &inputs,
         )
     }
 
-    /// Journals `change` in the call's transaction, with the record's images and the encoded
-    /// provenance of its inputs, then keeps it for the call's outcome.
+    /// Journals `change` in the call's transaction, at the call's start time, with the record's
+    /// images and the encoded provenance of its inputs, then keeps it for the call's outcome.
     fn journal(
         &mut self,
         change: RecordChange,
         image_before: Option<Vec<u8>>,
         image_after: Option<Vec<u8>>,
         inputs: &[u8],
-        now: UtcMillis,
     ) -> Result<(), RecordError> {
         let (authority, member) = journaled_authority(&self.call.authority);
         self.handle.append_journal(&JournalEntry {
@@ -681,7 +687,7 @@ impl CallRecords<'_> {
             image_before: image_before.as_deref(),
             image_after: image_after.as_deref(),
             inputs,
-            created_at: now,
+            created_at: self.started,
         })?;
         self.changes.push(change);
         Ok(())
@@ -716,7 +722,7 @@ impl CallRecords<'_> {
                 effect,
                 idempotency_key,
                 payload,
-                created_at: now,
+                created_at: self.started,
             })
             .map_err(|error| match error {
                 vilicus_storage::Error::EffectConflict => RecordError::EffectConflict,
@@ -732,14 +738,20 @@ impl CallRecords<'_> {
         Ok(intent.id)
     }
 
-    /// The provenance of each input, each id once: a record of this file, read in the write
-    /// transaction, or one the call read from another file, then the call's implicit inputs. A
-    /// write that must declare inputs and has none is refused.
+    /// The provenance of each input, each id once: the snapshot the call carries when the id is
+    /// one of its implicit inputs (D147: an implicit input counts as captured, even when the
+    /// module names it), otherwise a record of this file, read in the write transaction, or one
+    /// the call read from another file; then the call's other implicit inputs. A write that must
+    /// declare inputs and has none is refused, and so is one of more than [`MAX_WRITE_INPUTS`]
+    /// inputs, declared and implicit together.
     fn resolve_inputs(
         &self,
         table: &'static Table,
         inputs: &[Id],
     ) -> Result<(Vec<Id>, Vec<RecordProvenance>), RecordError> {
+        if inputs.len().saturating_add(self.call.implicit_inputs.len()) > MAX_WRITE_INPUTS {
+            return Err(RecordError::TooManyInputs { table: table.name });
+        }
         if inputs.is_empty()
             && self.call.implicit_inputs.is_empty()
             && provenance::requires_inputs(self.call)
@@ -752,15 +764,23 @@ impl CallRecords<'_> {
             if ids.contains(id) {
                 continue;
             }
-            let found = match self.read_in_file(*id)? {
-                Some(found) => found,
-                None => self
-                    .call
-                    .read
-                    .iter()
-                    .find(|read| read.id == *id)
-                    .cloned()
-                    .ok_or(RecordError::UnknownInput { table: table.name })?,
+            let implicit = self
+                .call
+                .implicit_inputs
+                .iter()
+                .find(|implicit| implicit.id == *id);
+            let found = match implicit {
+                Some(implicit) => implicit.clone(),
+                None => match self.read_in_file(*id)? {
+                    Some(found) => found,
+                    None => self
+                        .call
+                        .read
+                        .iter()
+                        .find(|read| read.id == *id)
+                        .cloned()
+                        .ok_or(RecordError::UnknownInput { table: table.name })?,
+                },
             };
             ids.push(*id);
             resolved.push(found);
@@ -956,6 +976,7 @@ fn write_error(error: &RecordError) -> WriteError {
         RecordError::MissingInputs { table } => WriteError::MissingInputs { table },
         RecordError::UnknownInput { table } => WriteError::UnknownInput { table },
         RecordError::UndeclaredDataType { table } => WriteError::UndeclaredDataType { table },
+        RecordError::TooManyInputs { table } => WriteError::TooManyInputs { table },
         RecordError::InvalidEffect => WriteError::InvalidEffect,
         RecordError::EffectConflict => WriteError::EffectConflict,
         RecordError::IdChanged { .. }

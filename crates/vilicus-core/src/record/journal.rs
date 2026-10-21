@@ -214,15 +214,22 @@ pub struct JournaledInput {
     pub data_types: String,
 }
 
-/// Encodes the inputs of a change: each with its provenance, implicit unless `declared` names it.
-pub(crate) fn encode_inputs(inputs: &[RecordProvenance], declared: &[Id]) -> Vec<u8> {
+/// Encodes the inputs of a change: each with its provenance, marked implicit when it is one of
+/// the call's `implicit` inputs. More inputs than the count's 2 bytes hold, which the bound of
+/// `MAX_WRITE_INPUTS` keeps any write from reaching, is [`RecordError::InvalidJournal`].
+pub(crate) fn encode_inputs(
+    inputs: &[RecordProvenance],
+    implicit: &[RecordProvenance],
+) -> Result<Vec<u8>, RecordError> {
     let mut bytes = vec![ENCODING_VERSION];
-    let count = u16::try_from(inputs.len()).expect("a write has fewer than 65536 inputs");
+    let count = u16::try_from(inputs.len()).map_err(|_| RecordError::InvalidJournal)?;
     bytes.extend_from_slice(&count.to_be_bytes());
     for input in inputs {
         let values = [
             Value::Blob(input.id.to_bytes().to_vec()),
-            Value::Integer(i64::from(!declared.contains(&input.id))),
+            Value::Integer(i64::from(
+                implicit.iter().any(|candidate| candidate.id == input.id),
+            )),
             Value::Text(input.labels.taint().as_str().to_owned()),
             Value::Text(input.labels.text_taint().as_str().to_owned()),
             input.author.map_or(Value::Null, |author| {
@@ -235,7 +242,7 @@ pub(crate) fn encode_inputs(inputs: &[RecordProvenance], declared: &[Id]) -> Vec
             &encode_row(INPUT_COLUMNS.iter().copied().zip(values.iter())),
         );
     }
-    bytes
+    Ok(bytes)
 }
 
 fn journaled_id(value: &Value) -> Result<Id, RecordError> {

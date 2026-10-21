@@ -5,7 +5,7 @@
 
 use super::{EPOCH, KEY, create_module_file, raw_connection, scratch_dir};
 use crate::error::Error;
-use crate::{Migration, ModuleFile, Read, Write, open};
+use crate::{CORE_SCHEMA_VERSION, Migration, ModuleFile, Read, Write, open};
 
 /// Statements a migration might use against `_meta`, schema-qualified and in other cases too.
 const MIGRATION_HOSTILE: &[(&str, &str)] = &[
@@ -65,6 +65,10 @@ fn intact(file: &ModuleFile) -> bool {
     open::<Read>(file, &KEY).is_ok_and(|handle| handle.epoch() == EPOCH)
         && meta_rows(file)
             == [
+                (
+                    "core_schema_version".to_owned(),
+                    i64::from(CORE_SCHEMA_VERSION),
+                ),
                 ("generation".to_owned(), 0),
                 ("partition_root_version".to_owned(), 1),
             ]
@@ -171,5 +175,5 @@ fn meta_stays_readable() {
     let count: i64 = reader
         .query_row("SELECT count(*) FROM _meta", [], |row| row.get(0))
         .expect("read _meta");
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
 }

@@ -17,7 +17,7 @@ use vilicus_module_api::{
     Table, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, Value, ValueError,
     check_vocabulary_label, is_free_text_character, is_vocabulary_label_letter,
 };
-use vilicus_storage::{Handle, SqlValue, TableKind, Write};
+use vilicus_storage::{CORE_PRIVATE_TABLES, Handle, SqlValue, TableKind, Write};
 use vilicus_types::{Id, RecordLabels, Source, Taint, TextTaint, UtcMillis};
 
 use super::envelope::{EnvelopeRule, data_types_text, rule};
@@ -790,7 +790,9 @@ impl TableFuzz<'_> {
         Ok(())
     }
 
-    /// Every row of every table of the file, the Core's and SQLite's own included.
+    /// Every row of every table of the file, the Core's and SQLite's own included, but the Core
+    /// tables no handle reads, which the row writer the fuzz test drives never writes: only a
+    /// call's transaction journals (Story 3.6).
     fn content(&self) -> Result<Vec<Vec<Vec<SqlValue>>>, WriteFuzzError> {
         let storage = |error| WriteFuzzError::Storage {
             module: self.module.name,
@@ -801,6 +803,7 @@ impl TableFuzz<'_> {
             .tables
             .iter()
             .filter(|table| matches!(table.kind, TableKind::Ordinary | TableKind::Shadow))
+            .filter(|table| !CORE_PRIVATE_TABLES.contains(&table.name.as_str()))
             .map(|table| {
                 let name = table.name.replace('"', "\"\"");
                 self.handle

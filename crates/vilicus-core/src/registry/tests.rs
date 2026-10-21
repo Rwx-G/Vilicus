@@ -614,6 +614,60 @@ fn a_file_of_another_version_or_module_is_refused_at_open() {
     );
 }
 
+/// Story 3.6, AC1: a file whose Core track is not at the Core's version is refused at open, older
+/// as pending, newer as newer than the code, before its module track is looked at.
+#[test]
+fn a_file_whose_core_track_differs_from_the_core_is_refused_at_open() {
+    let latest = vilicus_storage::CORE_SCHEMA_VERSION;
+    for (found, pending) in [(latest - 1, true), (latest + 1, false)] {
+        let file = migrated_sample("core-version");
+        raw_connection(&file)
+            .execute_batch(&format!(
+                "UPDATE _meta SET value = {found} WHERE key = 'core_schema_version'"
+            ))
+            .expect("plant another Core version");
+        let outcome = registry_of(vec![sample()]).open::<Read>(&file, &KEY);
+        let refused = match outcome {
+            Err(FileError::CoreMigrationPending {
+                found: in_file,
+                latest: expected,
+            }) => pending && in_file == found && expected == latest,
+            Err(FileError::CoreNewerThanCode {
+                found: in_file,
+                latest: expected,
+            }) => !pending && in_file == found && expected == latest,
+            _ => false,
+        };
+        assert!(refused, "Core version {found}: {outcome:?}");
+    }
+}
+
+/// Story 3.6, AC1: a new module file holds every Core table, and the registry, which holds a
+/// file to exactly its declaration, accepts them and their indexes.
+#[test]
+fn a_new_file_holds_every_core_table_and_registers() {
+    let file = migrated_sample("core-tables");
+    let handle = registry_of(vec![sample()])
+        .open::<Read>(&file, &KEY)
+        .expect("a migrated file registers");
+    let names: Vec<String> = handle
+        .schema()
+        .expect("schema")
+        .tables
+        .into_iter()
+        .map(|table| table.name)
+        .collect();
+    for core in vilicus_storage::CORE_TABLES {
+        assert!(names.iter().any(|name| name == core), "{core} in {names:?}");
+    }
+    assert_eq!(
+        handle
+            .schema_version(vilicus_storage::MigrationTrack::Core)
+            .expect("version"),
+        vilicus_storage::CORE_SCHEMA_VERSION
+    );
+}
+
 /// M1 of the Story 3.2 review: clauses that write, delete, replace or convert rows on their own,
 /// and indexes or keys beyond a plain index, fail registration even though the column types,
 /// nullability and keys read back as declared. Each one, as a migration wrote it, passed the

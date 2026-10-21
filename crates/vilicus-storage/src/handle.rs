@@ -27,6 +27,7 @@ use vilicus_types::{Id, UtcMillis, is_vocabulary_label};
 use zeroize::Zeroizing;
 
 use crate::authorizer::{self, Policy};
+use crate::core_schema::{CORE_MIGRATIONS, CORE_SCHEMA_VERSION};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::file::{
@@ -48,8 +49,8 @@ const SYNCHRONOUS_FULL: i64 = 2;
 pub const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Attempts of a TRUNCATE checkpoint before it is reported incomplete, and the pause between
-/// them; each attempt also waits up to [`BUSY_TIMEOUT`] (D132).
-const CHECKPOINT_ATTEMPTS: u32 = 10;
+/// them; each attempt also waits up to [`BUSY_TIMEOUT`] for the readers to end (D132).
+pub const CHECKPOINT_ATTEMPTS: u32 = 10;
 const CHECKPOINT_PAUSE: Duration = Duration::from_millis(20);
 
 /// What a connection is opened for.
@@ -111,11 +112,13 @@ impl Inspect for Write {}
 
 /// One of the two migration tracks of a module file (AD-26): the Core's tables first, then the
 /// module's. Each track has its own schema version in `_meta`, which only the runner writes, in
-/// the transaction of the migration, under the Core policy that module SQL never runs under.
+/// the transaction of the migration, under the Core policy that module SQL never runs under. The
+/// Core track's migrations are the Core's own, embedded in this crate
+/// ([`Handle::apply_core_migrations`]); a module's are given to
+/// [`Handle::apply_module_migration`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MigrationTrack {
-    /// The Core tables of the file (`_meta`, `_vocabulary`, `_journal`, `_outbox`, `_consumed`,
-    /// `_dead_letter`).
+    /// The Core tables of the file ([`CORE_TABLES`](crate::CORE_TABLES)) other than `_meta`.
     Core,
     /// The module's own tables.
     Module,
@@ -384,8 +387,8 @@ pub(crate) fn wal_of_is_empty(wal: &Path) -> Result<bool> {
 }
 
 /// TRUNCATE checkpoints through the C API until one reports not busy and the WAL is empty
-/// (D132, E17), at most [`CHECKPOINT_ATTEMPTS`] times.
-pub(crate) fn checkpoint_until_empty(file: &ModuleFile, connection: &Connection) -> Result<()> {
+/// (D132, E17), at most [`CHECKPOINT_ATTEMPTS`] times; returns the number of attempts made.
+pub(crate) fn checkpoint_until_empty(file: &ModuleFile, connection: &Connection) -> Result<u32> {
     let mut last = None;
     for attempt in 0..CHECKPOINT_ATTEMPTS {
         if attempt > 0 {
@@ -393,7 +396,7 @@ pub(crate) fn checkpoint_until_empty(file: &ModuleFile, connection: &Connection)
         }
         let frames = ffi::checkpoint_truncate(connection)?;
         if !frames.busy && wal_is_empty(file)? {
-            return Ok(());
+            return Ok(attempt + 1);
         }
         last = Some(frames);
     }
@@ -447,10 +450,12 @@ pub fn open<R: Role>(file: &ModuleFile, key: &[u8; 32]) -> Result<Handle<R>> {
 
 /// Creates `file` with its raw `key` and key epoch, and returns its write handle.
 ///
-/// The file is built under [`ModuleFile::staging_path`] with its Core tables, `_meta` and
-/// `_vocabulary`, and closed, then its sidecar is written, then it is renamed into place, so the
-/// final name exists only once the file and its sidecar are durable. A crash leaves a staging file, alone or with a sidecar: that
-/// is an interrupted `create`, which never held module data, and the next `create` discards it.
+/// The file is built under [`ModuleFile::staging_path`] with `_meta` and the key epoch, then the
+/// Core track's migrations, each through the migration runner, so the file's Core tables are
+/// at [`CORE_SCHEMA_VERSION`] and its module track at 0 (AD-26). It is closed, then its sidecar
+/// is written, then it is renamed into place, so the final name exists only once the file and
+/// its sidecar are durable. A crash leaves a staging file, alone or with a sidecar: that is an
+/// interrupted `create`, which never held module data, and the next `create` discards it.
 /// A sidecar with neither a file nor a staging file is not explained by `create`, and fails with
 /// [`Error::EpochSidecarWithoutFile`].
 pub fn create(file: &ModuleFile, key: &[u8; 32], epoch: KeyEpoch) -> Result<Handle<Write>> {
@@ -481,15 +486,40 @@ pub fn create(file: &ModuleFile, key: &[u8; 32], epoch: KeyEpoch) -> Result<Hand
     open::<Write>(file, key)
 }
 
-/// The staging file of `create`: keyed, set up like a writer, holding the Core tables, closed
-/// after a TRUNCATE checkpoint so the database file alone holds them.
+/// The staging file of `create`: keyed, set up like a writer, holding `_meta` and the Core
+/// tables, closed after a TRUNCATE checkpoint so the database file alone holds them.
 fn build_new_file(staging: &Path, key: &[u8; 32], epoch: KeyEpoch) -> Result<()> {
-    let (connection, _) = connect_path(staging, key, Setup::Role(RoleKind::Write), true)?;
-    let built = connection
+    let (mut connection, _) = connect_path(staging, key, Setup::Role(RoleKind::Write), true)?;
+    let built = write_new_meta(&connection, epoch).and_then(|()| {
+        core_migrations_after(0).try_for_each(|(version, sql)| {
+            run_migration(&mut connection, sql, Some((MigrationTrack::Core, version)))
+        })
+    });
+    let closed = checkpoint_and_close(connection);
+    built.and(closed)?;
+    let wal = suffixed(staging, "-wal");
+    if !wal_of_is_empty(&wal)? {
+        return Err(Error::WalNotEmpty(wal));
+    }
+    std::fs::File::open(staging)?.sync_all()?;
+    Ok(())
+}
+
+/// The Core track's migrations after version `current`, each with the version it brings the
+/// track to.
+fn core_migrations_after(current: u32) -> impl Iterator<Item = (u32, &'static str)> {
+    (1..)
+        .zip(CORE_MIGRATIONS.iter().copied())
+        .filter(move |(version, _)| *version > current)
+}
+
+/// `_meta` with the key epoch, in one transaction: the table both migration tracks record their
+/// versions in, so it exists before either runs.
+fn write_new_meta(connection: &Connection, epoch: KeyEpoch) -> Result<()> {
+    connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             CREATE TABLE _meta (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;
-             CREATE TABLE _vocabulary (vocabulary TEXT NOT NULL, label TEXT NOT NULL, confirmed_by BLOB NOT NULL, confirmed_at INTEGER NOT NULL, PRIMARY KEY (vocabulary, label)) STRICT, WITHOUT ROWID;",
+             CREATE TABLE _meta (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;",
         )
         .and_then(|()| {
             [
@@ -507,15 +537,7 @@ fn build_new_file(staging: &Path, key: &[u8; 32], epoch: KeyEpoch) -> Result<()>
             })
         })
         .and_then(|()| connection.execute_batch("COMMIT"))
-        .map_err(Error::from);
-    let closed = checkpoint_and_close(connection);
-    built.and(closed)?;
-    let wal = suffixed(staging, "-wal");
-    if !wal_of_is_empty(&wal)? {
-        return Err(Error::WalNotEmpty(wal));
-    }
-    std::fs::File::open(staging)?.sync_all()?;
-    Ok(())
+        .map_err(Error::from)
 }
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
@@ -556,6 +578,26 @@ impl<R: Role> Handle<R> {
         self.connection
             .as_ref()
             .expect("a handle holds its connection until it is closed or dropped")
+    }
+
+    /// Runs `body`, one or more of the Core's own fixed statements on its tables, under
+    /// [`Policy::Core`], then puts the role's policy back, whatever `body` returned. The first
+    /// error is the one returned.
+    pub(crate) fn under_core_policy<T>(
+        &self,
+        body: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let connection = self.connection();
+        let policy = Setup::Role(R::KIND)
+            .opening_policy()
+            .unwrap_or(Policy::Closed);
+        authorizer::install(connection, Policy::Core)?;
+        let outcome = body(connection);
+        let restored = authorizer::install(connection, policy).map_err(Error::from);
+        match (outcome, restored) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     /// The file this handle is open on.
@@ -651,7 +693,7 @@ impl Handle<Write> {
     /// ends, so a deletion that must be real needs short-lived readers; while one is open this
     /// returns [`Error::CheckpointIncomplete`] rather than claim the rows are gone.
     pub fn checkpoint_truncate(&self) -> Result<()> {
-        checkpoint_until_empty(&self.file, self.connection())
+        checkpoint_until_empty(&self.file, self.connection()).map(drop)
     }
 
     /// Writes a new key epoch (AD-5), in three durable steps: the pending sidecar
@@ -765,33 +807,61 @@ fn write_meta(connection: &Connection, epoch: KeyEpoch) -> Result<()> {
 impl Handle<Migration> {
     /// Applies one migration without a version, for the replay of the Story 1.7 hostile
     /// statements, which test the runner itself. Product code has only
-    /// [`apply_versioned_migration`](Self::apply_versioned_migration), so every schema change
-    /// moves a track's version.
+    /// [`apply_module_migration`](Self::apply_module_migration) and
+    /// [`apply_core_migrations`](Self::apply_core_migrations), so every schema change moves a
+    /// track's version.
     #[cfg(test)]
     pub(crate) fn apply_migration(&mut self, sql: &str) -> Result<()> {
         self.run(sql, None)
     }
 
-    /// Applies migration `version` of `track` atomically (AD-23, D126) and records `version` as the
-    /// track's schema version in `_meta`, in the same transaction, so the schema and its version
-    /// never disagree (AD-26).
+    /// Applies migration `version` of the module track atomically (AD-23, D126) and records
+    /// `version` as the track's schema version in `_meta`, in the same transaction, so the schema
+    /// and its version never disagree (AD-26).
     ///
     /// The runner opens the transaction with `BEGIN IMMEDIATE`, with the authorizer removed, so
-    /// the order check reads the version under the write lock and a concurrent writer makes the
-    /// call fail as busy rather than race it. Forward only and in order: `version` must follow
-    /// the recorded one by exactly one, the first migration being 1, or the call fails with
-    /// [`Error::MigrationOutOfOrder`] before the SQL runs. The migration SQL runs under the
-    /// migration policy, which refuses transaction control; the version is written under the Core
-    /// policy, never by the migration SQL, which cannot reach `_meta`. On any error the
-    /// transaction is rolled back and nothing is written; on every exit the connection is left
-    /// closed to every statement.
-    pub fn apply_versioned_migration(
-        &mut self,
-        track: MigrationTrack,
-        version: u32,
-        sql: &str,
-    ) -> Result<()> {
-        self.run(sql, Some((track, version)))
+    /// the order checks read the versions under the write lock and a concurrent writer makes the
+    /// call fail as busy rather than race it. Core first: while the file's Core track is not at
+    /// [`CORE_SCHEMA_VERSION`], the call fails with [`Error::CoreSchemaNotCurrent`]. Forward only
+    /// and in order: `version` must follow the recorded one by exactly one, the first migration
+    /// being 1, or the call fails with [`Error::MigrationOutOfOrder`] before the SQL runs. The
+    /// migration SQL runs under the migration policy, which refuses transaction control and every
+    /// Core table; the version is written under the Core policy, never by the migration SQL,
+    /// which cannot reach `_meta`. On any error the transaction is rolled back and nothing is
+    /// written; on every exit the connection is left closed to every statement.
+    pub fn apply_module_migration(&mut self, version: u32, sql: &str) -> Result<()> {
+        self.run(sql, Some((MigrationTrack::Module, version)))
+    }
+
+    /// Brings the file's Core track to [`CORE_SCHEMA_VERSION`], one migration after the other,
+    /// each through the runner in its own transaction with its version, as
+    /// [`apply_module_migration`](Self::apply_module_migration) applies a module's, under the
+    /// Core migration policy, which changes the Core tables only (AD-23, AD-26). Returns the
+    /// number of migrations applied: 0 for a file already current, which every file `create`
+    /// made is. A file whose Core track is newer than this code fails with
+    /// [`Error::CoreSchemaNotCurrent`] and is not touched.
+    pub fn apply_core_migrations(&mut self) -> Result<u32> {
+        let current = self.core_schema_version()?;
+        if current > CORE_SCHEMA_VERSION {
+            return Err(Error::CoreSchemaNotCurrent {
+                found: current,
+                latest: CORE_SCHEMA_VERSION,
+            });
+        }
+        for (version, sql) in core_migrations_after(current) {
+            self.run(sql, Some((MigrationTrack::Core, version)))?;
+        }
+        Ok(CORE_SCHEMA_VERSION - current)
+    }
+
+    /// The Core track's version, read with the authorizer removed, as the runner reads it, then
+    /// the connection closed again.
+    fn core_schema_version(&self) -> Result<u32> {
+        let connection = self.connection();
+        authorizer::remove(connection)?;
+        let version = read_schema_version(connection, MigrationTrack::Core);
+        let closed = authorizer::install(connection, Policy::Closed).map_err(Error::from);
+        version.and_then(|version| closed.map(|()| version))
     }
 
     fn run(&mut self, sql: &str, version: Option<(MigrationTrack, u32)>) -> Result<()> {
@@ -837,6 +907,8 @@ fn read_schema_version(connection: &Connection, track: MigrationTrack) -> Result
     }
 }
 
+/// Runs one migration in the runner's transaction: a module migration, or one of the Core
+/// track's, each under its own policy.
 fn run_migration(
     connection: &mut Connection,
     sql: &str,
@@ -856,14 +928,24 @@ fn run_migration(
     }
 }
 
-/// The body of the runner's transaction: the order check with no authorizer (a Core statement),
-/// the migration SQL under the migration policy, then the version row under the Core policy.
+/// The body of the runner's transaction: the order checks with no authorizer (Core statements),
+/// the migration SQL under the policy of its track (the migration policy for a module's, the
+/// Core migration policy for the Core's), then the version row under the Core policy.
 fn migrate_in_transaction(
     transaction: &Connection,
     sql: &str,
     version: Option<(MigrationTrack, u32)>,
 ) -> Result<()> {
     if let Some((track, version)) = version {
+        if track == MigrationTrack::Module {
+            let core = read_schema_version(transaction, MigrationTrack::Core)?;
+            if core != CORE_SCHEMA_VERSION {
+                return Err(Error::CoreSchemaNotCurrent {
+                    found: core,
+                    latest: CORE_SCHEMA_VERSION,
+                });
+            }
+        }
         let current = read_schema_version(transaction, track)?;
         if current.checked_add(1) != Some(version) {
             return Err(Error::MigrationOutOfOrder {
@@ -873,7 +955,11 @@ fn migrate_in_transaction(
             });
         }
     }
-    authorizer::install(transaction, Policy::Migration)?;
+    let policy = match version {
+        Some((MigrationTrack::Core, _)) => Policy::CoreMigration,
+        Some((MigrationTrack::Module, _)) | None => Policy::Migration,
+    };
+    authorizer::install(transaction, policy)?;
     transaction.execute_batch(sql)?;
     if let Some((track, version)) = version {
         authorizer::install(transaction, Policy::Core)?;

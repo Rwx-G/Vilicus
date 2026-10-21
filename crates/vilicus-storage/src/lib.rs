@@ -9,28 +9,44 @@
 //! 256-bit key ([`ModuleFile`], [`open`], [`create`]). Every connection is set up before its
 //! authorizer goes on and reads every setting back ([`Settings`]); a [`Handle`] then runs in one
 //! role, [`Read`] (`SELECT` only), [`Write`] (rows only) or [`Migration`] (closed outside
-//! [`Handle::apply_versioned_migration`], which records each track's schema version in `_meta`).
+//! [`Handle::apply_module_migration`] and [`Handle::apply_core_migrations`], which record each
+//! track's schema version in `_meta`).
 //! Read and write handles also read the file's [`Schema`], which the module registry compares
 //! with its declarations, and the confirmed labels of its reviewed vocabularies, which a write
 //! handle records in the Core table `_vocabulary` (D104). Copies and VACUUM run on the Core
 //! maintenance path ([`maintenance`]). SQLCipher is compiled by this crate's build script from
 //! the amalgamation in `sqlcipher/` (D143).
+//!
+//! The Core tables of a file ([`CORE_TABLES`]) other than `_meta` are made by the Core migration
+//! track, before the module's (AD-26). A write handle writes their rows with the Core's own
+//! statements only: the journal of each record a call changes and its retention purge
+//! ([`JournalEntry`], [`Handle::purge_journal`]), effect intents and their outcomes
+//! ([`EffectIntent`], AD-28), consumed events, and wrapped record keys, whose destruction shreds
+//! a record ([`Handle::destroy_wrapped_record_key`], D132).
 
 mod authorizer;
+mod core_schema;
 mod error;
 mod ffi;
 mod file;
 mod handle;
+mod journal;
 pub mod maintenance;
+mod outbox;
+mod record_key;
 mod schema;
 
-pub use authorizer::CORE_TABLES;
+pub use authorizer::{CORE_PRIVATE_TABLES, CORE_TABLES};
+pub use core_schema::CORE_SCHEMA_VERSION;
 pub use error::{Error, Result, is_refusal};
 pub use file::{KeyEpoch, ModuleFile, Partition, read_epoch};
 pub use handle::{
-    BUSY_TIMEOUT, Handle, Inspect, JOURNAL_SIZE_LIMIT, Migration, MigrationTrack, Read, Role,
-    RoleKind, Settings, Write, create, open,
+    BUSY_TIMEOUT, CHECKPOINT_ATTEMPTS, Handle, Inspect, JOURNAL_SIZE_LIMIT, Migration,
+    MigrationTrack, Read, Role, RoleKind, Settings, Write, create, open,
 };
+pub use journal::{AuthorityKind, CallKey, JournalEntry, JournalPurge, JournalRow};
+pub use outbox::{EffectIntent, EffectRow, EffectState};
+pub use record_key::Shredded;
 pub use schema::{
     ColumnInfo, ForeignKey, IndexColumn, IndexInfo, Schema, SchemaObject, TableInfo, TableKind,
 };

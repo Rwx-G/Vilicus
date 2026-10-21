@@ -152,7 +152,7 @@ pub fn vacuum(file: &ModuleFile, key: &[u8; 32]) -> Result<()> {
     let (connection, _) = handle::connect(file, key, Setup::Maintenance, false)?;
     let outcome = handle::checked_epoch(file, &connection)
         .and_then(|_| connection.execute_batch("VACUUM").map_err(Error::from))
-        .and_then(|()| handle::checkpoint_until_empty(file, &connection));
+        .and_then(|()| handle::checkpoint_until_empty(file, &connection).map(drop));
     let closed = handle::checkpoint_and_close(connection);
     outcome.and(closed)
 }

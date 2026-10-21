@@ -11,7 +11,7 @@ use vilicus_module_api::{
     DataType, ENVELOPE, Field, FieldKind, Migration, ModuleDeclaration, SqlType, Structured, Table,
     VOCABULARY_LABEL_MAX_LEN, Value, ValueError,
 };
-use vilicus_storage::{Handle, MigrationTrack, ModuleFile, SqlValue, TableKind, Write};
+use vilicus_storage::{CORE_PRIVATE_TABLES, Handle, ModuleFile, SqlValue, TableKind, Write};
 use vilicus_types::{Id, Source, Taint, TextTaint, UtcMillis};
 
 use super::envelope::{EnvelopeRule, data_types_text, rule};
@@ -290,8 +290,11 @@ fn with(
     fields
 }
 
-/// Every row of every table of the file, the Core's and SQLite's own included.
+/// Every row of every table of the file, the Core's and SQLite's own included. The Core tables
+/// no handle reads (the journal among them) are read through a connection of their own, keyed
+/// with [`KEY`] and without the storage layer: the committed state.
 pub(super) fn content(handle: &Handle<Write>) -> Vec<Vec<Vec<SqlValue>>> {
+    let raw = raw_connection(handle.file());
     handle
         .schema()
         .expect("schema")
@@ -299,11 +302,37 @@ pub(super) fn content(handle: &Handle<Write>) -> Vec<Vec<Vec<SqlValue>>> {
         .iter()
         .filter(|table| matches!(table.kind, TableKind::Ordinary | TableKind::Shadow))
         .map(|table| {
-            handle
-                .query_values(&format!("SELECT * FROM \"{}\"", table.name), &[])
-                .expect("read a table")
+            let sql = format!("SELECT * FROM \"{}\"", table.name);
+            if CORE_PRIVATE_TABLES.contains(&table.name.as_str()) {
+                raw_rows(&raw, &sql)
+            } else {
+                handle.query_values(&sql, &[]).expect("read a table")
+            }
         })
         .collect()
+}
+
+/// A connection to `file` keyed with [`KEY`] and nothing else: no setup, no authorizer. Test code
+/// only, to read what no handle reads.
+pub(super) fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
+    let connection =
+        rusqlite::Connection::open(file.path()).expect("open without the storage layer");
+    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    connection
+        .execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
+        .expect("key");
+    connection
+}
+
+/// Every row `sql` returns on a raw connection, each column in its storage class.
+pub(super) fn raw_rows(connection: &rusqlite::Connection, sql: &str) -> Vec<Vec<SqlValue>> {
+    let mut statement = connection.prepare(sql).expect("prepare");
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("read")
 }
 
 pub(super) fn rows(handle: &Handle<Write>, sql: &str) -> Vec<Vec<SqlValue>> {
@@ -1207,8 +1236,7 @@ fn a_failed_commit_leaves_no_open_transaction() {
     let mut migration =
         vilicus_storage::open::<vilicus_storage::Migration>(&file, &KEY).expect("open");
     migration
-        .apply_versioned_migration(
-            MigrationTrack::Module,
+        .apply_module_migration(
             1,
             &format!("CREATE TABLE lists (id BLOB PRIMARY KEY);\n{sql}"),
         )

@@ -258,6 +258,10 @@ fn the_epoch_is_in_the_sidecar_and_in_meta() {
     assert_eq!(
         meta,
         [
+            (
+                "core_schema_version".to_owned(),
+                i64::from(crate::CORE_SCHEMA_VERSION)
+            ),
             ("generation".to_owned(), 0),
             ("partition_root_version".to_owned(), 1)
         ]

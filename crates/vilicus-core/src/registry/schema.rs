@@ -6,8 +6,9 @@
 //! acts outside the typed record API, so it is refused like a missing column.
 //!
 //! The file holds exactly:
-//! - the Core tables of `vilicus_storage::CORE_TABLES` and SQLite's internal objects (`sqlite_`
-//!   prefix, which no migration can create);
+//! - the Core tables of `vilicus_storage::CORE_TABLES` with their indexes, which the Core
+//!   migration track alone creates, and SQLite's internal objects (`sqlite_` prefix, which no
+//!   migration can create);
 //! - each declared table, created by the one statement its declaration implies, compared token
 //!   by token ([`canonical_table`]): the envelope columns, then the declared fields in their
 //!   order, each with its type, `NOT NULL` unless optional and `PRIMARY KEY` for `id` only, and
@@ -403,10 +404,15 @@ pub(crate) fn compare(module: &ModuleDeclaration, snapshot: &Snapshot) -> Result
     for object in &snapshot.schema.objects {
         let allowed = match object.kind.as_str() {
             "table" | "view" => true,
-            "index" => module
-                .tables
-                .iter()
-                .any(|table| table.name.eq_ignore_ascii_case(&object.table)),
+            "index" => {
+                module
+                    .tables
+                    .iter()
+                    .any(|table| table.name.eq_ignore_ascii_case(&object.table))
+                    || CORE_TABLES
+                        .iter()
+                        .any(|core| core.eq_ignore_ascii_case(&object.table))
+            }
             _ => false,
         };
         if !allowed {

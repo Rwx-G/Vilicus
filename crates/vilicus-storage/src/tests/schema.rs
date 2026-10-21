@@ -1,15 +1,16 @@
 //! Story 3.2: the versioned migrations of the two tracks, written by the runner in the migration's
 //! own transaction and never by module SQL (AD-26), and the schema the module registry reads
-//! through a read or write handle (AD-9).
+//! through a read or write handle (AD-9). Story 3.6: the Core track runs first, from the Core's
+//! own migrations, and a module migration waits for it.
 
 use super::{EPOCH, KEY, module_file, raw_connection, scratch_dir};
 use crate::error::Error;
 use crate::{
-    ColumnInfo, ForeignKey, Inspect, Migration, MigrationTrack, ModuleFile, Read, TableKind, Write,
-    create, open,
+    CORE_SCHEMA_VERSION, ColumnInfo, ForeignKey, Inspect, Migration, MigrationTrack, ModuleFile,
+    Read, TableKind, Write, create, open,
 };
 
-/// A module file as `create` leaves it: `_meta` with the key epoch, nothing else.
+/// A module file as `create` leaves it: `_meta` with the key epoch and the Core tables.
 fn new_file(label: &str) -> ModuleFile {
     let file = module_file(&scratch_dir(label));
     create(&file, &KEY, EPOCH)
@@ -45,53 +46,31 @@ fn table_names(file: &ModuleFile) -> Vec<String> {
     names
 }
 
-fn migrate(file: &ModuleFile, track: MigrationTrack, version: u32, sql: &str) -> crate::Result<()> {
+fn migrate(file: &ModuleFile, version: u32, sql: &str) -> crate::Result<()> {
     let mut handle = open::<Migration>(file, &KEY).expect("open");
-    let outcome = handle.apply_versioned_migration(track, version, sql);
+    let outcome = handle.apply_module_migration(version, sql);
     handle.close().expect("close");
     outcome
 }
 
+const CORE: u32 = CORE_SCHEMA_VERSION;
+
 #[test]
-fn a_new_file_is_at_version_zero_on_both_tracks() {
-    assert_eq!(versions(&new_file("version-zero")), (0, 0));
+fn a_new_file_has_its_core_track_current_and_its_module_track_at_zero() {
+    const { assert!(CORE >= 1, "the Core track has a migration") };
+    assert_eq!(versions(&new_file("version-zero")), (CORE, 0));
 }
 
 #[test]
 fn versioned_migrations_apply_in_order_and_record_their_version() {
     let file = new_file("version-order");
-    migrate(
-        &file,
-        MigrationTrack::Module,
-        1,
-        "CREATE TABLE one (x INTEGER);",
-    )
-    .expect("first");
-    assert_eq!(versions(&file), (0, 1));
-    migrate(
-        &file,
-        MigrationTrack::Module,
-        2,
-        "CREATE TABLE two (x INTEGER);",
-    )
-    .expect("second");
-    assert_eq!(versions(&file), (0, 2));
-    migrate(
-        &file,
-        MigrationTrack::Core,
-        1,
-        "CREATE TABLE core_one (x INTEGER);",
-    )
-    .expect("the Core track counts on its own");
-    assert_eq!(versions(&file), (1, 2));
+    migrate(&file, 1, "CREATE TABLE one (x INTEGER);").expect("first");
+    assert_eq!(versions(&file), (CORE, 1));
+    migrate(&file, 2, "CREATE TABLE two (x INTEGER);").expect("second");
+    assert_eq!(versions(&file), (CORE, 2));
 
     for (version, current) in [(2, 2), (1, 2), (4, 2), (0, 2)] {
-        let outcome = migrate(
-            &file,
-            MigrationTrack::Module,
-            version,
-            "CREATE TABLE out_of_order (x INTEGER);",
-        );
+        let outcome = migrate(&file, version, "CREATE TABLE out_of_order (x INTEGER);");
         assert!(
             matches!(
                 outcome,
@@ -101,7 +80,7 @@ fn versioned_migrations_apply_in_order_and_record_their_version() {
             "version {version}: {outcome:?}"
         );
     }
-    assert_eq!(versions(&file), (1, 2));
+    assert_eq!(versions(&file), (CORE, 2));
     assert!(
         !table_names(&file).contains(&"out_of_order".to_owned()),
         "an out-of-order migration ran its SQL"
@@ -113,22 +92,13 @@ fn versioned_migrations_apply_in_order_and_record_their_version() {
 #[test]
 fn a_failed_migration_keeps_the_previous_version() {
     let file = new_file("version-failed");
-    migrate(
-        &file,
-        MigrationTrack::Module,
-        1,
-        "CREATE TABLE one (x INTEGER);",
-    )
-    .expect("first");
+    migrate(&file, 1, "CREATE TABLE one (x INTEGER);").expect("first");
     for sql in [
         "CREATE TABLE two (x INTEGER); ATTACH DATABASE 'other.db' AS other;",
         "CREATE TABLE two (x INTEGER); CREATE TABLE one (y INTEGER);",
     ] {
-        assert!(
-            migrate(&file, MigrationTrack::Module, 2, sql).is_err(),
-            "{sql}"
-        );
-        assert_eq!(versions(&file), (0, 1), "{sql}");
+        assert!(migrate(&file, 2, sql).is_err(), "{sql}");
+        assert_eq!(versions(&file), (CORE, 1), "{sql}");
         assert!(!table_names(&file).contains(&"two".to_owned()), "{sql}");
     }
 }
@@ -141,16 +111,93 @@ fn migration_sql_cannot_write_a_schema_version() {
         "INSERT INTO _meta (key, value) VALUES ('module_schema_version', 9)",
         "REPLACE INTO _meta (key, value) VALUES ('core_schema_version', 9)",
         "UPDATE _meta SET value = 9 WHERE key = 'generation'",
+        "UPDATE _meta SET value = 0 WHERE key = 'core_schema_version'",
     ] {
-        for track in [MigrationTrack::Module, MigrationTrack::Core] {
-            let outcome = migrate(&file, track, 1, sql);
-            assert!(
-                outcome.as_ref().is_err_and(Error::is_refusal),
-                "{sql}: {outcome:?}"
-            );
-        }
+        let outcome = migrate(&file, 1, sql);
+        assert!(
+            outcome.as_ref().is_err_and(Error::is_refusal),
+            "{sql}: {outcome:?}"
+        );
     }
+    assert_eq!(versions(&file), (CORE, 0));
+}
+
+/// A file whose Core track is behind the code, as a file of an older release would be: `create`
+/// made it, then everything the Core track made was taken out without the authorizer.
+fn file_before_the_core_track(label: &str) -> ModuleFile {
+    let file = new_file(label);
+    let connection = raw_connection(&file.path());
+    let core_tables: Vec<String> = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name <> '_meta'")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("read");
+    for table in core_tables {
+        connection
+            .execute_batch(&format!("DROP TABLE {table}"))
+            .expect("drop a Core table");
+    }
+    connection
+        .execute_batch("DELETE FROM _meta WHERE key = 'core_schema_version'")
+        .expect("forget the Core version");
+    file
+}
+
+/// AC1 of Story 3.6, Core first: a module migration is refused while the Core track is behind,
+/// with nothing written; once the Core's migrations ran, the module's apply.
+#[test]
+fn a_module_migration_waits_for_the_core_track() {
+    let file = file_before_the_core_track("core-first");
     assert_eq!(versions(&file), (0, 0));
+    let outcome = migrate(&file, 1, "CREATE TABLE one (x INTEGER);");
+    assert!(
+        matches!(outcome, Err(Error::CoreSchemaNotCurrent { found: 0, latest }) if latest == CORE),
+        "{outcome:?}"
+    );
+    assert_eq!(table_names(&file), ["_meta"]);
+
+    let mut handle = open::<Migration>(&file, &KEY).expect("open");
+    assert_eq!(handle.apply_core_migrations().expect("Core track"), CORE);
+    assert_eq!(handle.apply_core_migrations().expect("again"), 0);
+    handle.close().expect("close");
+    assert_eq!(versions(&file), (CORE, 0));
+    migrate(&file, 1, "CREATE TABLE one (x INTEGER);").expect("the module's now");
+    assert_eq!(versions(&file), (CORE, 1));
+    assert_eq!(
+        table_names(&file),
+        table_names(&new_file("core-first-control"))
+            .into_iter()
+            .chain(["one".to_owned()])
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A file whose Core track is newer than the code is neither migrated back nor given a module
+/// migration.
+#[test]
+fn a_file_newer_than_the_core_is_left_alone() {
+    let file = new_file("core-newer");
+    raw_connection(&file.path())
+        .execute_batch(&format!(
+            "UPDATE _meta SET value = {} WHERE key = 'core_schema_version'",
+            CORE + 1
+        ))
+        .expect("plant a newer version");
+    let mut handle = open::<Migration>(&file, &KEY).expect("open");
+    let core = handle.apply_core_migrations();
+    let module = handle.apply_module_migration(1, "CREATE TABLE one (x INTEGER);");
+    handle.close().expect("close");
+    for outcome in [core.map(drop), module] {
+        assert!(
+            matches!(outcome, Err(Error::CoreSchemaNotCurrent { found, latest }) if found == CORE + 1 && latest == CORE),
+            "{outcome:?}"
+        );
+    }
+    assert_eq!(versions(&file), (CORE + 1, 0));
 }
 
 #[test]
@@ -192,19 +239,14 @@ fn a_migration_waits_for_no_concurrent_writer() {
     writer
         .execute_batch("BEGIN IMMEDIATE")
         .expect("hold the write lock");
-    let outcome = migrate(
-        &file,
-        MigrationTrack::Module,
-        1,
-        "CREATE TABLE one (x INTEGER);",
-    );
+    let outcome = migrate(&file, 1, "CREATE TABLE one (x INTEGER);");
     assert!(
         matches!(&outcome, Err(Error::Sqlite(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
         "{outcome:?}"
     );
     writer.execute_batch("COMMIT").expect("release");
     writer.close().expect("close");
-    assert_eq!(versions(&file), (0, 0));
+    assert_eq!(versions(&file), (CORE, 0));
 }
 
 const ITEMS: &str = "CREATE TABLE items (
@@ -352,7 +394,7 @@ fn check_schema<R: Inspect>(file: &ModuleFile) {
 #[test]
 fn read_and_write_handles_read_the_schema() {
     let file = new_file("schema");
-    migrate(&file, MigrationTrack::Module, 1, ITEMS).expect("migrate");
+    migrate(&file, 1, ITEMS).expect("migrate");
     check_schema::<Read>(&file);
     check_schema::<Write>(&file);
 }
@@ -422,29 +464,18 @@ fn a_column_cannot_be_added_to_a_strict_table_under_the_migration_authorizer() {
     let file = new_file("strict-add-column");
     migrate(
         &file,
-        MigrationTrack::Module,
         1,
         "CREATE TABLE strict_items (id BLOB NOT NULL PRIMARY KEY) STRICT;
          CREATE TABLE loose_items (id BLOB NOT NULL PRIMARY KEY);",
     )
     .expect("create");
-    let outcome = migrate(
-        &file,
-        MigrationTrack::Module,
-        2,
-        "ALTER TABLE strict_items ADD COLUMN label TEXT;",
-    );
+    let outcome = migrate(&file, 2, "ALTER TABLE strict_items ADD COLUMN label TEXT;");
     assert!(
         outcome.as_ref().is_err_and(Error::is_refusal),
         "{outcome:?}"
     );
-    migrate(
-        &file,
-        MigrationTrack::Module,
-        2,
-        "ALTER TABLE loose_items ADD COLUMN label TEXT;",
-    )
-    .expect("a table that is not STRICT takes a new column");
+    migrate(&file, 2, "ALTER TABLE loose_items ADD COLUMN label TEXT;")
+        .expect("a table that is not STRICT takes a new column");
     raw_connection(&file.path())
         .execute_batch("ALTER TABLE strict_items ADD COLUMN label TEXT;")
         .expect("the same statement runs without the authorizer");

@@ -106,8 +106,10 @@ fn only_salon(file: &ModuleFile) -> bool {
         )]
 }
 
+/// Every Core table is `STRICT`; the ordered logs `_journal` and `_outbox` keep their rowid as
+/// `seq`, every other one is `WITHOUT ROWID` (`core_schema`).
 #[test]
-fn every_core_table_is_created_strict_and_without_rowid() {
+fn every_core_table_is_created_strict() {
     let file = create_module_file(&scratch_dir("core-tables"));
     let reader = open::<Read>(&file, &KEY).expect("open");
     let schema = reader.schema().expect("schema");
@@ -117,7 +119,12 @@ fn every_core_table_is_created_strict_and_without_rowid() {
             .iter()
             .find(|table| table.name == *name)
             .unwrap_or_else(|| panic!("{name} in a new file"));
-        assert!(table.strict && table.without_rowid, "{name}");
+        assert!(table.strict, "{name}");
+        assert_eq!(
+            table.without_rowid,
+            !["_journal", "_outbox"].contains(name),
+            "{name}"
+        );
     }
     let empty: i64 = reader
         .query_row("SELECT count(*) FROM _vocabulary", [], |row| row.get(0))

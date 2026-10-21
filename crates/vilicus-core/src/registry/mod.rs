@@ -57,7 +57,8 @@ use std::path::Path;
 
 use vilicus_module_api::{DeclarationError, ModuleDeclaration};
 use vilicus_storage::{
-    Handle, Inspect, KeyEpoch, Migration, MigrationTrack, ModuleFile, Partition, Read,
+    CORE_SCHEMA_VERSION, Handle, Inspect, KeyEpoch, Migration, MigrationTrack, ModuleFile,
+    Partition, Read,
 };
 use vilicus_types::ModuleName;
 
@@ -132,6 +133,21 @@ pub enum FileError {
     UnregisteredModule(ModuleName),
     /// The storage layer failed to open or read the file.
     Storage(vilicus_storage::Error),
+    /// The file's Core track is older than the Core's code: its Core migrations are pending, and
+    /// run before the module's (AD-26).
+    CoreMigrationPending {
+        /// The Core schema version of the file.
+        found: u32,
+        /// The version the Core's migrations bring a file to.
+        latest: u32,
+    },
+    /// The file's Core track is newer than the Core's code (D21).
+    CoreNewerThanCode {
+        /// The Core schema version of the file.
+        found: u32,
+        /// The version the Core's migrations bring a file to.
+        latest: u32,
+    },
     /// The file's module schema is older than the module's code: its migrations are pending
     /// (AD-23, AD-54 `migrating`).
     MigrationPending {
@@ -158,6 +174,15 @@ impl fmt::Display for FileError {
                 write!(formatter, "module {module} is not registered")
             }
             Self::Storage(error) => write!(formatter, "{error}"),
+            Self::CoreMigrationPending { found, latest } => write!(
+                formatter,
+                "the file's Core tables are at version {found}, the Core at {latest}: \
+                 Core migrations pending"
+            ),
+            Self::CoreNewerThanCode { found, latest } => write!(
+                formatter,
+                "the file's Core tables are at version {found}, newer than the Core's {latest}"
+            ),
             Self::MigrationPending { found, latest } => write!(
                 formatter,
                 "the file is at schema version {found}, its module at {latest}: migrations pending"
@@ -265,8 +290,9 @@ impl Registry {
     }
 
     /// Opens `file` in role `R` with its raw `key`, after checking it against its module's
-    /// declaration (AD-9): the module is registered, the file's module schema is at the module's
-    /// latest version, and its schema is the declared one. Each refusal is a typed
+    /// declaration (AD-9): the module is registered, the file's Core tables are at the Core's
+    /// schema version and its module schema at the module's latest version (AD-26), and its
+    /// schema is the declared one. Each refusal is a typed
     /// [`FileError`]; the handle is closed before the error is returned. Crate-private: a handle
     /// executes raw SQL, so outside the Core it would write around field validation.
     pub(crate) fn open<R: Inspect>(
@@ -308,9 +334,10 @@ fn verify_module(
     Ok(())
 }
 
-/// Creates `module`'s file in the household partition under `directory` with `key`, and applies
-/// its migrations in order through the migration runner: the scratch file of the build-time
-/// test and of the write path fuzz test.
+/// Creates `module`'s file in the household partition under `directory` with `key`, which brings
+/// its Core track to the Core's version, and applies the module's migrations in order through
+/// the migration runner (Core first, then module, AD-26): the scratch file of the build-time test
+/// and of the write path fuzz test.
 pub(crate) fn create_migrated(
     module: &'static ModuleDeclaration,
     directory: &Path,
@@ -326,7 +353,7 @@ pub(crate) fn create_migrated(
     let mut version = 0;
     for step in module.migrations {
         version += 1;
-        migration.apply_versioned_migration(MigrationTrack::Module, version, step.sql)?;
+        migration.apply_module_migration(version, step.sql)?;
     }
     migration.close()?;
     Ok(file)
@@ -334,6 +361,19 @@ pub(crate) fn create_migrated(
 
 /// The checks of `Registry::open` on an open handle.
 fn check<R: Inspect>(module: &ModuleDeclaration, handle: &Handle<R>) -> Result<(), FileError> {
+    let core = handle.schema_version(MigrationTrack::Core)?;
+    if core < CORE_SCHEMA_VERSION {
+        return Err(FileError::CoreMigrationPending {
+            found: core,
+            latest: CORE_SCHEMA_VERSION,
+        });
+    }
+    if core > CORE_SCHEMA_VERSION {
+        return Err(FileError::CoreNewerThanCode {
+            found: core,
+            latest: CORE_SCHEMA_VERSION,
+        });
+    }
     let found = handle.schema_version(MigrationTrack::Module)?;
     let latest = module.latest_version();
     if found < latest {

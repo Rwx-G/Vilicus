@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::file::KeyEpoch;
 use crate::handle::MigrationTrack;
+use crate::outbox::EffectState;
 
 /// Prefix of the message SQLite gives when the authorizer denies a function call.
 const DENIED_FUNCTION_MESSAGE: &str = "not authorized to use function: ";
@@ -99,6 +100,43 @@ pub enum Error {
     },
     /// The schema version `_meta` holds for a track is not a version number.
     MalformedSchemaVersion(MigrationTrack),
+    /// The file's Core track is not at the version this code expects: a module migration waits
+    /// for the Core's (Core first, AD-26), and a file newer than the code is not migrated back.
+    CoreSchemaNotCurrent {
+        /// The Core schema version of the file.
+        found: u32,
+        /// The version the Core's migrations bring a file to.
+        latest: u32,
+    },
+    /// A Core row that must commit with the writes it belongs to (a journal row, an effect
+    /// intent, a consumed event) was written outside a transaction.
+    NoTransaction,
+    /// A row of a Core table holds a value outside its stored form.
+    MalformedCoreRow {
+        /// The Core table.
+        table: &'static str,
+        /// The column.
+        column: &'static str,
+    },
+    /// An effect intent without an effect name or an idempotency key (AD-28).
+    InvalidEffectIntent,
+    /// No effect intent of that id is in the file.
+    EffectNotFound,
+    /// An outcome was recorded for an effect intent that is not pending.
+    EffectNotPending {
+        /// The intent's state.
+        state: EffectState,
+    },
+    /// A retry was asked for an effect intent that did not fail: an `unknown` one is never
+    /// retried blindly (AD-28).
+    EffectNotRetryable {
+        /// The intent's state.
+        state: EffectState,
+    },
+    /// An empty wrapped record key.
+    InvalidWrappedKey,
+    /// The record has no wrapped key to destroy.
+    RecordKeyNotFound,
     /// A label to confirm is outside the form of reviewed-vocabulary labels (D104).
     InvalidVocabularyLabel,
     /// A file copy was asked for while the WAL still holds content (AD-23).
@@ -190,6 +228,28 @@ impl fmt::Display for Error {
                     "the {track} schema version in _meta is malformed"
                 )
             }
+            Self::CoreSchemaNotCurrent { found, latest } => write!(
+                formatter,
+                "the file's Core schema is at version {found}, the Core's at {latest}"
+            ),
+            Self::NoTransaction => {
+                formatter.write_str("a Core row that joins a write transaction was written alone")
+            }
+            Self::MalformedCoreRow { table, column } => {
+                write!(formatter, "{table}.{column} holds a malformed value")
+            }
+            Self::InvalidEffectIntent => {
+                formatter.write_str("an effect intent needs an effect name and an idempotency key")
+            }
+            Self::EffectNotFound => formatter.write_str("no such effect intent"),
+            Self::EffectNotPending { state } => {
+                write!(formatter, "the effect intent is {state}, not pending")
+            }
+            Self::EffectNotRetryable { state } => {
+                write!(formatter, "an effect intent that is {state} is not retried")
+            }
+            Self::InvalidWrappedKey => formatter.write_str("an empty wrapped record key"),
+            Self::RecordKeyNotFound => formatter.write_str("the record has no wrapped key"),
             Self::InvalidVocabularyLabel => {
                 formatter.write_str("a label outside the form of reviewed-vocabulary labels")
             }
@@ -222,6 +282,15 @@ impl fmt::Debug for Error {
             Self::CheckpointIncomplete { .. } => "CheckpointIncomplete",
             Self::MigrationOutOfOrder { .. } => "MigrationOutOfOrder",
             Self::MalformedSchemaVersion(_) => "MalformedSchemaVersion",
+            Self::CoreSchemaNotCurrent { .. } => "CoreSchemaNotCurrent",
+            Self::NoTransaction => "NoTransaction",
+            Self::MalformedCoreRow { .. } => "MalformedCoreRow",
+            Self::InvalidEffectIntent => "InvalidEffectIntent",
+            Self::EffectNotFound => "EffectNotFound",
+            Self::EffectNotPending { .. } => "EffectNotPending",
+            Self::EffectNotRetryable { .. } => "EffectNotRetryable",
+            Self::InvalidWrappedKey => "InvalidWrappedKey",
+            Self::RecordKeyNotFound => "RecordKeyNotFound",
             Self::InvalidVocabularyLabel => "InvalidVocabularyLabel",
             Self::WalNotEmpty(_) => "WalNotEmpty",
             Self::CopyRaced(_) => "CopyRaced",

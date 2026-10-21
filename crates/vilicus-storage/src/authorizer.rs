@@ -10,7 +10,10 @@
 //! The Core tables of a module file ([`CORE_TABLES`], AD-26) are the Core's: no module SQL,
 //! write or migration, and no trigger body, which SQLite authorizes when it fires, may write,
 //! drop, alter, index or attach a trigger to them. Only [`Policy::Core`], which the Core installs
-//! around its own statements, writes them.
+//! around its own statements, writes them, and only [`Policy::CoreMigration`], under which the
+//! Core track's own migrations run, changes their schema. Module SQL does not even read the
+//! Core tables of [`CORE_PRIVATE_TABLES`]: the journal, the outbox and the wrapped record keys
+//! hold earlier states of records, effect payloads and the keys that shred records.
 
 use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -30,19 +33,46 @@ pub(crate) enum Policy {
     /// WAL, which `Handle::checkpoint_truncate` then reports as incomplete.
     Read,
     /// The Core's own fixed statements on [`CORE_TABLES`]: the key epoch and the schema versions
-    /// in `_meta`, the confirmed vocabulary labels in `_vocabulary`, and the transaction that
-    /// holds them, nothing else.
+    /// in `_meta`, the confirmed vocabulary labels in `_vocabulary`, the journal, outbox,
+    /// consumption and record key rows, and the transaction that holds them, nothing else.
     Core,
+    /// The Core track's migrations (AD-26), inside the runner's transaction: schema changes of
+    /// [`CORE_TABLES`] only, and the rows of the Core tables and of SQLite's internal tables those
+    /// changes write.
+    CoreMigration,
 }
 
 /// Tables the Core creates in every module file (AD-26) and that module SQL never changes:
-/// `_meta`, and `_vocabulary`, the labels an adult confirmed for the file's reviewed vocabularies
-/// (D104), with which a module that could write it would confirm its own labels.
+/// `_meta`, which `create` writes, and the tables of the Core migration track (`core_schema`). A
+/// module that could write `_vocabulary` would confirm its own labels, one that could write
+/// `_journal` would forge the history undo restores, and one that could write `_outbox` or
+/// `_consumed` would request effects or drop events outside its calls.
 /// Compared ignoring ASCII case; the authorizer receives the table name without its schema, so
-/// `main._meta` is matched too. `_journal`, `_outbox`, `_consumed` and `_dead_letter` join this
-/// list with the stories that create them (3.6, 3.8). The module registry reads it to tell the
-/// Core's tables from a module's in a file's schema.
-pub const CORE_TABLES: &[&str] = &["_meta", "_vocabulary"];
+/// `main._meta` is matched too. The module registry reads it to tell the Core's tables from a
+/// module's in a file's schema.
+pub const CORE_TABLES: &[&str] = &[
+    "_meta",
+    "_vocabulary",
+    "_journal",
+    "_outbox",
+    "_consumed",
+    "_dead_letter",
+    "_record_keys",
+];
+
+/// The Core tables module SQL cannot read either, under any policy but the Core's own: the
+/// journal's images are earlier states of records, deleted ones included, which a module would
+/// otherwise still read once the record is gone; the outbox holds the payloads of effects; and
+/// a module that read a wrapped record key could copy it into a record and defeat its shredding
+/// (D132). `_meta` and `_vocabulary` stay readable: the epoch is a counter and the labels are the
+/// module's own vocabulary.
+pub const CORE_PRIVATE_TABLES: &[&str] = &[
+    "_journal",
+    "_outbox",
+    "_consumed",
+    "_dead_letter",
+    "_record_keys",
+];
 
 /// Virtual table modules reviewed as usable by module SQL under some policy: `fts5`, whose tables
 /// a module migration may create once Story 3.7 applies D127. Today every `CREATE VIRTUAL TABLE`
@@ -276,19 +306,36 @@ fn row_write_allowed(policy: Policy, table_name: &str) -> bool {
         .get(..7)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sqlite_"));
     let core = listed(CORE_TABLES, table_name);
+    let migration_internal = listed(MIGRATION_INTERNAL_TABLES, table_name);
     match policy {
-        Policy::Migration => !core && (!internal || listed(MIGRATION_INTERNAL_TABLES, table_name)),
+        Policy::Migration => !core && (!internal || migration_internal),
         Policy::Write => !core && !internal,
         Policy::Core => core,
+        Policy::CoreMigration => core || migration_internal,
         Policy::Read | Policy::Closed => false,
     }
 }
 
-/// Schema changes: the migration policy only, and never on [`CORE_TABLES`] (dropping, altering,
-/// indexing or attaching a trigger to `_meta` would defeat the epoch cross-check of AD-5, and to
-/// `_vocabulary` would let a module confirm its own labels).
+/// Schema changes: the migration policy, never on [`CORE_TABLES`] (dropping, altering, indexing
+/// or attaching a trigger to `_meta` would defeat the epoch cross-check of AD-5, to `_vocabulary`
+/// would let a module confirm its own labels, and to `_journal` would let it rewrite history);
+/// and the Core migration policy, on [`CORE_TABLES`] only. A change that names no table (a view,
+/// `ANALYZE`) is the migration policy's alone.
 fn schema_change_allowed(policy: Policy, table_name: Option<&str>) -> bool {
-    policy == Policy::Migration && !table_name.is_some_and(|name| listed(CORE_TABLES, name))
+    let core = table_name.is_some_and(|name| listed(CORE_TABLES, name));
+    match policy {
+        Policy::Migration => !core,
+        Policy::CoreMigration => core,
+        Policy::Write | Policy::Read | Policy::Core | Policy::Closed => false,
+    }
+}
+
+/// Reads: never of a denied virtual table module, and of [`CORE_PRIVATE_TABLES`] only under the
+/// Core's own policies.
+fn read_allowed(policy: Policy, table_name: &str) -> bool {
+    !listed(DENIED_MODULES, table_name)
+        && (matches!(policy, Policy::Core | Policy::CoreMigration)
+            || !listed(CORE_PRIVATE_TABLES, table_name))
 }
 
 /// The authorizer decision for one action, as a pure function so the policy can be read and
@@ -297,7 +344,7 @@ pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorizat
     let allowed = policy != Policy::Closed
         && match context.action {
             AuthAction::Select | AuthAction::Recursive => true,
-            AuthAction::Read { table_name, .. } => !listed(DENIED_MODULES, table_name),
+            AuthAction::Read { table_name, .. } => read_allowed(policy, table_name),
             AuthAction::Function { function_name } => function_allowed(policy, function_name),
             AuthAction::Pragma { pragma_name, .. } => listed(INTROSPECTION_PRAGMAS, pragma_name),
             AuthAction::Insert { table_name }
@@ -318,9 +365,13 @@ pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorizat
             | AuthAction::AlterTable { table_name, .. } => {
                 schema_change_allowed(policy, Some(table_name))
             }
+            // SQLite authorizes a `CREATE INDEX` as a reindex of the new index too, naming the
+            // index only; both migration policies create indexes on their own tables.
+            AuthAction::Reindex { .. } => {
+                matches!(policy, Policy::Migration | Policy::CoreMigration)
+            }
             AuthAction::CreateView { .. }
             | AuthAction::DropView { .. }
-            | AuthAction::Reindex { .. }
             | AuthAction::Analyze { .. } => schema_change_allowed(policy, None),
             // Everything else, including ATTACH, DETACH, temporary objects, virtual tables and
             // any action code this binding does not know, is refused.
@@ -352,12 +403,13 @@ pub(crate) fn remove(connection: &Connection) -> rusqlite::Result<()> {
 mod tests {
     use super::*;
 
-    const ALL_POLICIES: [Policy; 5] = [
+    const ALL_POLICIES: [Policy; 6] = [
         Policy::Closed,
         Policy::Migration,
         Policy::Write,
         Policy::Read,
         Policy::Core,
+        Policy::CoreMigration,
     ];
 
     fn decide(policy: Policy, action: AuthAction<'_>) -> Authorization {
@@ -421,7 +473,7 @@ mod tests {
     /// The intended policy per action family, one row per policy.
     #[test]
     fn each_policy_allows_only_its_own_actions() {
-        let expectations: [(Policy, [bool; 7]); 5] = [
+        let expectations: [(Policy, [bool; 7]); 6] = [
             // (select, create table, insert, insert sqlite_master, insert sqlite_sequence,
             //  begin, allowed pragma)
             (
@@ -435,6 +487,10 @@ mod tests {
             (Policy::Write, [true, false, true, false, false, true, true]),
             (Policy::Read, [true, false, false, false, false, true, true]),
             (Policy::Core, [true, false, false, false, false, true, true]),
+            (
+                Policy::CoreMigration,
+                [true, false, false, true, true, false, true],
+            ),
         ];
         for (policy, expected) in expectations {
             let actions = [
@@ -615,6 +671,105 @@ mod tests {
                     "{policy:?} temp_store {value:?}"
                 );
             }
+        }
+    }
+
+    /// Story 3.6: every Core table, the journal's included, is written under the Core policy
+    /// only and changed in schema under the Core migration policy only; the Core migration policy
+    /// changes no module table; and the private Core tables are read under the Core's policies
+    /// only, while `_meta` and `_vocabulary` stay readable.
+    #[test]
+    fn the_core_track_alone_shapes_the_core_tables_and_their_private_rows_stay_the_cores() {
+        for &name in CORE_TABLES {
+            for spelling in [name.to_owned(), name.to_ascii_uppercase()] {
+                let name = spelling.as_str();
+                let writes = [
+                    AuthAction::Insert { table_name: name },
+                    AuthAction::Update {
+                        table_name: name,
+                        column_name: "x",
+                    },
+                    AuthAction::Delete { table_name: name },
+                ];
+                let schema_changes = [
+                    AuthAction::CreateTable { table_name: name },
+                    AuthAction::DropTable { table_name: name },
+                    AuthAction::AlterTable {
+                        database_name: "main",
+                        table_name: name,
+                    },
+                    AuthAction::CreateIndex {
+                        index_name: "i",
+                        table_name: name,
+                    },
+                    AuthAction::CreateTrigger {
+                        trigger_name: "t",
+                        table_name: name,
+                    },
+                ];
+                for policy in ALL_POLICIES {
+                    let may_write = matches!(policy, Policy::Core | Policy::CoreMigration);
+                    for action in writes {
+                        let label = format!("{policy:?} {action:?}");
+                        assert_eq!(
+                            decide(policy, action) == Authorization::Allow,
+                            may_write,
+                            "{label}"
+                        );
+                    }
+                    for action in schema_changes {
+                        let label = format!("{policy:?} {action:?}");
+                        assert_eq!(
+                            decide(policy, action) == Authorization::Allow,
+                            policy == Policy::CoreMigration,
+                            "{label}"
+                        );
+                    }
+                    let read = AuthAction::Read {
+                        table_name: name,
+                        column_name: "x",
+                    };
+                    let may_read = policy != Policy::Closed
+                        && (matches!(policy, Policy::Core | Policy::CoreMigration)
+                            || !listed(CORE_PRIVATE_TABLES, name));
+                    assert_eq!(
+                        decide(policy, read) == Authorization::Allow,
+                        may_read,
+                        "{policy:?} read {name}"
+                    );
+                }
+            }
+        }
+        for private in CORE_PRIVATE_TABLES {
+            assert!(listed(CORE_TABLES, private), "{private} is a Core table");
+        }
+        for readable in ["_meta", "_vocabulary"] {
+            assert!(!listed(CORE_PRIVATE_TABLES, readable), "{readable}");
+        }
+        for action in [
+            AuthAction::CreateTable {
+                table_name: "items",
+            },
+            AuthAction::Insert {
+                table_name: "items",
+            },
+            AuthAction::Delete {
+                table_name: "items",
+            },
+            AuthAction::CreateView { view_name: "v" },
+            AuthAction::Transaction {
+                operation: rusqlite::hooks::TransactionOperation::Begin,
+            },
+            AuthAction::Function {
+                function_name: "sqlite_rename_table",
+            },
+        ] {
+            let label = format!("{action:?}");
+            assert_eq!(
+                decide(Policy::CoreMigration, action),
+                Authorization::Deny,
+                "{label}"
+            );
         }
     }
 }

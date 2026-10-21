@@ -1,6 +1,7 @@
 //! Tests of the storage layer that need its internals: the Story 1.7 hostile replay, the setup
 //! order, the key, the epoch, the checkpoints and the build of SQLCipher itself. Fixtures here.
 
+mod core_rows;
 mod core_tables;
 mod engine;
 mod hostile;

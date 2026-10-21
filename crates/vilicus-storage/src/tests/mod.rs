@@ -7,6 +7,7 @@ mod engine;
 mod fts5;
 mod hostile;
 mod maintenance;
+mod migration_copy;
 mod replay;
 mod schema;
 mod setup;

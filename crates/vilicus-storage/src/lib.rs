@@ -34,6 +34,7 @@ mod handle;
 mod journal;
 pub mod maintenance;
 mod migration;
+mod migration_copy;
 mod outbox;
 mod record_key;
 mod schema;

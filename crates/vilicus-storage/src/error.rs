@@ -184,8 +184,15 @@ pub enum Error {
     InvalidVocabularyLabel,
     /// A file copy was asked for while the WAL still holds content (AD-23).
     WalNotEmpty(PathBuf),
-    /// The file or its WAL changed while it was being copied: a connection was open.
+    /// The file or its WAL changed while it was being copied, or between its copy and the swap
+    /// of a migration: a connection was open.
     CopyRaced(PathBuf),
+    /// A file already has the most cold copies it may keep, none of them covered by a verified
+    /// backup, so a migration, which leaves one more, does not start (AD-23).
+    ColdCopiesFull {
+        /// The cold copies kept.
+        kept: usize,
+    },
     /// Any other SQLite failure.
     Sqlite(rusqlite::Error),
     /// A file system failure on the file, its sidecar or its directory.
@@ -336,6 +343,10 @@ impl fmt::Display for Error {
                 "{} changed while it was copied; a connection was open",
                 path.display()
             ),
+            Self::ColdCopiesFull { kept } => write!(
+                formatter,
+                "{kept} cold copies are kept, none covered by a verified backup"
+            ),
             Self::Sqlite(error) => write!(formatter, "SQLite: {}", Summary(error)),
             Self::Io(error) => write!(formatter, "file system: {error}"),
         }
@@ -376,6 +387,7 @@ impl fmt::Debug for Error {
             Self::InvalidVocabularyLabel => "InvalidVocabularyLabel",
             Self::WalNotEmpty(_) => "WalNotEmpty",
             Self::CopyRaced(_) => "CopyRaced",
+            Self::ColdCopiesFull { .. } => "ColdCopiesFull",
             Self::Sqlite(_) => "Sqlite",
             Self::Io(_) => "Io",
         };

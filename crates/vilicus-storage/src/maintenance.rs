@@ -8,6 +8,11 @@
 //! A copy is written under `<destination>.partial`, synced, given its key epoch sidecar
 //! `<destination>.epoch` and renamed into place, so `<destination>` never names a partial copy;
 //! a failure removes the partial file. An existing destination or destination sidecar is refused.
+//!
+//! The migration runner's file operations are here too: the working copy of a migration and its
+//! swap into place ([`copy_for_migration`], [`MigrationCopy`]), the cold copies it leaves
+//! ([`cold_copies`], [`remove_covered_cold_copies`]) and the free space it checks
+//! ([`available_space`]), AD-23 and D84.
 
 use std::fs::{self, File};
 use std::os::raw::c_int;
@@ -19,6 +24,11 @@ use rusqlite::backup::Backup;
 use crate::error::{Error, Result};
 use crate::file::{self, KeyEpoch, ModuleFile};
 use crate::handle::{self, Setup};
+
+pub use crate::migration_copy::{
+    ColdCopy, MAX_COLD_COPIES, MigrationCopy, SchemaVersions, VerifiedBackup, available_space,
+    cold_copies, copy_for_migration, remove_covered_cold_copies,
+};
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();

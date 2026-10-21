@@ -25,3 +25,6 @@ undocumented_unsafe_blocks = "deny"
 vilicus-types.workspace = true
 rusqlite.workspace = true
 zeroize.workspace = true
+# statvfs, the free space the migration runner checks before it copies a file (AD-23): libc, at
+# the version Cargo.lock already holds in the tree of dcbor and cc, a new edge and no new package.
+libc.workspace = true

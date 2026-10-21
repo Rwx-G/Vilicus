@@ -973,7 +973,7 @@ impl<R: Inspect> Handle<R> {
     }
 }
 
-fn read_schema_version(connection: &Connection, track: MigrationTrack) -> Result<u32> {
+pub(crate) fn read_schema_version(connection: &Connection, track: MigrationTrack) -> Result<u32> {
     match connection.query_row(
         "SELECT value FROM _meta WHERE key = ?1",
         [track.meta_key()],

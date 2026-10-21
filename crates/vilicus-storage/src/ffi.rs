@@ -1,7 +1,8 @@
 //! The SQLite and SQLCipher C calls that `rusqlite` does not wrap safely (D140): the extension
 //! loading switch (D126), keying from a buffer the caller wipes (AD-4) and the TRUNCATE checkpoint
-//! that the authorizer does not see (D132). Every `unsafe` block of the crate is here, each with
-//! the invariant it relies on; the functions are safe to call.
+//! that the authorizer does not see (D132); and the one system call of the maintenance path, the
+//! free space of a file system (`statvfs`, AD-23). Every `unsafe` block of the crate is here, each
+//! with the invariant it relies on; the functions are safe to call.
 
 use std::ffi::c_int;
 
@@ -121,4 +122,25 @@ pub(crate) fn checkpoint_truncate(connection: &Connection) -> rusqlite::Result<C
         log,
         checkpointed,
     })
+}
+
+/// The bytes an unprivileged process may still write to the file system holding `directory`,
+/// from `statvfs` (`f_bavail` blocks of `f_frsize` bytes): what the migration runner checks
+/// before it copies a file (AD-23). The standard library has no call for it.
+#[allow(unsafe_code)] // One FFI call; no approved dependency wraps statvfs safely (AD-23, D140).
+pub(crate) fn available_bytes(directory: &std::path::Path) -> std::io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(directory.as_os_str().as_bytes())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a NUL-terminated string that outlives the call; `stats` points at
+    // writable memory of the size of `statvfs`, which the call fills when it returns 0.
+    let code = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if code != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `statvfs` returned 0, so it wrote the whole structure.
+    let stats = unsafe { stats.assume_init() };
+    Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
 }

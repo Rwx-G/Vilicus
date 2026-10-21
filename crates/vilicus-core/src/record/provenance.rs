@@ -146,7 +146,12 @@ pub(crate) fn stamp(
     })
 }
 
-/// The labels of what the write itself gives, before an update raises them to the record's.
+/// The labels of what the write itself gives, before an update raises them to the record's. An
+/// update no member made or approved counts the record it changes as one more input: by its
+/// `text_taint` when it gives free text, and by its `taint` when it gives structured fields only,
+/// whose label then cannot rise from the record's free text; the record keeps its `text_taint`
+/// (an approved draft stays one), raised to the new `taint`. The record named among the inputs
+/// too counts this way only.
 fn written_labels(
     call: &Call,
     table: &'static Table,
@@ -189,14 +194,28 @@ fn written_labels(
             RecordLabels::of(Taint::Trusted, text)
         }
         Authority::Unapproved { acting_for, .. } => {
+            let gives_text = free_texts(table, fields).next().is_some();
+            let changed = stored.map(|stored| {
+                let record = &stored.provenance;
+                let counted = if gives_text {
+                    record.labels.overall()
+                } else {
+                    record.labels.taint()
+                };
+                stored_taint(EffectiveTaint::for_viewer(
+                    counted,
+                    record.author,
+                    *acting_for,
+                ))
+            });
             let structured = inputs
                 .iter()
-                .chain(stored.map(|stored| &stored.provenance))
+                .filter(|input| stored.is_none_or(|stored| stored.provenance.id != input.id))
                 .map(|input| input.derived_taint(*acting_for))
+                .chain(changed)
                 .chain(consumes(call).then(|| stored_taint(call.consumed.taint)))
                 .fold(call.session, most_restrictive);
-            let model_text =
-                call.principal == Principal::AiTask && free_texts(table, fields).next().is_some();
+            let model_text = call.principal == Principal::AiTask && gives_text;
             let text = if model_text {
                 TextTaint::External
             } else {

@@ -2014,6 +2014,85 @@ fn an_update_never_lowers_a_records_label() {
     );
 }
 
+/// Story 3.5 re-review, minor 2: an update no member made or approved that gives structured
+/// fields only counts the record it changes by its structured label and carries its free-text
+/// label. An approved draft ticked by a rule acting for Ella, or by her unapproved assistant from a
+/// clean session, stays `(trusted, approved_draft)`, though each names the record itself as an
+/// input; an event from a tainted call raises both labels; an AI update writing text over it
+/// counts the record by its free-text label and stores `external`.
+#[test]
+fn a_structured_update_carries_the_records_free_text_label() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "carry-text");
+    let mut stamper = TestStamper::at(noon());
+    let draft = "Rappeler le plombier mardi";
+    let definition = provenance(
+        member_id(37),
+        Taint::Trusted,
+        Some(ella()),
+        &[DataType::Meals],
+    );
+    let rule = Call {
+        implicit_inputs: vec![definition.clone()],
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for: Some(ella()),
+        },
+        ..unapproved(Principal::Rule, Source::Rule(task()))
+    };
+    let tainted_event = Call {
+        session: Taint::External,
+        implicit_inputs: vec![definition.clone()],
+        ..unapproved(Principal::Event, Source::Event(task()))
+    };
+    let cases: Vec<(Call, Fields, (String, String))> = vec![
+        (
+            rule,
+            vec![("status", text("done"))],
+            labels("trusted", "approved_draft"),
+        ),
+        (
+            ai_task(Taint::Trusted),
+            vec![("quantity", Value::Integer(2))],
+            labels("trusted", "approved_draft"),
+        ),
+        (
+            tainted_event,
+            vec![("status", text("done"))],
+            labels("external", "external"),
+        ),
+        (
+            ai_task(Taint::Trusted),
+            vec![("body", text("Et le chauffagiste"))],
+            labels("external", "external"),
+        ),
+    ];
+    for (case, (by, fields, expected)) in cases.into_iter().enumerate() {
+        let written = insert_one(
+            &handle,
+            module,
+            &approved(Taint::External, &[], &[draft]),
+            &mut stamper,
+            "notes",
+            &note(draft),
+            &[],
+        );
+        assert_eq!(
+            stored_labels(&handle, "notes", written.id),
+            labels("trusted", "approved_draft")
+        );
+        call(&handle, module, &by, &mut stamper, |records| {
+            records.update("notes", written.id, Rev::FIRST, &fields, &[written.id])
+        })
+        .expect("the call commits");
+        assert_eq!(
+            stored_labels(&handle, "notes", written.id),
+            expected,
+            "case {case}"
+        );
+    }
+}
+
 /// The fields a write gives.
 type Fields = Vec<(&'static str, Value)>;
 

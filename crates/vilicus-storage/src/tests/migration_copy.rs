@@ -367,9 +367,15 @@ fn a_cold_copy_goes_with_its_wal_and_shared_memory_file() {
     let dir = scratch_dir("cold-companions");
     let file = create_module_file(&dir);
     let cold = migrate_on_copy(&file, 1, None);
-    for suffix in ["-wal", "-shm"] {
-        let mut path = cold.path().as_os_str().to_owned();
-        path.push(suffix);
+    let companions: Vec<std::path::PathBuf> = ["-wal", "-shm"]
+        .iter()
+        .map(|suffix| {
+            let mut path = cold.path().as_os_str().to_owned();
+            path.push(suffix);
+            std::path::PathBuf::from(path)
+        })
+        .collect();
+    for path in &companions {
         fs::write(path, b"left by a connection").expect("a companion");
     }
     let orphan = dir.join("fixture.household.db.pre-9.9-wal");
@@ -382,6 +388,9 @@ fn a_cold_copy_goes_with_its_wal_and_shared_memory_file() {
     )
     .expect("remove");
     assert_eq!(removed, 1);
+    for path in &companions {
+        assert!(!path.exists(), "{} goes with its cold copy", path.display());
+    }
     assert!(orphan.exists(), "not a covered cold copy");
     copy_for_migration(&file, &KEY, None)
         .expect("copy")

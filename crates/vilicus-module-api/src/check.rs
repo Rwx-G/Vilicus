@@ -575,6 +575,7 @@ impl ModuleDeclaration {
     ///             kind: FieldKind::FreeText { max_len: 2000 },
     ///             optional: false,
     ///         }],
+    ///         elevation_exempt: false,
     ///     }],
     ///     fts5_tables: &[],
     ///     migrations: &[Migration {
@@ -611,7 +612,12 @@ impl ModuleDeclaration {
     ///
     /// const MODULE: ModuleDeclaration = ModuleDeclaration {
     ///     name: "notes",
-    ///     tables: &[Table { name: "notes", data_types: &[], fields: &[] }],
+    ///     tables: &[Table {
+    ///         name: "notes",
+    ///         data_types: &[],
+    ///         fields: &[],
+    ///         elevation_exempt: false,
+    ///     }],
     ///     fts5_tables: &[],
     ///     migrations: &[Migration {
     ///         sql: "CREATE TABLE notes (id BLOB) STRICT;",
@@ -630,7 +636,12 @@ impl ModuleDeclaration {
     /// ```compile_fail,E0599
     /// use vilicus_module_api::{DataType, Table};
     ///
-    /// const NOTES: Table = Table { name: "notes", data_types: &[DataType::Pets], fields: &[] };
+    /// const NOTES: Table = Table {
+    ///     name: "notes",
+    ///     data_types: &[DataType::Pets],
+    ///     fields: &[],
+    ///     elevation_exempt: false,
+    /// };
     /// ```
     ///
     /// A tool that does not declare its network effect does not build (I13):

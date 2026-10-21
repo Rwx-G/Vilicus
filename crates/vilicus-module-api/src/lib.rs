@@ -6,8 +6,8 @@
 //!
 //! A module declares itself in one [`ModuleDeclaration`], a `const` item: its [`Table`]s, each
 //! holding one record kind with the data types its fields may hold and its [`Field`]s, structured
-//! or free text; its [`Fts5Table`]s; its [`Migration`]s, each with its frozen hash; its
-//! [`Tool`]s, each with its tier,
+//! or free text, and whether the kind is exempt from elevation; its [`Fts5Table`]s; its
+//! [`Migration`]s, each with its frozen hash; its [`Tool`]s, each with its tier,
 //! network effect, exception class, [`Confirmation`] and capability [`MatrixRow`], and the
 //! capability matrix sections it implements; the event [`Topic`]s it emits, each with its payload
 //! version and the modules allowed to consume it, and its [`Consumer`]s. Every table also carries

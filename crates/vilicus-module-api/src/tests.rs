@@ -47,6 +47,7 @@ const VALID: ModuleDeclaration = ModuleDeclaration {
                     optional: true,
                 },
             ],
+            elevation_exempt: false,
         },
         Table {
             name: "notes",
@@ -56,6 +57,7 @@ const VALID: ModuleDeclaration = ModuleDeclaration {
                 kind: FieldKind::FreeText { max_len: 4000 },
                 optional: false,
             }],
+            elevation_exempt: false,
         },
     ],
     fts5_tables: &[
@@ -495,6 +497,41 @@ fn every_field_kind_maps_to_its_sql_type() {
             ("aisle", SqlType::Text),
         ]
     );
+}
+
+/// Story 3.10, AC2 (D104, DC-59): a record kind exempt from elevation takes, from an AI or plugin
+/// principal, a write of structured fields only without elevation; free text, an undeclared name
+/// or a kind that is not exempt leave the write to the elevated queue.
+#[test]
+fn an_exempt_record_kind_spares_only_structured_writes_from_elevation() {
+    let exempt = Table {
+        elevation_exempt: true,
+        ..VALID.tables[0]
+    };
+    let structured: Vec<&str> = exempt
+        .fields
+        .iter()
+        .filter(|field| matches!(field.kind, FieldKind::Structured(_)))
+        .map(|field| field.name)
+        .collect();
+    assert!(structured.len() > 1);
+    assert!(exempt.accepts_without_elevation(&structured));
+    assert!(exempt.accepts_without_elevation(&structured[..1]));
+    assert!(exempt.accepts_without_elevation(&[]));
+    for field in exempt.fields {
+        let alone = exempt.accepts_without_elevation(&[field.name]);
+        assert_eq!(
+            alone,
+            matches!(field.kind, FieldKind::Structured(_)),
+            "{}",
+            field.name
+        );
+    }
+    let with_text: Vec<&str> = structured.iter().copied().chain(["label"]).collect();
+    assert!(!exempt.accepts_without_elevation(&with_text));
+    assert!(!exempt.accepts_without_elevation(&["status", "absent"]));
+    assert!(!VALID.tables[0].elevation_exempt);
+    assert!(!VALID.tables[0].accepts_without_elevation(&structured));
 }
 
 /// AC7 (D127): an FTS5 table's content is empty or a table of the module, whose fields it

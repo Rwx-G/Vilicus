@@ -181,6 +181,7 @@ mod tests {
         name: "items",
         data_types: &[DataType::ShoppingList, DataType::Stock],
         fields: &[],
+        elevation_exempt: false,
     };
 
     fn column(name: &str) -> &'static EnvelopeColumn {

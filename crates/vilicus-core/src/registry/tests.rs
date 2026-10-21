@@ -132,6 +132,7 @@ fn sample() -> ModuleDeclaration {
                 name: "items",
                 data_types: &[DataType::ShoppingList, DataType::Stock],
                 fields: leak(fields),
+                elevation_exempt: false,
             },
             Table {
                 name: "notes",
@@ -141,6 +142,7 @@ fn sample() -> ModuleDeclaration {
                     kind: FieldKind::FreeText { max_len: 4000 },
                     optional: false,
                 }],
+                elevation_exempt: false,
             },
         ]),
         fts5_tables: &[],
@@ -210,6 +212,7 @@ const LITERAL: ModuleDeclaration = ModuleDeclaration {
             kind: FieldKind::FreeText { max_len: 100 },
             optional: false,
         }],
+        elevation_exempt: false,
     }],
     fts5_tables: &[],
     migrations: &[Migration {
@@ -265,6 +268,7 @@ fn the_registry_refuses_invalid_or_duplicate_modules() {
             name: "entries",
             data_types: &[],
             fields: &[],
+            elevation_exempt: false,
         }],
         ..LITERAL
     };
@@ -277,6 +281,7 @@ fn the_registry_refuses_invalid_or_duplicate_modules() {
                 kind: FieldKind::FreeText { max_len: 0 },
                 optional: false,
             }],
+            elevation_exempt: false,
         }],
         ..LITERAL
     };

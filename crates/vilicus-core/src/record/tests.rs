@@ -180,11 +180,13 @@ fn probe() -> &'static ModuleDeclaration {
                 name: "items",
                 data_types: &[DataType::ShoppingList],
                 fields: ITEM_FIELDS,
+                elevation_exempt: false,
             },
             Table {
                 name: "places",
                 data_types: &[DataType::HouseholdOther],
                 fields: PLACE_FIELDS,
+                elevation_exempt: false,
             },
         ],
         None,
@@ -919,6 +921,7 @@ fn stored_rows_written_by_a_migration_are_checked() {
                 name: "items",
                 data_types: &[DataType::ShoppingList],
                 fields: ITEM_FIELDS,
+                elevation_exempt: false,
             }],
             Some(format!(
                 "INSERT INTO items (id, source, taint, text_taint, data_types, created_at, \
@@ -997,6 +1000,7 @@ fn the_write_path_fuzz_refuses_every_value_outside_its_declaration() {
                     optional: false,
                 },
             ],
+            elevation_exempt: false,
         }],
         None,
     );
@@ -1105,6 +1109,7 @@ fn the_envelope_is_held_to_its_stored_form_on_write_and_when_read_back() {
                 name: "items",
                 data_types: &[DataType::ShoppingList],
                 fields: ITEM_FIELDS,
+                elevation_exempt: false,
             }],
             Some(format!(
                 "INSERT INTO items (id, source, taint, text_taint, data_types, author, created_at, \
@@ -1211,6 +1216,7 @@ fn a_failed_commit_leaves_no_open_transaction() {
             name: "items",
             data_types: &[DataType::ShoppingList],
             fields: ITEM_FIELDS,
+            elevation_exempt: false,
         }],
         None,
     );

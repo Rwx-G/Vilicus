@@ -155,6 +155,28 @@ pub struct Table {
     pub data_types: &'static [DataType],
     /// The fields beside the envelope.
     pub fields: &'static [Field],
+    /// True for a low-risk record kind the module declares exempt from the elevated queue,
+    /// reviewed with the module (PRD FR-28, `doc/capability-matrix.md` Legend, *exempt*): a
+    /// tainted AI or plugin session writes it without elevation, but from such a principal it
+    /// accepts structured fields only, so free text the assistant writes there is still elevated
+    /// (D104, DC-59). [`Table::accepts_without_elevation`] states which writes the exemption
+    /// covers; elevating the others is the pipeline's.
+    pub elevation_exempt: bool,
+}
+
+impl Table {
+    /// True when a write of an AI or plugin principal giving `fields` to this record kind needs
+    /// no elevation from a tainted session (D104): the kind is exempt, and every field given is a
+    /// structured field it declares. A free-text field, or a name the kind does not declare,
+    /// leaves the write to the elevated queue.
+    pub fn accepts_without_elevation(&self, fields: &[&str]) -> bool {
+        self.elevation_exempt
+            && fields.iter().all(|given| {
+                self.fields.iter().any(|field| {
+                    field.name == *given && matches!(field.kind, FieldKind::Structured(_))
+                })
+            })
+    }
 }
 
 /// A built-in FTS5 tokenizer, the allowlist of D127.

@@ -44,12 +44,14 @@ const NOTES: &[Table] = &[Table {
     name: "notes",
     data_types: &[DataType::Meals],
     fields: TITLE,
+    elevation_exempt: false,
 }];
 
 const TASKS: &[Table] = &[Table {
     name: "tasks",
     data_types: &[DataType::Meals],
     fields: TITLE,
+    elevation_exempt: false,
 }];
 
 const ADDED: &str = "notes.note.added";

@@ -60,11 +60,13 @@ pub(super) fn notes_module() -> &'static ModuleDeclaration {
                 name: "notes",
                 data_types: &[DataType::Meals, DataType::ShoppingList],
                 fields: NOTE_FIELDS,
+                elevation_exempt: false,
             },
             Table {
                 name: "digests",
                 data_types: DataType::ALL,
                 fields: DIGEST_FIELDS,
+                elevation_exempt: false,
             },
         ],
         None,

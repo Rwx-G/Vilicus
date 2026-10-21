@@ -68,12 +68,14 @@ const TASKS: &[Table] = &[Table {
     name: "tasks",
     data_types: &[DataType::Meals],
     fields: TITLE,
+    elevation_exempt: false,
 }];
 
 const NOTES: &[Table] = &[Table {
     name: "notes",
     data_types: &[DataType::Meals],
     fields: TITLE,
+    elevation_exempt: false,
 }];
 
 /// A tier 1 write, undone by the Core's journal.

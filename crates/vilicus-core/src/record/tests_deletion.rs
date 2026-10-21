@@ -39,6 +39,7 @@ fn vault() -> &'static ModuleDeclaration {
             name: "secrets",
             data_types: &[DataType::Meals],
             fields: SECRET_FIELDS,
+            elevation_exempt: false,
         }],
         None,
     )

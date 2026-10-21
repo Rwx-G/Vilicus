@@ -66,6 +66,7 @@ fn shop(second: Option<&str>, fts5: bool) -> &'static ModuleDeclaration {
         name: "items",
         data_types: &[DataType::ShoppingList],
         fields: FIELDS,
+        elevation_exempt: false,
     };
     let mut first = create_sql(&table);
     if fts5 {

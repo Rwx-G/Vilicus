@@ -46,8 +46,8 @@ pub use authorizer::{CORE_PRIVATE_TABLES, CORE_TABLES};
 pub use core_schema::{CORE_SCHEMA_VERSION, core_migrations};
 pub use error::{Error, Result, is_refusal};
 pub use event::{
-    DeadLetter, DeliveryRow, DeliveryState, EventIntent, EventRow, LinkIntent, LinkRow,
-    OutboxPurge, OutboxRow, OutboxState,
+    DeadLetter, DeliveryRow, DeliveryState, EventIntent, EventRow, LinkIntent, LinkRow, OutboxKind,
+    OutboxPurge, OutboxRow, OutboxState, PendingRow,
 };
 pub use file::{KeyEpoch, ModuleFile, Partition, read_epoch};
 pub use handle::{

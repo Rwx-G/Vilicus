@@ -14,14 +14,17 @@
 //! Delivery is ordered per source file and consumer: an event a consumer has not received holds
 //! back that consumer's later events, and only that consumer's. A consumer whose file is not
 //! ready (AD-54), its partition locked included, keeps its events in the source outbox, and that
-//! is not a failure. A failed delivery, a refusal or a panic of the consumer's code, is counted;
-//! the fifth moves the event to the source file's dead letters, returns a typed instance admin
-//! alert, and lets the consumer's later events proceed, so the consumer sees a gap (AD-29). An
-//! event is closed once every consumer received it or dead-lettered it.
+//! is not a failure. A failed delivery, a refusal or a panic of the consumer's code, or an event
+//! whose row does not decode, is counted; the fifth moves the event to the source file's dead
+//! letters, returns a typed instance admin alert, and lets the consumer's later events proceed,
+//! so the consumer sees a gap (AD-29). An event is closed once every consumer received it or
+//! dead-lettered it. The outbox is read a page at a time, each row on its own, so no row, however
+//! damaged, stops the rows after it. A panic of the Core itself is not caught here (AD-9, D131).
 //!
 //! A link request is registered by the Core in the link table of the partition, after the
-//! module's transaction and never inside it, once the linked record is found in its module's file
-//! of the same partition; otherwise it is refused, with an alert (AD-10). In V0.1, events and
+//! module's transaction and never inside it, once the linking record is still in its file and the
+//! linked record is found in its module's file of the same partition; otherwise it is refused,
+//! with an alert (AD-10). A link table that fails keeps the request pending. In V0.1, events and
 //! links stay in their source partition (D107): every consumer or target file must be of the
 //! source file's partition, or the delivery stops.
 //!
@@ -41,7 +44,7 @@ use std::time::Duration;
 use vilicus_module_api::{Consumer, Event, ModuleDeclaration, Records, WriteError};
 use vilicus_storage::{
     CORE_SCHEMA_VERSION, DeliveryState, EventRow, Handle, Inspect, LinkRow, MigrationTrack,
-    OutboxPurge, OutboxRow, OutboxState, Partition, SqlValue, Write,
+    OutboxKind, OutboxPurge, OutboxRow, OutboxState, Partition, PendingRow, SqlValue, Write,
 };
 use vilicus_types::{
     EVENT_DELIVERY_ATTEMPTS, Id, ModuleName, OUTBOX_RETENTION, Principal, Source, UtcMillis,
@@ -105,6 +108,11 @@ pub struct Link {
 /// How many failed deliveries of one event to one consumer move it to the dead letters (AD-29).
 pub const MAX_DELIVERY_ATTEMPTS: u32 = EVENT_DELIVERY_ATTEMPTS;
 
+/// How many pending rows of the outbox a pass reads at a time: their payloads are read one row
+/// at a time, so a pass holds at most this many positions, ids and names, however long the
+/// outbox.
+pub const OUTBOX_PAGE: u32 = 256;
+
 /// What became of one event for one consumer in a delivery pass.
 #[derive(Debug)]
 pub struct Delivery {
@@ -154,6 +162,9 @@ pub enum FailureCause {
     Refused(RecordError),
     /// The consumer's code panicked; its call was rolled back.
     Panicked,
+    /// The event's row of the outbox, or the provenance it holds, does not decode: no consumer
+    /// code ran.
+    Malformed,
 }
 
 /// What became of one link request in a delivery pass.
@@ -166,6 +177,9 @@ pub enum LinkOutcome {
     Refused,
     /// The target module's file is not ready: the request stays pending.
     TargetNotReady,
+    /// The link table failed (its file not open, a storage error): the request stays pending,
+    /// and the pass goes on with the next row.
+    TableUnavailable,
 }
 
 /// What one delivery pass did.
@@ -177,7 +191,8 @@ pub struct DeliveryReport {
     pub links: Vec<(Id, LinkOutcome)>,
     /// The events the pass closed: every consumer received or dead-lettered them.
     pub closed: Vec<Id>,
-    /// The alerts to the instance admin: dead letters and refused links.
+    /// The alerts to the instance admin: dead letters, refused links and rows of the outbox no
+    /// id names.
     pub alerts: Vec<InstanceAdminAlert>,
 }
 
@@ -209,8 +224,6 @@ pub enum DeliveryError {
     },
     /// The Core's clock gave a time before the Unix epoch, which no id holds.
     ClockBeforeEpoch,
-    /// The link table refused a link.
-    LinkTable(vilicus_storage::Error),
     /// The storage layer failed on the source file.
     Storage(vilicus_storage::Error),
 }
@@ -244,7 +257,6 @@ impl fmt::Display for DeliveryError {
             Self::ClockBeforeEpoch => {
                 formatter.write_str("the clock is before the Unix epoch; no id can be stamped")
             }
-            Self::LinkTable(error) => write!(formatter, "the link table: {error}"),
             Self::Storage(error) => write!(formatter, "{error}"),
         }
     }
@@ -260,13 +272,16 @@ impl From<vilicus_storage::Error> for DeliveryError {
 
 /// One delivery pass over the outbox of `source`, the write handle of a module file of
 /// `registry`: every pending event to every consumer whose file `files` offers ready, every
-/// pending link request to `links`, in commit order, with `code` for the consumers' code and
-/// `stamper` for the time and the ids. The pass makes at most one attempt per event and
-/// consumer; the next pass retries what failed and delivers what was not ready.
+/// pending link request to `links`, in commit order, a page of [`OUTBOX_PAGE`] rows at a time,
+/// with `code` for the consumers' code and `stamper` for the time and the ids. The pass makes at
+/// most one attempt per event and consumer; the next pass retries what failed and delivers what
+/// was not ready. A row that does not decode fails its deliveries, or is refused, and never
+/// stops the pass; nor does a link table that fails.
 ///
 /// Refused, before anything is delivered, when the source file's module is not registered or its
 /// migrations have not run; stopped when `files` offers a file of another partition or module,
-/// or the source file fails. What the pass delivered before it stopped stays delivered.
+/// or the source file fails. What the pass delivered before it stopped stays delivered. A panic
+/// of the Core, outside the consumer's code, is not caught here (AD-9, D131).
 pub fn deliver_outbox(
     registry: &Registry,
     source: &Handle<Write>,
@@ -294,10 +309,15 @@ pub fn deliver_outbox(
         held_back: HashSet::new(),
         report: DeliveryReport::default(),
     };
-    for row in source.pending_outbox()? {
-        match row {
-            OutboxRow::Event(event) => pass.deliver_event(&event, code)?,
-            OutboxRow::Link(link) => pass.register_link(&link, links)?,
+    let mut after = 0;
+    loop {
+        let page = source.pending_outbox(after, OUTBOX_PAGE)?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = last.seq;
+        for row in &page {
+            pass.deliver(row, code, links)?;
         }
     }
     Ok(pass.report)
@@ -350,6 +370,15 @@ struct Pass<'a> {
     report: DeliveryReport,
 }
 
+/// A row of the outbox read whole, or the failure to: a column outside its stored form.
+fn read_row(source: &Handle<Write>, seq: i64) -> Result<Option<OutboxRow>, DeliveryError> {
+    match source.outbox_row(seq) {
+        Ok(row) => Ok(Some(row)),
+        Err(vilicus_storage::Error::MalformedCoreRow { .. }) => Ok(None),
+        Err(other) => Err(other.into()),
+    }
+}
+
 impl<'a> Pass<'a> {
     /// The ready file of `module` in the source file's partition, held to that partition and that
     /// module, and to the code's versions: a file whose migrations have not run is not ready.
@@ -371,15 +400,50 @@ impl<'a> Pass<'a> {
         Ok(behind_or_ahead(handle, module)?.is_none().then_some(handle))
     }
 
+    /// One pending row: a row no id names is refused at once, with an alert, since no delivery
+    /// can be recorded for it; an event is delivered, or fails, consumer by consumer; a link
+    /// request is registered or refused.
+    fn deliver(
+        &mut self,
+        row: &PendingRow,
+        code: &mut dyn ConsumerCode,
+        links: &mut dyn LinkTable,
+    ) -> Result<(), DeliveryError> {
+        let Some(id) = row.id else {
+            let now = self.stamper.now();
+            self.source.refuse_outbox_row(row.seq, now)?;
+            self.report
+                .alerts
+                .push(InstanceAdminAlert::malformed_outbox_row(
+                    self.source.file(),
+                    row.seq,
+                ));
+            return Ok(());
+        };
+        let read = read_row(self.source, row.seq)?;
+        match (row.kind, read) {
+            (OutboxKind::Event, Some(OutboxRow::Event(event))) => {
+                self.deliver_event(id, &row.name, Some(&event), code)
+            }
+            (OutboxKind::Event, _) => self.deliver_event(id, &row.name, None, code),
+            (OutboxKind::Link, Some(OutboxRow::Link(link))) => self.register_link(&link, links),
+            (OutboxKind::Link, _) => self.refuse_link(id, &row.name),
+        }
+    }
+
+    /// Delivers the event `id` of `topic` to each of its consumers; `event` is `None` when its
+    /// row does not decode, which fails each delivery without running the consumer.
     fn deliver_event(
         &mut self,
-        event: &EventRow,
+        id: Id,
+        topic: &str,
+        event: Option<&EventRow>,
         code: &mut dyn ConsumerCode,
     ) -> Result<(), DeliveryError> {
         let mut done = true;
-        for (module, consumer) in self.registry.receivers(self.emitter, &event.topic) {
+        for (module, consumer) in self.registry.receivers(self.emitter, topic) {
             let name = format!("{}.{}", module.name, consumer.name);
-            let earlier = self.source.delivery(event.id, &name)?;
+            let earlier = self.source.delivery(id, &name)?;
             if earlier
                 .as_ref()
                 .is_some_and(|delivery| delivery.state != DeliveryState::Failing)
@@ -392,16 +456,19 @@ impl<'a> Pass<'a> {
                 match self.ready_file(module)? {
                     None => DeliveryOutcome::NotReady,
                     Some(handle) => {
-                        let attempt = consume(
-                            handle,
-                            module,
-                            consumer,
-                            self.emitter,
-                            event,
-                            code,
-                            self.stamper,
-                        );
-                        self.settle(event, &name, attempt)?
+                        let attempt = match event {
+                            Some(event) => consume(
+                                handle,
+                                module,
+                                consumer,
+                                self.emitter,
+                                event,
+                                code,
+                                self.stamper,
+                            ),
+                            None => Err(FailureCause::Malformed),
+                        };
+                        self.settle(id, topic, &name, attempt)?
                     }
                 }
             };
@@ -415,7 +482,7 @@ impl<'a> Pass<'a> {
                 self.held_back.insert(name.clone());
             }
             self.report.deliveries.push(Delivery {
-                event: event.id,
+                event: id,
                 consumer: name,
                 outcome,
             });
@@ -423,8 +490,8 @@ impl<'a> Pass<'a> {
         if done {
             let now = self.stamper.now();
             self.source
-                .close_outbox_row(event.id, OutboxState::Delivered, now)?;
-            self.report.closed.push(event.id);
+                .close_outbox_row(id, OutboxState::Delivered, now)?;
+            self.report.closed.push(id);
         }
         Ok(())
     }
@@ -432,14 +499,15 @@ impl<'a> Pass<'a> {
     /// Records in the source file what became of one attempt, after the consumer's call ended.
     fn settle(
         &mut self,
-        event: &EventRow,
+        event: Id,
+        topic: &str,
         consumer: &str,
         attempt: Result<CallResult<()>, FailureCause>,
     ) -> Result<DeliveryOutcome, DeliveryError> {
         let now = self.stamper.now();
         let cause = match attempt {
             Ok(result) => {
-                self.source.record_delivered(event.id, consumer, now)?;
+                self.source.record_delivered(event, consumer, now)?;
                 return Ok(match result {
                     CallResult::Committed(_) => DeliveryOutcome::Delivered,
                     CallResult::Deduplicated(_) | CallResult::AlreadyConsumed => {
@@ -452,7 +520,7 @@ impl<'a> Pass<'a> {
         let dead_letter = Id::new_v7(now, self.stamper.id_random())
             .map_err(|_| DeliveryError::ClockBeforeEpoch)?;
         let recorded = self.source.record_failed_delivery(
-            event.id,
+            event,
             consumer,
             now,
             MAX_DELIVERY_ATTEMPTS,
@@ -462,8 +530,8 @@ impl<'a> Pass<'a> {
             self.report.alerts.push(InstanceAdminAlert::dead_letter(
                 self.source.file(),
                 dead_letter,
-                event.id,
-                &event.topic,
+                event,
+                topic,
                 consumer,
             ));
             Ok(DeliveryOutcome::DeadLettered { dead_letter, cause })
@@ -475,6 +543,10 @@ impl<'a> Pass<'a> {
         }
     }
 
+    /// Registers `link` once its linking record is still in the source file and its target in
+    /// its module's file of the same partition; refuses it when either is missing or the module
+    /// is not registered; keeps it pending when the target file is not ready or the link table
+    /// fails.
     fn register_link(
         &mut self,
         link: &LinkRow,
@@ -484,43 +556,55 @@ impl<'a> Pass<'a> {
             .ok()
             .and_then(|name| self.registry.module(&name));
         let outcome = match target_module {
+            _ if !holds(self.source, self.emitter, link.record)? => LinkOutcome::Refused,
             None => LinkOutcome::Refused,
             Some(module) => match self.ready_file(module)? {
                 None => LinkOutcome::TargetNotReady,
                 Some(handle) if holds(handle, module, link.target)? => {
-                    table
-                        .register(&Link {
-                            id: link.id,
-                            partition: self.source.file().partition(),
-                            module: self.source.file().module().clone(),
-                            record: link.record,
-                            target_module: ModuleName::from_static(module.name),
-                            target: link.target,
-                        })
-                        .map_err(DeliveryError::LinkTable)?;
-                    LinkOutcome::Registered
+                    let registered = table.register(&Link {
+                        id: link.id,
+                        partition: self.source.file().partition(),
+                        module: self.source.file().module().clone(),
+                        record: link.record,
+                        target_module: ModuleName::from_static(module.name),
+                        target: link.target,
+                    });
+                    if registered.is_ok() {
+                        LinkOutcome::Registered
+                    } else {
+                        LinkOutcome::TableUnavailable
+                    }
                 }
                 Some(_) => LinkOutcome::Refused,
             },
         };
-        let now = self.stamper.now();
         match outcome {
             LinkOutcome::Registered => {
+                let now = self.stamper.now();
                 self.source
                     .close_outbox_row(link.id, OutboxState::Delivered, now)?;
+                self.report.links.push((link.id, outcome));
+                Ok(())
             }
-            LinkOutcome::Refused => {
-                self.source
-                    .close_outbox_row(link.id, OutboxState::Refused, now)?;
-                self.report.alerts.push(InstanceAdminAlert::link_refused(
-                    self.source.file(),
-                    link.id,
-                    &link.target_module,
-                ));
+            LinkOutcome::Refused => self.refuse_link(link.id, &link.target_module),
+            LinkOutcome::TargetNotReady | LinkOutcome::TableUnavailable => {
+                self.report.links.push((link.id, outcome));
+                Ok(())
             }
-            LinkOutcome::TargetNotReady => {}
         }
-        self.report.links.push((link.id, outcome));
+    }
+
+    /// Closes the link request `id` to `target_module` unregistered, with an alert.
+    fn refuse_link(&mut self, id: Id, target_module: &str) -> Result<(), DeliveryError> {
+        let now = self.stamper.now();
+        self.source
+            .close_outbox_row(id, OutboxState::Refused, now)?;
+        self.report.alerts.push(InstanceAdminAlert::link_refused(
+            self.source.file(),
+            id,
+            target_module,
+        ));
+        self.report.links.push((id, LinkOutcome::Refused));
         Ok(())
     }
 }
@@ -544,9 +628,10 @@ fn holds(
 }
 
 /// One attempt to deliver `event` to `consumer` of `module`, on `handle`, the consumer module's
-/// file: the consumer's code in a call of its own, principal `Event`, caught if it panics. An
-/// event whose provenance does not decode fails its delivery like a refusal, so it ends in the
-/// dead letters rather than block the outbox (AD-29).
+/// file: the consumer's code in a call of its own, principal `Event`. Only the consumer's code is
+/// caught if it panics, which fails the delivery; a panic of the Core around it unwinds on, to
+/// the boundary of AD-9. An event whose provenance does not decode fails its delivery without
+/// running the consumer, so it ends in the dead letters rather than block the outbox (AD-29).
 fn consume(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
@@ -556,7 +641,8 @@ fn consume(
     code: &mut dyn ConsumerCode,
     stamper: &mut dyn Stamper,
 ) -> Result<CallResult<()>, FailureCause> {
-    let emitting_record = decode_provenance(&event.provenance).map_err(FailureCause::Refused)?;
+    let emitting_record =
+        decode_provenance(&event.provenance).map_err(|_| FailureCause::Malformed)?;
     let call = Call {
         principal: Principal::Event,
         source: Source::Event(event.id),
@@ -585,14 +671,19 @@ fn consume(
         record: event.record,
         payload: &event.payload,
     };
-    let attempt = catch_unwind(AssertUnwindSafe(|| {
-        run_call(handle, module, &call, &invocation, stamper, |records| {
+    let mut panicked = false;
+    let attempt = run_call(handle, module, &call, &invocation, stamper, |records| {
+        catch_unwind(AssertUnwindSafe(|| {
             code.consume(module, consumer, &delivered, records)
+        }))
+        .unwrap_or_else(|_| {
+            panicked = true;
+            Err(WriteError::Failed)
         })
-    }));
+    });
     match attempt {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(error)) => Err(FailureCause::Refused(error)),
-        Err(_) => Err(FailureCause::Panicked),
+        _ if panicked => Err(FailureCause::Panicked),
+        Ok(result) => Ok(result),
+        Err(error) => Err(FailureCause::Refused(error)),
     }
 }

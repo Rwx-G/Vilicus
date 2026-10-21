@@ -1364,7 +1364,11 @@ fn no_event_is_delivered_outside_its_source_partition() {
         "nothing reached the other partition"
     );
     assert_eq!(
-        personal.of("notes").pending_outbox().expect("read").len(),
+        personal
+            .of("notes")
+            .pending_outbox(0, 100)
+            .expect("read")
+            .len(),
         1,
         "{personal_event} waits for its own partition's pass"
     );
@@ -1426,51 +1430,163 @@ fn an_events_snapshot_holds_the_records_data_types() {
     );
 }
 
-/// An event whose stored provenance does not decode fails each delivery like a refusal and ends
-/// in the dead letters: it never stops the pass, which would block the partition's outbox.
+/// An event whose row does not decode, in any column the delivery reads, fails each delivery
+/// without running the consumer and ends in the dead letters: it never stops the pass, nor hides
+/// the events after it, which would block the partition's outbox.
 #[test]
 fn a_malformed_event_fails_its_deliveries_rather_than_block_the_outbox() {
-    let (registry, files, mut stamper) = standard("malformed");
+    for damage in [
+        "provenance = x'00'",
+        "version = NULL",
+        "call_id = x'00'",
+        "principal = 'Nobody'",
+        "record_id = NULL",
+        "author = x'01'",
+        "created_at = -9000000000000000000",
+    ] {
+        let (registry, files, mut stamper) = standard("malformed");
+        let handle = files.of("notes");
+        let (_, broken, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+        let (_, sound, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+        raw_connection(handle.file())
+            .execute_batch(&format!(
+                "UPDATE _outbox SET {damage} WHERE id = x'{}'",
+                hex(&broken.to_bytes())
+            ))
+            .unwrap_or_else(|error| panic!("{damage}: {error}"));
+        let mut code = Code::default();
+        let first = deliver(&registry, &files, &mut code, &mut stamper);
+        let broken_outcomes: Vec<_> = first
+            .deliveries
+            .iter()
+            .filter(|delivery| delivery.event == broken)
+            .collect();
+        assert_eq!(broken_outcomes.len(), 2, "{damage}");
+        assert!(
+            broken_outcomes.iter().all(|delivery| matches!(
+                delivery.outcome,
+                DeliveryOutcome::Failed {
+                    cause: FailureCause::Malformed,
+                    attempts: 1
+                }
+            )),
+            "{damage}: {broken_outcomes:?}"
+        );
+        for _ in 1..MAX_DELIVERY_ATTEMPTS {
+            deliver(&registry, &files, &mut code, &mut stamper);
+        }
+        assert_eq!(
+            handle.dead_letters().expect("read").len(),
+            2,
+            "{damage}: one per consumer"
+        );
+        assert!(
+            handle.pending_outbox(0, 100).expect("read").is_empty(),
+            "{damage}"
+        );
+        assert!(
+            code.seen.iter().all(|(_, event, ..)| *event == sound),
+            "{damage}: no consumer code ran on the damaged event"
+        );
+        assert_eq!(titles(files.of("tasks"), "tasks"), 1, "{damage}");
+    }
+}
+
+/// A row of the outbox whose id does not decode cannot have its deliveries recorded: it is
+/// refused at once with an alert, and the rows after it are delivered.
+#[test]
+fn a_row_no_id_names_is_refused_and_the_rows_after_it_proceed() {
+    let (registry, files, mut stamper) = standard("no-id");
     let handle = files.of("notes");
     let (_, broken, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
     let (_, sound, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let seq = handle.outbox_events().expect("read")[0].seq;
     raw_connection(handle.file())
         .execute_batch(&format!(
-            "UPDATE _outbox SET provenance = x'00' WHERE id = x'{}'",
+            "UPDATE _outbox SET id = x'00' WHERE id = x'{}'",
             hex(&broken.to_bytes())
         ))
-        .expect("damage the event");
-    let mut code = Code::default();
-    let first = deliver(&registry, &files, &mut code, &mut stamper);
-    assert!(
-        first
-            .deliveries
-            .iter()
-            .all(|delivery| delivery.event != broken
-                || matches!(
-                    delivery.outcome,
-                    DeliveryOutcome::Failed {
-                        cause: FailureCause::Refused(RecordError::InvalidEvent),
-                        ..
-                    }
-                )),
-        "{:?}",
-        first.deliveries
-    );
-    for _ in 1..MAX_DELIVERY_ATTEMPTS {
-        deliver(&registry, &files, &mut code, &mut stamper);
-    }
+        .expect("damage the id");
+    let report = deliver(&registry, &files, &mut Code::default(), &mut stamper);
+    assert_eq!(report.closed, [sound]);
     assert_eq!(
-        handle.dead_letters().expect("read").len(),
-        2,
-        "one per consumer"
+        report.alerts,
+        [InstanceAdminAlert::malformed_outbox_row(handle.file(), seq)]
     );
-    assert!(handle.pending_outbox().expect("read").is_empty());
-    assert!(
-        code.seen.iter().all(|(_, event, ..)| *event == sound),
-        "no consumer code ran on the damaged event"
+    assert!(handle.pending_outbox(0, 100).expect("read").is_empty());
+}
+
+/// A pass reads the outbox a page at a time and delivers every page, in commit order.
+#[test]
+fn a_pass_delivers_an_outbox_longer_than_a_page() {
+    let (registry, files, mut stamper) = standard("pages");
+    let handle = files.of("notes");
+    let count = usize::try_from(super::OUTBOX_PAGE).expect("small") + 3;
+    let (call_id, result) = run(
+        handle,
+        notes(),
+        &own_action(ella()),
+        &mut stamper,
+        |records| {
+            let mut events = Vec::new();
+            for _ in 0..count {
+                let note = records.insert("notes", &title("Pommes"), &[])?;
+                events.push(records.emit(ADDED, note.id, b"")?);
+            }
+            Ok(events)
+        },
     );
-    assert_eq!(titles(files.of("tasks"), "tasks"), 1);
+    let _ = call_id;
+    let events = match result.expect("commits") {
+        CallResult::Committed(outcome) => outcome.value,
+        _ => panic!("a new call"),
+    };
+    let mut code = Code {
+        silent: true,
+        ..Code::default()
+    };
+    let report = deliver(&registry, &files, &mut code, &mut stamper);
+    assert_eq!(report.closed, events);
+    let tasks_order: Vec<Id> = code
+        .seen
+        .iter()
+        .filter(|(consumer, ..)| consumer == "tasks.react")
+        .map(|(_, event, ..)| *event)
+        .collect();
+    assert_eq!(tasks_order, events);
+}
+
+/// A payload longer than the bound is refused, and the call with it.
+#[test]
+fn an_event_payload_longer_than_the_bound_is_refused() {
+    let (_, files, mut stamper) = standard("payload");
+    let handle = files.of("notes");
+    for (length, accepted) in [
+        (vilicus_module_api::EVENT_PAYLOAD_MAX_LEN, true),
+        (vilicus_module_api::EVENT_PAYLOAD_MAX_LEN + 1, false),
+    ] {
+        let payload = vec![0x5a; length];
+        let (_, result) = run(
+            handle,
+            notes(),
+            &own_action(ella()),
+            &mut stamper,
+            |records| {
+                let note = records.insert("notes", &title("Pommes"), &[])?;
+                records.emit(ADDED, note.id, &payload)
+            },
+        );
+        assert_eq!(
+            matches!(result, Ok(CallResult::Committed(_))),
+            accepted,
+            "{length}"
+        );
+        if !accepted {
+            assert!(matches!(result, Err(RecordError::PayloadTooLong)));
+        }
+    }
+    assert_eq!(handle.outbox_events().expect("read").len(), 1);
+    assert_eq!(titles(handle, "notes"), 1);
 }
 
 /// An event about a record carries the taint of its emitting call as well as the record's: a
@@ -1510,39 +1626,6 @@ fn an_event_carries_the_taint_of_its_emitting_call() {
     );
 }
 
-/// A payload longer than the bound is refused, and the call with it.
-#[test]
-fn an_event_payload_longer_than_the_bound_is_refused() {
-    let (_, files, mut stamper) = standard("payload");
-    let handle = files.of("notes");
-    for (length, accepted) in [
-        (vilicus_module_api::EVENT_PAYLOAD_MAX_LEN, true),
-        (vilicus_module_api::EVENT_PAYLOAD_MAX_LEN + 1, false),
-    ] {
-        let payload = vec![0x5a; length];
-        let (_, result) = run(
-            handle,
-            notes(),
-            &own_action(ella()),
-            &mut stamper,
-            |records| {
-                let note = records.insert("notes", &title("Pommes"), &[])?;
-                records.emit(ADDED, note.id, &payload)
-            },
-        );
-        assert_eq!(
-            matches!(result, Ok(CallResult::Committed(_))),
-            accepted,
-            "{length}"
-        );
-        if !accepted {
-            assert!(matches!(result, Err(RecordError::PayloadTooLong)));
-        }
-    }
-    assert_eq!(handle.outbox_events().expect("read").len(), 1);
-    assert_eq!(titles(handle, "notes"), 1);
-}
-
 /// An AI task that read health data and deletes a note emits an event whose snapshot holds the
 /// data types the session consumed, as every write of the task holds them (AD-7, D103).
 #[test]
@@ -1580,4 +1663,329 @@ fn an_event_of_an_ai_session_holds_the_data_types_it_consumed() {
         .expect("the event");
     let snapshot = crate::record::decode_provenance(&row.provenance).expect("decode");
     assert_eq!(snapshot.data_types, [DataType::Health, DataType::Meals]);
+}
+
+/// A link table that fails, an unavailable `core.<partition>.db`, keeps the request pending and
+/// stops nothing: the events of the file are delivered in the same pass.
+#[test]
+fn a_failing_link_table_keeps_the_request_and_the_pass_goes_on() {
+    struct Unavailable;
+    impl LinkTable for Unavailable {
+        fn register(&mut self, _: &Link) -> Result<(), vilicus_storage::Error> {
+            Err(vilicus_storage::Error::OutboxRowNotFound)
+        }
+    }
+    let (registry, files, mut stamper) = standard("link-table");
+    let task = {
+        let (_, result) = run(
+            files.of("tasks"),
+            tasks(),
+            &own_action(ella()),
+            &mut stamper,
+            |records| records.insert("tasks", &title("Courses"), &[]),
+        );
+        match result.expect("commits") {
+            CallResult::Committed(outcome) => outcome.value.id,
+            _ => panic!("a new call"),
+        }
+    };
+    let handle = files.of("notes");
+    let (_, link) = run(
+        handle,
+        notes(),
+        &own_action(ella()),
+        &mut stamper,
+        |records| {
+            let note = records.insert("notes", &title("Pommes"), &[])?;
+            records.request_link(note.id, "tasks", task)
+        },
+    );
+    let link = match link.expect("commits") {
+        CallResult::Committed(outcome) => outcome.value,
+        _ => panic!("a new call"),
+    };
+    let (_, event, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let report = deliver_outbox(
+        &registry,
+        handle,
+        &files,
+        &mut Code::default(),
+        &mut Unavailable,
+        &mut stamper,
+    )
+    .expect("the pass goes on");
+    assert_eq!(report.links, [(link, LinkOutcome::TableUnavailable)]);
+    assert_eq!(report.closed, [event]);
+    assert!(report.alerts.is_empty());
+    assert_eq!(
+        handle.outbox_links().expect("read")[0].state,
+        OutboxState::Pending
+    );
+    let mut table = no_links(&files);
+    let mut code = Code::default();
+    let later = deliver_outbox(
+        &registry,
+        handle,
+        &files,
+        &mut code,
+        &mut table,
+        &mut stamper,
+    )
+    .expect("a pass");
+    assert_eq!(later.links, [(link, LinkOutcome::Registered)]);
+    assert_eq!(table.registered.len(), 1);
+}
+
+/// A link whose linking record was deleted before the pass is refused: a link never outlives the
+/// record it starts from.
+#[test]
+fn a_link_from_a_record_deleted_before_the_pass_is_refused() {
+    let (registry, files, mut stamper) = standard("link-deleted");
+    let task = {
+        let (_, result) = run(
+            files.of("tasks"),
+            tasks(),
+            &own_action(ella()),
+            &mut stamper,
+            |records| records.insert("tasks", &title("Courses"), &[]),
+        );
+        match result.expect("commits") {
+            CallResult::Committed(outcome) => outcome.value.id,
+            _ => panic!("a new call"),
+        }
+    };
+    let handle = files.of("notes");
+    let (_, requested) = run(
+        handle,
+        notes(),
+        &own_action(ella()),
+        &mut stamper,
+        |records| {
+            let note = records.insert("notes", &title("Pommes"), &[])?;
+            let link = records.request_link(note.id, "tasks", task)?;
+            Ok((note.id, link))
+        },
+    );
+    let (note, link) = match requested.expect("commits") {
+        CallResult::Committed(outcome) => outcome.value,
+        _ => panic!("a new call"),
+    };
+    let (_, deleted) = run(
+        handle,
+        notes(),
+        &own_action(ella()),
+        &mut stamper,
+        |records| records.delete("notes", note),
+    );
+    assert!(matches!(deleted, Ok(CallResult::Committed(_))));
+    let mut table = no_links(&files);
+    let report = deliver_outbox(
+        &registry,
+        handle,
+        &files,
+        &mut Code::default(),
+        &mut table,
+        &mut stamper,
+    )
+    .expect("a pass");
+    assert_eq!(report.links, [(link, LinkOutcome::Refused)]);
+    assert!(table.registered.is_empty());
+    assert_eq!(
+        report.alerts,
+        [InstanceAdminAlert::link_refused(
+            handle.file(),
+            link,
+            "tasks"
+        )]
+    );
+}
+
+/// A panic of the Core while it runs the consumer's call, outside the consumer's code, is not
+/// a failed delivery: it unwinds out of the pass to the boundary of AD-9, the consumer's call
+/// rolled back and no attempt recorded.
+#[test]
+fn a_panic_of_the_core_is_not_counted_as_a_consumers_failure() {
+    /// A clock that fails on its first reading inside a consumer's call.
+    struct Failing {
+        inner: TestStamper,
+        readings: u32,
+        fail_at: u32,
+    }
+    impl Stamper for Failing {
+        fn now(&mut self) -> UtcMillis {
+            self.readings += 1;
+            assert!(self.readings != self.fail_at, "the Core fails");
+            self.inner.now()
+        }
+        fn id_random(&mut self) -> [u8; 10] {
+            self.inner.id_random()
+        }
+    }
+    let (registry, files, mut stamper) = standard("core-panic");
+    let handle = files.of("notes");
+    let (_, event, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let mut failing = Failing {
+        inner: stamper,
+        readings: 0,
+        fail_at: 1,
+    };
+    let mut code = Code::default();
+    let mut links = no_links(&files);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        deliver_outbox(
+            &registry,
+            handle,
+            &files,
+            &mut code,
+            &mut links,
+            &mut failing,
+        )
+    }));
+    assert!(unwound.is_err(), "the Core's panic unwinds out of the pass");
+    assert!(code.seen.is_empty());
+    assert_eq!(handle.delivery(event, "tasks.react").expect("read"), None);
+    assert_eq!(titles(files.of("tasks"), "tasks"), 0);
+}
+
+/// A module may consume its own topic when its access list names it: the consumer's call runs
+/// on the source file itself.
+#[test]
+fn a_module_consumes_its_own_topic() {
+    const OWN_TOPICS: &[Topic] = &[Topic {
+        name: ADDED,
+        version: 1,
+        consumers: &["notes"],
+    }];
+    const OWN_CONSUMERS: &[Consumer] = &[Consumer {
+        name: "echo",
+        topic: ADDED,
+    }];
+    let own = declare("notes", NOTES, OWN_TOPICS, OWN_CONSUMERS, &[]);
+    let registry = registry(vec![own]);
+    let files = Files {
+        handles: partition_files(&scratch_dir("own-topic"), Partition::Household, &registry),
+        locked: Vec::new(),
+    };
+    let mut stamper = TestStamper::at(noon());
+    let handle = files.of("notes");
+    let (_, event, call_id) = add_note(handle, own, &own_action(ella()), &mut stamper, ADDED);
+    let report = deliver(&registry, &files, &mut Code::default(), &mut stamper);
+    assert_eq!(outcomes(&report), [(event, "notes.echo", "delivered")]);
+    assert_eq!(report.closed, [event]);
+    assert_eq!(
+        titles(handle, "notes"),
+        2,
+        "the note and the consumer's own"
+    );
+    let rows = journal(handle);
+    assert_eq!(
+        (rows[1].0.as_str(), rows[1].2.as_slice()),
+        ("Event", &call_id.to_bytes()[..])
+    );
+}
+
+/// A rule's call, with its name-based call id (AD-39), and an AI task's call emit events whose
+/// consumers' calls carry that call id and the author the emitting call names.
+#[test]
+fn a_rule_and_an_ai_task_emit_events() {
+    let (registry, files, mut stamper) = standard("rule-and-task");
+    let handle = files.of("notes");
+    let definition = RecordProvenance {
+        id: member_id(50),
+        labels: vilicus_types::RecordLabels::TRUSTED,
+        author: Some(ella()),
+        data_types: vec![DataType::Meals],
+        free_text: Vec::new(),
+    };
+    let rule = Call {
+        principal: Principal::Rule,
+        source: Source::Rule(member_id(51)),
+        session: Taint::Trusted,
+        consumed: Consumed::NOTHING,
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for: Some(ella()),
+        },
+        read: Vec::new(),
+        implicit_inputs: vec![definition],
+    };
+    let mut name_based = [0x6b; 16];
+    name_based[6] = 0x58;
+    name_based[8] = 0x9c;
+    let rule_call = CallId::from_bytes(name_based).expect("a version 5 id");
+    let emitted = run_call(
+        handle,
+        notes(),
+        &rule,
+        &Invocation {
+            call_id: rule_call,
+            request_hash: None,
+            delivery: None,
+        },
+        &mut stamper,
+        |records| {
+            let note = records.insert("notes", &title("Volets"), &[])?;
+            records.emit(ADDED, note.id, b"")
+        },
+    );
+    let rule_event = match emitted.expect("commits") {
+        CallResult::Committed(outcome) => outcome.value,
+        _ => panic!("a new call"),
+    };
+    let task = Call {
+        principal: Principal::AiTask,
+        source: Source::AiTask(member_id(52)),
+        session: Taint::External,
+        consumed: Consumed {
+            data_types: vec![DataType::Meals],
+            taint: vilicus_types::EffectiveTaint::External,
+        },
+        authority: Authority::Unapproved {
+            author: Some(noe()),
+            acting_for: Some(noe()),
+        },
+        read: Vec::new(),
+        implicit_inputs: Vec::new(),
+    };
+    let (_, recipe) = run(
+        handle,
+        notes(),
+        &own_action(noe()),
+        &mut stamper,
+        |records| records.insert("notes", &title("Recette"), &[]),
+    );
+    let recipe = match recipe.expect("commits") {
+        CallResult::Committed(outcome) => outcome.value.id,
+        _ => panic!("a new call"),
+    };
+    let (task_call, written) = run(handle, notes(), &task, &mut stamper, |records| {
+        let note = records.insert("notes", &title("Menu"), &[recipe])?;
+        records.emit(ADDED, note.id, b"")
+    });
+    let task_event = match written.expect("commits") {
+        CallResult::Committed(outcome) => outcome.value,
+        _ => panic!("a new call"),
+    };
+    let report = deliver(&registry, &files, &mut Code::default(), &mut stamper);
+    assert_eq!(report.closed, [rule_event, task_event]);
+    let rows = journal(files.of("tasks"));
+    assert_eq!(rows[0].1, Source::Event(rule_event).to_string());
+    assert_eq!(rows[0].2.as_slice(), &rule_call.to_bytes()[..]);
+    assert_eq!(rows[1].2.as_slice(), &task_call.to_bytes()[..]);
+    assert_eq!(
+        stored(files.of("tasks"), "tasks"),
+        [
+            (
+                "trusted".into(),
+                "trusted".into(),
+                Some(ella().to_bytes().to_vec())
+            ),
+            (
+                "external".into(),
+                "external".into(),
+                Some(noe().to_bytes().to_vec())
+            ),
+        ],
+        "the rule's validating adult; the task's member, from a tainted session"
+    );
 }

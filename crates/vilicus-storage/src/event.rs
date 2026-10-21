@@ -178,7 +178,31 @@ pub struct LinkRow {
     pub updated_at: UtcMillis,
 }
 
-/// A pending row of the outbox that the Core delivers.
+/// The kind of a row of the outbox the Core delivers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OutboxKind {
+    /// An event.
+    Event,
+    /// A link request.
+    Link,
+}
+
+/// A pending event or link request as the Core lists it, before it reads the rest of the row:
+/// a row whose other columns do not decode is listed all the same, so it cannot hide the rows
+/// after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingRow {
+    /// Its position in the file's outbox, in commit order.
+    pub seq: i64,
+    /// Its kind.
+    pub kind: OutboxKind,
+    /// Its id, when it decodes.
+    pub id: Option<Id>,
+    /// The topic of an event, the target module of a link request.
+    pub name: String,
+}
+
+/// An event or a link request read back whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutboxRow {
     /// An event.
@@ -500,24 +524,82 @@ impl Handle<Write> {
         })
     }
 
-    /// Every pending event and link request of the file, in commit order: what the Core delivers.
-    pub fn pending_outbox(&self) -> Result<Vec<OutboxRow>> {
+    /// The pending events and link requests of the file after `after` in commit order, at most
+    /// `limit` of them: what the Core delivers, a page at a time, without their payloads. Only
+    /// the position, the kind, the id and the name of each are read, so a row whose other columns
+    /// do not decode is listed, and read on its own ([`outbox_row`](Self::outbox_row)).
+    pub fn pending_outbox(&self, after: i64, limit: u32) -> Result<Vec<PendingRow>> {
         self.under_core_policy(|connection| {
-            let pending = [SqlValue::Text(OutboxState::Pending.as_str().to_owned())];
-            let mut rows: Vec<OutboxRow> = events_where(connection, "state = ?1", &pending)?
+            query(
+                connection,
+                &format!(
+                    "SELECT seq, kind, id, name FROM _outbox \
+                     WHERE state = '{}' AND kind IN ('{EVENT_KIND}', '{LINK_KIND}') AND seq > ?1 \
+                     ORDER BY seq LIMIT ?2",
+                    OutboxState::Pending.as_str()
+                ),
+                &[
+                    SqlValue::Integer(after),
+                    SqlValue::Integer(i64::from(limit)),
+                ],
+                |row| {
+                    let kind: String = row.get(1)?;
+                    Ok(PendingRow {
+                        seq: row.get(0)?,
+                        kind: if kind == EVENT_KIND {
+                            OutboxKind::Event
+                        } else {
+                            OutboxKind::Link
+                        },
+                        id: read_optional_id(row, 2, "_outbox", "id").ok().flatten(),
+                        name: row.get(3)?,
+                    })
+                },
+            )
+        })
+    }
+
+    /// The event or link request at position `seq` of the outbox, read whole; a column outside
+    /// its stored form is [`Error::MalformedCoreRow`], and a position that holds neither
+    /// [`Error::OutboxRowNotFound`].
+    pub fn outbox_row(&self, seq: i64) -> Result<OutboxRow> {
+        self.under_core_policy(|connection| {
+            let at = [SqlValue::Integer(seq)];
+            if let Some(event) = events_where(connection, "seq = ?1", &at)?
                 .into_iter()
-                .map(OutboxRow::Event)
-                .chain(
-                    links_where(connection, "state = ?1", &pending)?
-                        .into_iter()
-                        .map(OutboxRow::Link),
-                )
-                .collect();
-            rows.sort_by_key(|row| match row {
-                OutboxRow::Event(event) => event.seq,
-                OutboxRow::Link(link) => link.seq,
-            });
-            Ok(rows)
+                .next()
+            {
+                return Ok(OutboxRow::Event(event));
+            }
+            links_where(connection, "seq = ?1", &at)?
+                .into_iter()
+                .next()
+                .map(OutboxRow::Link)
+                .ok_or(Error::OutboxRowNotFound)
+        })
+    }
+
+    /// Closes the pending row at position `seq` as `refused`, at `at`, in a transaction of its
+    /// own: a row whose id does not decode, which no delivery can name. A row that is not pending
+    /// is [`Error::OutboxRowNotPending`].
+    pub fn refuse_outbox_row(&self, seq: i64, at: UtcMillis) -> Result<()> {
+        self.under_core_policy(|connection| {
+            handle::in_transaction(connection, || {
+                let refused = connection.execute(
+                    "UPDATE _outbox SET state = ?2, updated_at = ?3 WHERE seq = ?1 AND state = ?4",
+                    rusqlite::params![
+                        seq,
+                        OutboxState::Refused.as_str(),
+                        at.as_millis(),
+                        OutboxState::Pending.as_str(),
+                    ],
+                )?;
+                if refused == 1 {
+                    Ok(())
+                } else {
+                    Err(Error::OutboxRowNotPending)
+                }
+            })
         })
     }
 

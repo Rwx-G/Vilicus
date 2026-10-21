@@ -64,9 +64,22 @@ pub enum InstanceAdminAlert {
         /// The consumer, `<module>.<consumer>`.
         consumer: String,
     },
+    /// A pending row of the file's outbox whose id does not decode: no delivery can be recorded
+    /// for it, so it is closed `refused` rather than left to block the rows after it (AD-29).
+    MalformedOutboxRow {
+        /// The emitting module.
+        module: ModuleName,
+        /// The partition.
+        partition: Partition,
+        /// The file name, `<module>.<partition>.db`.
+        file_name: String,
+        /// The row's position in the outbox.
+        seq: i64,
+    },
     /// A link request of the file names a record its target module's file in the same partition
-    /// does not hold, or a module that is not registered: the link is not registered, since no
-    /// link crosses partitions (AD-10).
+    /// does not hold, or a module that is not registered, or its linking record is gone from the
+    /// file, or the request does not decode: the link is not registered, since no link crosses
+    /// partitions or outlives its record (AD-10).
     LinkRefused {
         /// The requesting module.
         module: ModuleName,
@@ -132,6 +145,16 @@ impl InstanceAdminAlert {
         }
     }
 
+    /// The alert of the row at position `seq` of `file`'s outbox, whose id does not decode.
+    pub fn malformed_outbox_row(file: &ModuleFile, seq: i64) -> Self {
+        Self::MalformedOutboxRow {
+            module: file.module().clone(),
+            partition: file.partition(),
+            file_name: file.file_name(),
+            seq,
+        }
+    }
+
     /// The alert of the link request `link` of `file` to `target_module`, refused.
     pub fn link_refused(file: &ModuleFile, link: Id, target_module: &str) -> Self {
         Self::LinkRefused {
@@ -179,6 +202,11 @@ impl fmt::Display for InstanceAdminAlert {
                 formatter,
                 "{file_name}: event {event} of {topic} failed every delivery to {consumer}; it is \
                  dead letter {dead_letter}, and later events proceed"
+            ),
+            Self::MalformedOutboxRow { file_name, seq, .. } => write!(
+                formatter,
+                "{file_name}: outbox row {seq} has no valid id; it is refused, and the rows after \
+                 it proceed"
             ),
             Self::LinkRefused {
                 file_name,

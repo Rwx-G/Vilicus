@@ -6,11 +6,11 @@
 
 use vilicus_types::{EffectOutcome, Id, Principal, Source, UtcMillis};
 
-use super::{EPOCH, KEY, scratch_dir};
+use super::{EPOCH, KEY, raw_connection, scratch_dir};
 use crate::error::Error;
 use crate::{
-    CallKey, DeliveryState, EffectIntent, EventIntent, Handle, LinkIntent, OutboxRow, OutboxState,
-    Write, create,
+    CallKey, DeliveryState, EffectIntent, EventIntent, Handle, LinkIntent, OutboxKind, OutboxRow,
+    OutboxState, Write, create,
 };
 
 fn id(last: u8) -> Id {
@@ -67,13 +67,10 @@ fn in_transaction(writer: &Handle<Write>, body: impl FnOnce()) {
 
 fn pending_ids(writer: &Handle<Write>) -> Vec<Id> {
     writer
-        .pending_outbox()
+        .pending_outbox(0, 100)
         .expect("read")
         .into_iter()
-        .map(|row| match row {
-            OutboxRow::Event(event) => event.id,
-            OutboxRow::Link(link) => link.id,
-        })
+        .map(|row| row.id.expect("an id"))
         .collect()
 }
 
@@ -114,7 +111,7 @@ fn events_and_link_requests_join_the_callers_transaction_in_commit_order() {
         .append_event(&event(call, id(52), at(0)))
         .expect("event");
     writer.execute_batch("ROLLBACK").expect("rollback");
-    assert!(writer.pending_outbox().expect("read").is_empty());
+    assert!(pending_ids(&writer).is_empty());
 
     in_transaction(&writer, || {
         writer
@@ -311,7 +308,7 @@ fn an_outbox_row_is_closed_once() {
         writer.close_outbox_row(id(72), OutboxState::Delivered, at(3)),
         Err(Error::OutboxRowNotFound)
     ));
-    assert!(writer.pending_outbox().expect("read").is_empty());
+    assert!(pending_ids(&writer).is_empty());
     let events = writer.outbox_events().expect("read");
     assert_eq!(
         (events[0].state, events[0].updated_at),
@@ -429,5 +426,92 @@ fn the_outbox_purge_deletes_closed_rows_before_the_cutoff_and_keeps_the_rest() {
     assert_eq!(
         std::fs::metadata(writer.file().wal_path()).map_or(0, |metadata| metadata.len()),
         0
+    );
+}
+
+#[test]
+fn pending_rows_are_listed_by_page_and_a_row_that_does_not_decode_hides_none_after_it() {
+    let writer = new_writer("outbox-pages");
+    let source = Source::Member(id(1));
+    let call = CallKey {
+        principal: Principal::Member,
+        source: &source,
+        call_id: id(9).into(),
+    };
+    in_transaction(&writer, || {
+        for event_id in [id(1), id(2), id(3)] {
+            writer
+                .append_event(&event(call, event_id, at(0)))
+                .expect("event");
+        }
+        writer.append_link(&link(call, id(4), at(0))).expect("link");
+    });
+    let listed = writer.pending_outbox(0, 100).expect("read");
+    let seqs: Vec<i64> = listed.iter().map(|row| row.seq).collect();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| (row.kind, row.id, row.name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (OutboxKind::Event, Some(id(1)), "fixture.item.added"),
+            (OutboxKind::Event, Some(id(2)), "fixture.item.added"),
+            (OutboxKind::Event, Some(id(3)), "fixture.item.added"),
+            (OutboxKind::Link, Some(id(4)), "meals"),
+        ]
+    );
+    let first_page = writer.pending_outbox(0, 2).expect("read");
+    assert_eq!(first_page, listed[..2]);
+    assert_eq!(
+        writer.pending_outbox(first_page[1].seq, 2).expect("read"),
+        listed[2..]
+    );
+
+    let raw = raw_connection(&writer.file().path());
+    raw.execute_batch(&format!(
+        "UPDATE _outbox SET version = NULL WHERE seq = {};
+         UPDATE _outbox SET id = x'00' WHERE seq = {};",
+        seqs[0], seqs[1]
+    ))
+    .expect("damage two rows");
+    let listed = writer.pending_outbox(0, 100).expect("still listed");
+    assert_eq!(
+        listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [Some(id(1)), None, Some(id(3)), Some(id(4))]
+    );
+    assert!(matches!(
+        writer.outbox_row(seqs[0]),
+        Err(Error::MalformedCoreRow {
+            table: "_outbox",
+            column: "version"
+        })
+    ));
+    assert!(matches!(
+        writer.outbox_row(seqs[2]),
+        Ok(OutboxRow::Event(event)) if event.id == id(3)
+    ));
+    assert!(matches!(
+        writer.outbox_row(seqs[3]),
+        Ok(OutboxRow::Link(link)) if link.id == id(4)
+    ));
+    assert!(matches!(
+        writer.outbox_row(i64::MAX),
+        Err(Error::OutboxRowNotFound)
+    ));
+    writer
+        .refuse_outbox_row(seqs[1], at(1))
+        .expect("refuse the row no id names");
+    assert!(matches!(
+        writer.refuse_outbox_row(seqs[1], at(2)),
+        Err(Error::OutboxRowNotPending)
+    ));
+    assert_eq!(
+        writer
+            .pending_outbox(0, 100)
+            .expect("read")
+            .iter()
+            .map(|row| row.seq)
+            .collect::<Vec<_>>(),
+        [seqs[0], seqs[2], seqs[3]]
     );
 }

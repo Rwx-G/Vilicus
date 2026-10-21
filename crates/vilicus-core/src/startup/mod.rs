@@ -14,7 +14,9 @@
 //! A file is put to re-keying or migrating only when no call of module code runs on it, and the
 //! bring-up holds no handle of a file until it is migrated: the Core's writer of the file is held
 //! for the whole migration run (AD-9, D149). A file that cannot serve stops there, in its state,
-//! with its alert; the other files proceed.
+//! with its alert; the other files proceed. A bring-up acts for one unlock, its generation: once
+//! the partition is locked, its stage changes move no file, and it stops before opening or
+//! delivering anything more.
 
 #[cfg(test)]
 mod tests;
@@ -26,7 +28,7 @@ use vilicus_storage::{Handle, ModuleFile, Partition, Write, maintenance};
 use vilicus_types::ModuleName;
 
 use crate::alert::InstanceAdminAlert;
-use crate::availability::{CallsInFlight, ModuleStates, Stage};
+use crate::availability::{Generation, ModuleStates, Stage, StageRefused};
 use crate::boundary::Boundary;
 use crate::bus::{
     ConsumerCode, ConsumerFiles, DeliveryError, DeliveryReport, LinkTable, deliver_outbox,
@@ -119,7 +121,7 @@ impl ConsumerFiles for PartitionFiles {
 pub enum FileOutcome {
     /// The file serves.
     Ready,
-    /// The re-key failed: the file stays `re-keying` until the next unlock tries it again.
+    /// The re-key failed: the file is `locked`, not served until the next unlock tries again.
     RekeyFailed(vilicus_storage::Error),
     /// The migration runner left the file `failed migration` or `newer than code`.
     Migration(Box<FileMigration>),
@@ -127,15 +129,22 @@ pub enum FileOutcome {
     MigrationNotStarted(MigrationRunError),
     /// The migrated file did not open as the Core opens every file.
     NotOpened(FileError),
-    /// A call of module code still ran on the file, so it could not be re-keyed or migrated: it
-    /// keeps its state until the next unlock.
-    CallsInFlight(CallsInFlight),
+    /// A call of module code still ran on the file, or an earlier bring-up still re-keyed or
+    /// migrated it, so it could not be re-keyed or migrated: it is `locked`, not served until the
+    /// next unlock.
+    WriterBusy(StageRefused),
+    /// No file of the module was given: it is `locked`, not served until the next unlock.
+    NotGiven,
+    /// The partition was locked while the file was brought up: the bring-up stopped, and the file
+    /// is as the lock left it.
+    PartitionLocked,
 }
 
 /// What one bring-up did.
 #[derive(Debug, Default)]
 pub struct BringUpReport {
-    /// Where each file stopped, in the order given.
+    /// Where each file of each registered module stopped: the files given, in their order, then
+    /// the modules no file was given for.
     pub files: Vec<(ModuleName, FileOutcome)>,
     /// The delivery pass of each ready file's outbox, in the order given.
     pub deliveries: Vec<(ModuleName, Result<DeliveryReport, DeliveryError>)>,
@@ -152,6 +161,8 @@ pub enum BringUpError {
     UnregisteredModule(ModuleName),
     /// A file of another partition was given.
     OtherPartition(ModuleName),
+    /// Two files of one module were given.
+    DuplicateFile(ModuleName),
 }
 
 impl fmt::Display for BringUpError {
@@ -165,6 +176,9 @@ impl fmt::Display for BringUpError {
                     formatter,
                     "the file of {module} given is of another partition"
                 )
+            }
+            Self::DuplicateFile(module) => {
+                write!(formatter, "two files of {module} were given")
             }
         }
     }
@@ -182,17 +196,20 @@ pub struct Delivery<'a> {
     pub stamper: &'a mut dyn Stamper,
 }
 
-/// Brings up `files`, every module file of `partition` with its key, whose keys were just derived
+/// Brings up `files`, the module files of the partition `generation` unlocked, with their keys
 /// (AD-54): each is re-keyed through `rekey` if it must be, then migrated by `registry`'s runner,
-/// then opened and checked, each move recorded in `boundary`'s availability states; then the
-/// outbox of each ready file is delivered through `delivery`, its consumers' code run inside
-/// `boundary`. Returns the ready files, which the Core holds from then on, and what became of each
-/// file. Refused, before any file is touched, when a file is of another partition or of no
-/// registered module.
+/// then opened and checked, each move recorded in `boundary`'s availability states under
+/// `generation`; then the outbox of each ready file is delivered through `delivery`, its
+/// consumers' code run inside `boundary`. A registered module whose file is not given is reported
+/// and left `locked`. Once the partition is locked again the bring-up stops where it is: no stage
+/// change of it moves a file any more, it opens nothing and delivers nothing. Returns the ready
+/// files, which the Core holds from then on, and what became of each file. Refused, before any
+/// file is touched, when a file is of another partition or of no registered module, or two files
+/// are of one module.
 pub fn bring_up(
     registry: &Registry,
     boundary: &Boundary<'_>,
-    partition: Partition,
+    generation: Generation,
     files: &[FileToMigrate<'_>],
     rekey: &mut dyn Rekey,
     delivery: Delivery<'_>,
@@ -200,7 +217,7 @@ pub fn bring_up(
     bring_up_with_space(
         registry,
         boundary,
-        partition,
+        generation,
         files,
         rekey,
         delivery,
@@ -213,13 +230,14 @@ pub fn bring_up(
 pub(crate) fn bring_up_with_space(
     registry: &Registry,
     boundary: &Boundary<'_>,
-    partition: Partition,
+    generation: Generation,
     files: &[FileToMigrate<'_>],
     rekey: &mut dyn Rekey,
     delivery: Delivery<'_>,
     available_space: &dyn Fn(&Path) -> Result<u64, vilicus_storage::Error>,
 ) -> Result<(PartitionFiles, BringUpReport), BringUpError> {
-    for target in files {
+    let partition = generation.partition();
+    for (index, target) in files.iter().enumerate() {
         let module = target.file.module();
         if registry.module(module).is_none() {
             return Err(BringUpError::UnregisteredModule(module.clone()));
@@ -227,23 +245,27 @@ pub(crate) fn bring_up_with_space(
         if target.file.partition() != partition {
             return Err(BringUpError::OtherPartition(module.clone()));
         }
+        if files[..index]
+            .iter()
+            .any(|earlier| earlier.file.module() == module)
+        {
+            return Err(BringUpError::DuplicateFile(module.clone()));
+        }
     }
-    let states = boundary.states;
+    let mover = Mover {
+        states: boundary.states,
+        generation,
+    };
     let mut report = BringUpReport::default();
     let mut outcomes: Vec<Option<FileOutcome>> = files.iter().map(|_| None).collect();
     for (target, outcome) in files.iter().zip(&mut outcomes) {
-        *outcome = rekeyed(states, rekey, target.file, &mut report.alerts).err();
+        *outcome = mover.rekeyed(rekey, target.file, &mut report.alerts).err();
     }
     for (target, outcome) in files.iter().zip(&mut outcomes) {
         if outcome.is_none() {
-            *outcome = migrated(
-                registry,
-                states,
-                target,
-                available_space,
-                &mut report.alerts,
-            )
-            .err();
+            *outcome = mover
+                .migrated(registry, target, available_space, &mut report.alerts)
+                .err();
         }
     }
     let mut open = PartitionFiles {
@@ -252,7 +274,7 @@ pub(crate) fn bring_up_with_space(
     };
     for (target, outcome) in files.iter().zip(&mut outcomes) {
         if outcome.is_none() {
-            match opened(registry, states, target, &mut report.alerts) {
+            match mover.opened(registry, target, &mut report.alerts) {
                 Ok(handle) => open.handles.push(handle),
                 Err(failed) => *outcome = Some(failed),
             }
@@ -263,6 +285,21 @@ pub(crate) fn bring_up_with_space(
             target.file.module().clone(),
             outcome.unwrap_or(FileOutcome::Ready),
         ));
+    }
+    for module in registry.modules() {
+        let name = ModuleName::from_static(module.name);
+        if files.iter().all(|target| *target.file.module() != name) {
+            let file = ModuleFile::new("", name.clone(), partition);
+            if mover.put(&file, Stage::Locked) {
+                report
+                    .alerts
+                    .push(InstanceAdminAlert::file_not_served(&file));
+            }
+            report.files.push((name, FileOutcome::NotGiven));
+        }
+    }
+    if !boundary.states.is_current(generation) {
+        return Ok((mover.stopped(open, &mut report), report));
     }
     let Delivery {
         code,
@@ -281,123 +318,169 @@ pub(crate) fn bring_up_with_space(
     Ok((open, report))
 }
 
-/// Puts `file` at a stage that holds its writer, refused with [`FileOutcome::CallsInFlight`]
-/// while a call of module code still runs on it, such as one that began before the partition was
-/// locked and has not ended yet: the file is left as it is, with an alert.
-fn hold_writer(
-    states: &ModuleStates,
-    file: &ModuleFile,
-    stage: Stage,
-    alerts: &mut Vec<InstanceAdminAlert>,
-) -> Result<(), FileOutcome> {
-    states
-        .set_stage(file.module(), file.partition(), stage)
-        .map_err(|busy| {
-            alerts.push(InstanceAdminAlert::file_not_served(file));
-            FileOutcome::CallsInFlight(busy)
-        })
+/// The stage changes of one bring-up, all under the generation of its unlock.
+struct Mover<'a> {
+    states: &'a ModuleStates,
+    generation: Generation,
 }
 
-/// Puts `file` at `stage`, one that does not hold its writer, which is never refused.
-fn put(states: &ModuleStates, file: &ModuleFile, stage: Stage) {
-    // Only re-keying and migrating are refused while a call runs (`hold_writer`).
-    let _ = states.set_stage(file.module(), file.partition(), stage);
-}
-
-/// Re-keys `file` when it must be, `re-keying` meanwhile and `opening` after.
-fn rekeyed(
-    states: &ModuleStates,
-    rekey: &mut dyn Rekey,
-    file: &ModuleFile,
-    alerts: &mut Vec<InstanceAdminAlert>,
-) -> Result<(), FileOutcome> {
-    if !rekey.pending(file) {
-        return Ok(());
+impl Mover<'_> {
+    /// Puts `file` at `stage`, one that does not hold its writer; false when the partition was
+    /// locked since the unlock, the file then left as the lock left it.
+    fn put(&self, file: &ModuleFile, stage: Stage) -> bool {
+        self.states
+            .set_stage(self.generation, file.module(), stage)
+            .is_ok()
     }
-    hold_writer(states, file, Stage::ReKeying, alerts)?;
-    rekey.rekey(file).map_err(FileOutcome::RekeyFailed)?;
-    put(states, file, Stage::Opening);
-    Ok(())
-}
 
-/// Migrates `target`, `migrating` meanwhile: `opening` after when the file is at the code's
-/// versions, otherwise `failed migration` or `newer than code`, with the runner's alert.
-fn migrated(
-    registry: &Registry,
-    states: &ModuleStates,
-    target: &FileToMigrate<'_>,
-    available_space: &dyn Fn(&Path) -> Result<u64, vilicus_storage::Error>,
-    alerts: &mut Vec<InstanceAdminAlert>,
-) -> Result<(), FileOutcome> {
-    let file = target.file;
-    hold_writer(states, file, Stage::Migrating, alerts)?;
-    let migration = match registry.migrate_file_with_space(target, available_space) {
-        Ok(migration) => migration,
-        Err(error) => {
-            alerts.push(match &error {
-                MigrationRunError::InsufficientSpace {
-                    available,
-                    required,
-                    ..
-                } => InstanceAdminAlert::NoSpaceToMigrate {
-                    module: file.module().clone(),
-                    partition: file.partition(),
-                    file_name: file.file_name(),
-                    available: *available,
-                    required: *required,
-                },
-                _ => InstanceAdminAlert::file_not_served(file),
-            });
-            put(states, file, Stage::FailedMigration);
-            return Err(FileOutcome::MigrationNotStarted(error));
+    /// Puts `file` at a stage that holds its writer. Refused when the partition was locked since
+    /// the unlock ([`FileOutcome::PartitionLocked`]), or, with an alert and the file `locked` until
+    /// the next unlock, when a call of module code still runs on it or an earlier bring-up still
+    /// holds its writer ([`FileOutcome::WriterBusy`]).
+    fn hold_writer(
+        &self,
+        file: &ModuleFile,
+        stage: Stage,
+        alerts: &mut Vec<InstanceAdminAlert>,
+    ) -> Result<(), FileOutcome> {
+        match self.states.set_stage(self.generation, file.module(), stage) {
+            Ok(()) => Ok(()),
+            Err(StageRefused::Stale) => Err(FileOutcome::PartitionLocked),
+            Err(busy) => {
+                self.not_served(file, alerts);
+                Err(FileOutcome::WriterBusy(busy))
+            }
         }
-    };
-    let stage = match &migration {
-        FileMigration::Current | FileMigration::Migrated { .. } => {
-            put(states, file, Stage::Opening);
+    }
+
+    /// `file` is not served until the next unlock: `locked`, with an alert.
+    fn not_served(&self, file: &ModuleFile, alerts: &mut Vec<InstanceAdminAlert>) {
+        if self.put(file, Stage::Locked) {
+            alerts.push(InstanceAdminAlert::file_not_served(file));
+        }
+    }
+
+    /// Re-keys `file` when it must be, `re-keying` meanwhile and `opening` after; a failed re-key
+    /// leaves the file `locked` with an alert.
+    fn rekeyed(
+        &self,
+        rekey: &mut dyn Rekey,
+        file: &ModuleFile,
+        alerts: &mut Vec<InstanceAdminAlert>,
+    ) -> Result<(), FileOutcome> {
+        if !rekey.pending(file) {
             return Ok(());
         }
-        FileMigration::NewerThanCode { alert } => {
-            alerts.push(alert.clone());
-            Stage::NewerThanCode
+        self.hold_writer(file, Stage::ReKeying, alerts)?;
+        if let Err(error) = rekey.rekey(file) {
+            self.not_served(file, alerts);
+            return Err(FileOutcome::RekeyFailed(error));
         }
-        FileMigration::Failed { alert, .. } => {
-            alerts.push(alert.clone());
-            Stage::FailedMigration
+        if self.put(file, Stage::Opening) {
+            Ok(())
+        } else {
+            Err(FileOutcome::PartitionLocked)
         }
-        FileMigration::StillFailed { .. } => Stage::FailedMigration,
-    };
-    put(states, file, stage);
-    Err(FileOutcome::Migration(Box::new(migration)))
-}
+    }
 
-/// Opens `target` as the Core opens every file and puts it `ready`; a file that does not open is
-/// `newer than code` when it is, otherwise not served this time, `failed migration`, with its
-/// alert.
-fn opened(
-    registry: &Registry,
-    states: &ModuleStates,
-    target: &FileToMigrate<'_>,
-    alerts: &mut Vec<InstanceAdminAlert>,
-) -> Result<Handle<Write>, FileOutcome> {
-    let file = target.file;
-    match registry.open::<Write>(file, target.key) {
-        Ok(handle) => {
-            put(states, file, Stage::Ready);
-            Ok(handle)
-        }
-        Err(error) => {
-            match error.admin_alert(file) {
-                Some(alert) => {
-                    alerts.push(alert);
-                    put(states, file, Stage::NewerThanCode);
+    /// Migrates `target`, `migrating` meanwhile: `opening` after when the file is at the code's
+    /// versions, otherwise `failed migration` or `newer than code`, with the runner's alert.
+    fn migrated(
+        &self,
+        registry: &Registry,
+        target: &FileToMigrate<'_>,
+        available_space: &dyn Fn(&Path) -> Result<u64, vilicus_storage::Error>,
+        alerts: &mut Vec<InstanceAdminAlert>,
+    ) -> Result<(), FileOutcome> {
+        let file = target.file;
+        self.hold_writer(file, Stage::Migrating, alerts)?;
+        let migration = match registry.migrate_file_with_space(target, available_space) {
+            Ok(migration) => migration,
+            Err(error) => {
+                if self.put(file, Stage::FailedMigration) {
+                    alerts.push(match &error {
+                        MigrationRunError::InsufficientSpace {
+                            available,
+                            required,
+                            ..
+                        } => InstanceAdminAlert::NoSpaceToMigrate {
+                            module: file.module().clone(),
+                            partition: file.partition(),
+                            file_name: file.file_name(),
+                            available: *available,
+                            required: *required,
+                        },
+                        _ => InstanceAdminAlert::file_not_served(file),
+                    });
                 }
-                None => {
-                    alerts.push(InstanceAdminAlert::file_not_served(file));
-                    put(states, file, Stage::FailedMigration);
-                }
+                return Err(FileOutcome::MigrationNotStarted(error));
             }
-            Err(FileOutcome::NotOpened(error))
+        };
+        let (stage, alert) = match &migration {
+            FileMigration::Current | FileMigration::Migrated { .. } => {
+                return if self.put(file, Stage::Opening) {
+                    Ok(())
+                } else {
+                    Err(FileOutcome::PartitionLocked)
+                };
+            }
+            FileMigration::NewerThanCode { alert } => (Stage::NewerThanCode, Some(alert)),
+            FileMigration::Failed { alert, .. } => (Stage::FailedMigration, Some(alert)),
+            FileMigration::StillFailed { .. } => (Stage::FailedMigration, None),
+        };
+        if self.put(file, stage) {
+            alerts.extend(alert.cloned());
+        }
+        Err(FileOutcome::Migration(Box::new(migration)))
+    }
+
+    /// Opens `target` as the Core opens every file and puts it `ready`; a file that does not open
+    /// is `newer than code` when it is, otherwise not served this time, `failed migration`, with
+    /// its alert. A file opened after the partition was locked is closed again.
+    fn opened(
+        &self,
+        registry: &Registry,
+        target: &FileToMigrate<'_>,
+        alerts: &mut Vec<InstanceAdminAlert>,
+    ) -> Result<Handle<Write>, FileOutcome> {
+        let file = target.file;
+        match registry.open::<Write>(file, target.key) {
+            Ok(handle) if self.put(file, Stage::Ready) => Ok(handle),
+            Ok(handle) => {
+                // The partition was locked: the handle goes, whatever its close reports.
+                let _ = handle.close();
+                Err(FileOutcome::PartitionLocked)
+            }
+            Err(error) => {
+                let (stage, alert) = match error.admin_alert(file) {
+                    Some(alert) => (Stage::NewerThanCode, alert),
+                    None => (
+                        Stage::FailedMigration,
+                        InstanceAdminAlert::file_not_served(file),
+                    ),
+                };
+                if self.put(file, stage) {
+                    alerts.push(alert);
+                }
+                Err(FileOutcome::NotOpened(error))
+            }
+        }
+    }
+
+    /// The partition was locked during the bring-up: every handle it opened is closed, and every
+    /// file reported ready is reported stopped by the lock.
+    fn stopped(&self, open: PartitionFiles, report: &mut BringUpReport) -> PartitionFiles {
+        let partition = open.partition;
+        // The partition was locked: its handles go, whatever their closes report.
+        let _ = open.close();
+        for (_, outcome) in &mut report.files {
+            if matches!(outcome, FileOutcome::Ready) {
+                *outcome = FileOutcome::PartitionLocked;
+            }
+        }
+        PartitionFiles {
+            partition,
+            handles: Vec::new(),
         }
     }
 }

@@ -21,7 +21,7 @@ use super::{
     bring_up, bring_up_with_space,
 };
 use crate::alert::InstanceAdminAlert;
-use crate::availability::{ModuleStates, Stage};
+use crate::availability::{ModuleStates, Stage, StageRefused};
 use crate::boundary::Boundary;
 use crate::bus::{ConsumerCode, DeliveryOutcome, Link, LinkTable};
 use crate::record::tests::{KEY, create_sql, noon, scratch_dir};
@@ -317,7 +317,7 @@ fn run(
     bring_up(
         &partitioned.registry,
         &boundary(states),
-        Partition::Household,
+        states.generation(Partition::Household),
         &targets,
         &mut rekey,
         Delivery {
@@ -489,10 +489,10 @@ fn a_failed_migration_stops_its_file_and_is_held_after_a_restart() {
     open.close().expect("close");
 }
 
-/// A re-key that fails leaves its file `re-keying`, retryable, untouched by migration; the other
-/// file proceeds.
+/// A re-key that fails leaves its file `locked`, not served until the next unlock, with an alert,
+/// untouched by migration; the other file proceeds.
 #[test]
-fn a_failed_re_key_leaves_its_file_re_keying() {
+fn a_failed_re_key_leaves_its_file_locked() {
     let mut partitioned = partitioned("rekey", "UPDATE tasks SET title = title;");
     let states = ModuleStates::new();
     states.unlock_partition(&partitioned.registry, Partition::Household);
@@ -509,7 +509,16 @@ fn a_failed_re_key_leaves_its_file_re_keying() {
         outcome(&report, "notes"),
         FileOutcome::RekeyFailed(vilicus_storage::Error::WrongKey)
     ));
-    assert_eq!(state(&states, "notes"), AvailabilityState::ReKeying);
+    assert_eq!(
+        state(&states, "notes"),
+        AvailabilityState::Locked,
+        "not served until the next unlock"
+    );
+    assert!(report.alerts.contains(&InstanceAdminAlert::FileNotServed {
+        module: ModuleName::from_static("notes"),
+        partition: Partition::Household,
+        file_name: "notes.household.db".into(),
+    }));
     assert_eq!(state(&states, "tasks"), AvailabilityState::Ready);
     assert!(open.handle(&ModuleName::from_static("notes")).is_none());
     assert!(
@@ -537,7 +546,7 @@ fn a_file_newer_than_the_code_stops_newer_than_code() {
     let (open, report) = bring_up(
         &registry,
         &boundary(&states),
-        Partition::Household,
+        states.generation(Partition::Household),
         &targets,
         &mut NothingToRekey,
         Delivery {
@@ -589,7 +598,7 @@ fn a_file_without_the_space_to_migrate_is_not_served_and_not_held() {
     let (open, report) = bring_up_with_space(
         &partitioned.registry,
         &boundary(&states),
-        Partition::Household,
+        states.generation(Partition::Household),
         &targets,
         &mut NothingToRekey,
         Delivery {
@@ -623,15 +632,19 @@ fn a_file_without_the_space_to_migrate_is_not_served_and_not_held() {
 }
 
 /// A call of module code still running on a file (one that began before the partition was
-/// locked) keeps the bring-up from migrating it: the file keeps its state, with an alert, and is
-/// not touched.
+/// locked) keeps the bring-up from migrating it: the file is `locked`, not served until the next
+/// unlock, with an alert, and is not touched.
 #[test]
 fn a_file_with_a_call_still_running_is_not_migrated() {
     let mut partitioned = partitioned("busy", "UPDATE tasks SET title = title;");
     let states = ModuleStates::new();
     let tasks = ModuleName::from_static("tasks");
     states
-        .set_stage(&tasks, Partition::Household, Stage::Ready)
+        .set_stage(
+            states.generation(Partition::Household),
+            &tasks,
+            Stage::Ready,
+        )
         .expect("no call runs");
     let ticket = states
         .begin_call(&tasks, Partition::Household)
@@ -642,7 +655,7 @@ fn a_file_with_a_call_still_running_is_not_migrated() {
     let (open, report) = bring_up(
         &partitioned.registry,
         &boundary(&states),
-        Partition::Household,
+        states.generation(Partition::Household),
         &targets,
         &mut NothingToRekey,
         Delivery {
@@ -654,7 +667,7 @@ fn a_file_with_a_call_still_running_is_not_migrated() {
     .expect("a bring-up");
     assert!(matches!(
         outcome(&report, "tasks"),
-        FileOutcome::CallsInFlight(_)
+        FileOutcome::WriterBusy(StageRefused::CallsInFlight { calls: 1 })
     ));
     assert_eq!(
         report.alerts,
@@ -664,7 +677,11 @@ fn a_file_with_a_call_still_running_is_not_migrated() {
             file_name: "tasks.household.db".into(),
         }]
     );
-    assert_eq!(state(&states, "tasks"), AvailabilityState::Opening);
+    assert_eq!(
+        state(&states, "tasks"),
+        AvailabilityState::Locked,
+        "not served until the next unlock"
+    );
     assert_eq!(module_version(&partitioned.files[1]), 1);
     states.end_call(ticket);
     open.close().expect("close");
@@ -704,7 +721,7 @@ fn a_bring_up_takes_registered_files_of_its_partition_only() {
         let refused = bring_up(
             &partitioned.registry,
             &boundary(&states),
-            Partition::Household,
+            states.generation(Partition::Household),
             &given,
             &mut NothingToRekey,
             Delivery {
@@ -727,7 +744,7 @@ fn the_ready_files_are_held_and_closed() {
     let (open, report): (PartitionFiles, BringUpReport) = bring_up(
         &partitioned.registry,
         &boundary(&states),
-        Partition::Household,
+        states.generation(Partition::Household),
         &targets,
         &mut NothingToRekey,
         Delivery {
@@ -766,4 +783,169 @@ impl ConsumerCode for WriteTasks {
         )?;
         Ok(())
     }
+}
+
+// Story 3.9 review.
+
+/// Review item 2, at the states: a bring-up's stage change is of its unlock's generation. A file a
+/// first bring-up migrates cannot be migrated by a second one after a lock and an unlock, and a
+/// stage the first or the second sets after its partition was locked is refused, so a locked
+/// partition's file stays `locked`; the first bring-up's moving on releases the writer it took.
+#[test]
+fn a_stale_bring_up_moves_no_file_and_holds_its_writer_until_it_moves_on() {
+    let registry = Registry::new(vec![notes(), tasks("UPDATE tasks SET title = title;")].leak())
+        .expect("a valid registry");
+    let states = ModuleStates::new();
+    let tasks = ModuleName::from_static("tasks");
+    let first = states.unlock_partition(&registry, Partition::Household);
+    assert!(states.is_current(first));
+    states
+        .set_stage(first, &tasks, Stage::Migrating)
+        .expect("the first bring-up migrates");
+    states.lock_partition(Partition::Household);
+    assert!(!states.is_current(first));
+    let second = states.unlock_partition(&registry, Partition::Household);
+    assert_eq!(
+        states.set_stage(second, &tasks, Stage::Migrating),
+        Err(StageRefused::WriterHeld),
+        "the first bring-up still migrates the file"
+    );
+    assert_eq!(
+        states.set_stage(first, &tasks, Stage::Ready),
+        Err(StageRefused::Stale)
+    );
+    assert_eq!(state(&states, "tasks"), AvailabilityState::Opening);
+    assert_eq!(
+        states.set_stage(second, &tasks, Stage::Migrating),
+        Ok(()),
+        "the first bring-up's moving on released the writer"
+    );
+    states.lock_partition(Partition::Household);
+    assert_eq!(
+        states.set_stage(second, &tasks, Stage::Ready),
+        Err(StageRefused::Stale)
+    );
+    assert_eq!(state(&states, "tasks"), AvailabilityState::Locked);
+    assert_eq!(state(&states, "notes"), AvailabilityState::Locked);
+    let third = states.unlock_partition(&registry, Partition::Household);
+    assert_eq!(
+        states.set_stage(third, &tasks, Stage::ReKeying),
+        Ok(()),
+        "the second bring-up's refused move released the writer it took"
+    );
+    assert_eq!(
+        states.set_stage(third, &tasks, Stage::Migrating),
+        Ok(()),
+        "a bring-up moves from its own re-key to its own migration"
+    );
+}
+
+/// Review item 2, through the bring-up: a partition locked while its bring-up runs stops it: no
+/// file is opened or delivered to, the files stay `locked`, and every file is reported stopped.
+#[test]
+fn a_bring_up_whose_partition_is_locked_stops_and_opens_nothing() {
+    /// A re-key that locks the partition while it runs.
+    struct Locking<'a> {
+        states: &'a ModuleStates,
+    }
+    impl Rekey for Locking<'_> {
+        fn pending(&mut self, file: &ModuleFile) -> bool {
+            file.module().as_str() == "notes"
+        }
+        fn rekey(&mut self, _: &ModuleFile) -> Result<(), vilicus_storage::Error> {
+            self.states.lock_partition(Partition::Household);
+            Ok(())
+        }
+    }
+    let mut partitioned = partitioned("locked-midway", "UPDATE tasks SET title = title;");
+    let states = ModuleStates::new();
+    let generation = states.unlock_partition(&partitioned.registry, Partition::Household);
+    let targets = targets(&partitioned.files);
+    let (open, report) = bring_up(
+        &partitioned.registry,
+        &boundary(&states),
+        generation,
+        &targets,
+        &mut Locking { states: &states },
+        Delivery {
+            code: &mut NoConsumers,
+            links: &mut NoLinks,
+            stamper: &mut partitioned.stamper,
+        },
+    )
+    .expect("a bring-up");
+    assert!(open.handle(&ModuleName::from_static("notes")).is_none());
+    assert!(open.handle(&ModuleName::from_static("tasks")).is_none());
+    assert!(report.deliveries.is_empty());
+    for module in ["notes", "tasks"] {
+        assert!(
+            matches!(outcome(&report, module), FileOutcome::PartitionLocked),
+            "{module}: {:?}",
+            outcome(&report, module)
+        );
+        assert_eq!(state(&states, module), AvailabilityState::Locked);
+    }
+    assert_eq!(
+        module_version(&partitioned.files[1]),
+        1,
+        "nothing migrated for a locked partition"
+    );
+    open.close().expect("close");
+}
+
+/// Review item 7: a registered module whose file is not given is reported and `locked`, with an
+/// alert, rather than left `opening`; two files of one module are refused before any is touched.
+#[test]
+fn a_module_without_a_file_is_reported_and_two_files_of_one_module_are_refused() {
+    let mut partitioned = partitioned("not-given", "UPDATE tasks SET title = title;");
+    let states = ModuleStates::new();
+    let generation = states.unlock_partition(&partitioned.registry, Partition::Household);
+    let only_notes = targets(&partitioned.files[..1]);
+    let (open, report) = bring_up(
+        &partitioned.registry,
+        &boundary(&states),
+        generation,
+        &only_notes,
+        &mut NothingToRekey,
+        Delivery {
+            code: &mut NoConsumers,
+            links: &mut NoLinks,
+            stamper: &mut partitioned.stamper,
+        },
+    )
+    .expect("a bring-up");
+    assert!(matches!(outcome(&report, "notes"), FileOutcome::Ready));
+    assert!(matches!(outcome(&report, "tasks"), FileOutcome::NotGiven));
+    assert_eq!(state(&states, "tasks"), AvailabilityState::Locked);
+    assert!(report.alerts.contains(&InstanceAdminAlert::FileNotServed {
+        module: ModuleName::from_static("tasks"),
+        partition: Partition::Household,
+        file_name: "tasks.household.db".into(),
+    }));
+    open.close().expect("close");
+
+    let twice = [partitioned.files[0].clone(), partitioned.files[0].clone()];
+    let doubled = targets(&twice);
+    let again = states.unlock_partition(&partitioned.registry, Partition::Household);
+    let refused = bring_up(
+        &partitioned.registry,
+        &boundary(&states),
+        again,
+        &doubled,
+        &mut NothingToRekey,
+        Delivery {
+            code: &mut NoConsumers,
+            links: &mut NoLinks,
+            stamper: &mut partitioned.stamper,
+        },
+    );
+    assert_eq!(
+        refused.map(drop).expect_err("refused"),
+        BringUpError::DuplicateFile(ModuleName::from_static("notes"))
+    );
+    assert_eq!(
+        state(&states, "notes"),
+        AvailabilityState::Opening,
+        "nothing touched"
+    );
 }

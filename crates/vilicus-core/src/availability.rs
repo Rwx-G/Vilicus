@@ -14,6 +14,13 @@
 //! restarts. A failed migration lasts across starts through its mark beside the file, read by
 //! the migration runner ([`Registry::migrate_files`](crate::registry::Registry::migrate_files)).
 //!
+//! Every stage change of a bring-up carries the generation of the unlock it acts for: each unlock
+//! and each lock of a partition starts a new generation, and a stage change of an older one is
+//! refused, so a bring-up still running when its partition is locked, and unlocked again, never
+//! moves a file of the later unlock, nor leaves a locked partition's file ready. The writer a
+//! re-key or a migration takes is held until the bring-up that took it moves the file on, whatever
+//! its generation, so a second bring-up never migrates a file the first still migrates.
+//!
 //! Each call of module code is registered while it runs ([`ModuleStates`] hands out a
 //! [`CallTicket`]), with a deadline while the module's code runs; a file is put to re-keying or
 //! migrating only when no call runs on it, and no call starts on a file that is not ready, so the
@@ -202,12 +209,35 @@ pub struct CallTicket {
     id: u64,
 }
 
-/// A file could not be put to a stage that holds its writer: calls of module code still run on
-/// it.
+/// The unlock of one partition a bring-up acts for: each unlock and each lock of the partition
+/// starts a new one ([`ModuleStates::unlock_partition`], [`ModuleStates::lock_partition`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CallsInFlight {
-    /// How many.
-    pub calls: usize,
+pub struct Generation {
+    partition: Partition,
+    number: u64,
+}
+
+impl Generation {
+    /// The partition.
+    pub fn partition(self) -> Partition {
+        self.partition
+    }
+}
+
+/// Why a stage change was refused; the file keeps its stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageRefused {
+    /// The change is of an earlier unlock of the partition, which was locked since: the bring-up
+    /// that asks for it acts for keys no longer in memory.
+    Stale,
+    /// The stage holds the writer, and calls of module code still run on the file.
+    CallsInFlight {
+        /// How many.
+        calls: usize,
+    },
+    /// The stage holds the writer, and a re-key or a migration, of this unlock or an earlier
+    /// one, still holds it.
+    WriterHeld,
 }
 
 #[derive(Debug)]
@@ -217,6 +247,8 @@ struct Entry {
     deactivated: bool,
     /// The calls running on the file, each with its deadline while the module's code runs.
     calls: Vec<(u64, Option<Duration>)>,
+    /// The generation whose re-key or migration holds the file's writer.
+    writer: Option<u64>,
 }
 
 impl Default for Entry {
@@ -226,6 +258,7 @@ impl Default for Entry {
             fault: None,
             deactivated: false,
             calls: Vec::new(),
+            writer: None,
         }
     }
 }
@@ -246,6 +279,20 @@ impl Entry {
 struct Files {
     entries: HashMap<(ModuleName, Partition), Entry>,
     next_call: u64,
+    /// The current generation of each partition; 0 before its first unlock.
+    generations: HashMap<Partition, u64>,
+}
+
+impl Files {
+    /// Starts a new generation of `partition` and returns it.
+    fn next_generation(&mut self, partition: Partition) -> Generation {
+        let number = self.generations.entry(partition).or_default();
+        *number = number.wrapping_add(1);
+        Generation {
+            partition,
+            number: *number,
+        }
+    }
 }
 
 /// The availability state of every module file of the instance, shared by the threads of the
@@ -324,10 +371,12 @@ impl ModuleStates {
 
     /// The partition's keys were derived: every file of every module of `registry` in
     /// `partition` is `opening`, the unlock completes at once (FR-11), and the bring-up moves
-    /// each file on in the background ([`bring_up`](crate::startup::bring_up)). A fault or a
-    /// deactivation stays.
-    pub fn unlock_partition(&self, registry: &Registry, partition: Partition) {
+    /// each file on in the background ([`bring_up`](crate::startup::bring_up)), with the
+    /// generation returned, a new one. A fault, a deactivation and a writer an earlier bring-up
+    /// still holds stay.
+    pub fn unlock_partition(&self, registry: &Registry, partition: Partition) -> Generation {
         let mut files = self.files();
+        let generation = files.next_generation(partition);
         for module in registry.modules() {
             files
                 .entries
@@ -335,15 +384,43 @@ impl ModuleStates {
                 .or_default()
                 .stage = Stage::Opening;
         }
+        generation
     }
 
-    /// The partition's keys left memory: every file of `partition` is `locked`. A fault or a
-    /// deactivation stays, and calls still running end on their own.
+    /// The partition's keys left memory: every file of `partition` is `locked`, and a new
+    /// generation starts, so no later stage change of a bring-up of the earlier unlock moves a
+    /// file. A fault, a deactivation and a writer that bring-up still holds stay, and calls still
+    /// running end on their own.
     pub fn lock_partition(&self, partition: Partition) {
-        for ((_, file_partition), entry) in &mut self.files().entries {
+        let mut files = self.files();
+        files.next_generation(partition);
+        for ((_, file_partition), entry) in &mut files.entries {
             if *file_partition == partition {
                 entry.stage = Stage::Locked;
             }
+        }
+    }
+
+    /// True while `generation` is its partition's current one: the partition was not locked, or
+    /// unlocked again, since.
+    pub fn is_current(&self, generation: Generation) -> bool {
+        self.files()
+            .generations
+            .get(&generation.partition)
+            .is_some_and(|number| *number == generation.number)
+    }
+
+    /// The current generation of `partition`.
+    #[cfg(test)]
+    pub(crate) fn generation(&self, partition: Partition) -> Generation {
+        Generation {
+            partition,
+            number: self
+                .files()
+                .generations
+                .get(&partition)
+                .copied()
+                .unwrap_or_default(),
         }
     }
 
@@ -364,24 +441,48 @@ impl ModuleStates {
         }
     }
 
-    /// Puts `module`'s file in `partition` at `stage`, as the Core's bring-up moves it. A stage
-    /// that holds the writer (re-keying, migrating) is refused while calls of module code run on
-    /// the file, so the Core changes no file under a call (AD-9, D149).
+    /// Puts `module`'s file at `stage`, as the bring-up of `generation`, an unlock of the file's
+    /// partition, moves it. Refused, the file keeping its stage, when `generation` is not the
+    /// partition's current one ([`StageRefused::Stale`]); a stale change that leaves a stage holding
+    /// the writer still releases the writer its own bring-up took. A stage that holds the writer
+    /// (re-keying, migrating) is refused while calls of module code run on the file, or while a
+    /// re-key or a migration holds the writer already, so the Core changes no file under a call
+    /// and runs one re-key or migration of a file at a time (AD-9, D149).
     pub fn set_stage(
         &self,
+        generation: Generation,
         module: &ModuleName,
-        partition: Partition,
         stage: Stage,
-    ) -> Result<(), CallsInFlight> {
+    ) -> Result<(), StageRefused> {
         let mut files = self.files();
+        let current = files
+            .generations
+            .get(&generation.partition)
+            .copied()
+            .unwrap_or_default();
         let entry = files
             .entries
-            .entry((module.clone(), partition))
+            .entry((module.clone(), generation.partition))
             .or_default();
-        if stage.holds_the_writer() && !entry.calls.is_empty() {
-            return Err(CallsInFlight {
-                calls: entry.calls.len(),
-            });
+        let holds = entry.writer == Some(generation.number);
+        if generation.number != current {
+            if holds && !stage.holds_the_writer() {
+                entry.writer = None;
+            }
+            return Err(StageRefused::Stale);
+        }
+        if stage.holds_the_writer() && !holds {
+            if entry.writer.is_some() {
+                return Err(StageRefused::WriterHeld);
+            }
+            if !entry.calls.is_empty() {
+                return Err(StageRefused::CallsInFlight {
+                    calls: entry.calls.len(),
+                });
+            }
+            entry.writer = Some(generation.number);
+        } else if holds && !stage.holds_the_writer() {
+            entry.writer = None;
         }
         entry.stage = stage;
         Ok(())
@@ -522,7 +623,11 @@ mod tests {
 
     fn ready(states: &ModuleStates) {
         states
-            .set_stage(&tasks(), Partition::Household, Stage::Ready)
+            .set_stage(
+                states.generation(Partition::Household),
+                &tasks(),
+                Stage::Ready,
+            )
             .expect("no call runs");
     }
 
@@ -541,7 +646,11 @@ mod tests {
         let other = ModuleStates::new();
         other.deactivate(&tasks(), Partition::Household);
         other
-            .set_stage(&tasks(), Partition::Household, Stage::Ready)
+            .set_stage(
+                other.generation(Partition::Household),
+                &tasks(),
+                Stage::Ready,
+            )
             .expect("no call runs");
         assert_eq!(
             other.state(&tasks(), Partition::Household),
@@ -564,7 +673,7 @@ mod tests {
             (tasks(), Partition::Home),
         ] {
             states
-                .set_stage(&module, partition, Stage::Ready)
+                .set_stage(states.generation(partition), &module, Stage::Ready)
                 .expect("no call runs");
         }
         states.mark_faulted(&tasks(), Partition::Household, Fault::TimeBudget);

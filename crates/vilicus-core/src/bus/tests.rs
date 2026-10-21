@@ -229,8 +229,8 @@ impl Files {
             if !locked.contains(&handle.file().module().as_str()) {
                 states
                     .set_stage(
+                        states.generation(handle.file().partition()),
                         handle.file().module(),
-                        handle.file().partition(),
                         Stage::Ready,
                     )
                     .expect("no call runs");
@@ -2057,7 +2057,7 @@ fn put(files: &Files, module: &'static str, state: AvailabilityState) {
     let stage = |stage| {
         files
             .states
-            .set_stage(&name, partition, stage)
+            .set_stage(files.states.generation(partition), &name, stage)
             .expect("no call runs");
     };
     match state {

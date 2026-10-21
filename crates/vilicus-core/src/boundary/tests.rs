@@ -25,7 +25,7 @@ use vilicus_types::{
 
 use super::{Boundary, HandlerError, in_module_code};
 use crate::alert::InstanceAdminAlert;
-use crate::availability::{CallsInFlight, Fault, ModuleStates, MonotonicClock, Stage};
+use crate::availability::{Fault, ModuleStates, MonotonicClock, Stage, StageRefused};
 use crate::handlers::{Handlers, HandlersError};
 use crate::record::tests::{KEY, create_sql, noon, raw_connection, raw_rows, scratch_dir};
 use crate::record::tests_call::{TestStamper, ella};
@@ -215,8 +215,8 @@ fn open_file(
 fn ready(states: &ModuleStates, handle: &Handle<Write>) {
     states
         .set_stage(
+            states.generation(handle.file().partition()),
             handle.file().module(),
-            handle.file().partition(),
             Stage::Ready,
         )
         .expect("no call runs");
@@ -343,7 +343,7 @@ impl Fixture {
 fn put(states: &ModuleStates, module: &ModuleName, partition: Partition, state: AvailabilityState) {
     let stage = |stage| {
         states
-            .set_stage(module, partition, stage)
+            .set_stage(states.generation(partition), module, stage)
             .expect("no call runs")
     };
     match state {
@@ -914,8 +914,16 @@ fn a_file_is_not_migrated_while_a_call_runs_on_it() {
         &mut *fixture.stamper.borrow_mut(),
         |_| {
             refused = Some((
-                states.set_stage(&name, Partition::Household, Stage::Migrating),
-                states.set_stage(&name, Partition::Household, Stage::ReKeying),
+                states.set_stage(
+                    states.generation(Partition::Household),
+                    &name,
+                    Stage::Migrating,
+                ),
+                states.set_stage(
+                    states.generation(Partition::Household),
+                    &name,
+                    Stage::ReKeying,
+                ),
             ));
             Ok(())
         },
@@ -924,12 +932,16 @@ fn a_file_is_not_migrated_while_a_call_runs_on_it() {
     assert_eq!(
         refused,
         Some((
-            Err(CallsInFlight { calls: 1 }),
-            Err(CallsInFlight { calls: 1 })
+            Err(StageRefused::CallsInFlight { calls: 1 }),
+            Err(StageRefused::CallsInFlight { calls: 1 })
         ))
     );
     assert_eq!(
-        states.set_stage(&name, Partition::Household, Stage::Migrating),
+        states.set_stage(
+            states.generation(Partition::Household),
+            &name,
+            Stage::Migrating
+        ),
         Ok(()),
         "once the call ended"
     );

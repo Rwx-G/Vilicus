@@ -55,10 +55,15 @@ class Metadata:
             "dependencies": [],
         }
 
-    def depend(self, source: str, target: str, kind: str = "normal") -> None:
+    def depend(self, source: str, target: str, kind: str = "normal", features: tuple[str, ...] = ()) -> None:
         target_dir = Path(self.packages[target]["manifest_path"]).parent
         self.packages[source]["dependencies"].append(
-            {"name": target, "kind": None if kind == "normal" else kind, "path": str(target_dir)}
+            {
+                "name": target,
+                "kind": None if kind == "normal" else kind,
+                "path": str(target_dir),
+                "features": list(features),
+            }
         )
 
     def document(self) -> dict:
@@ -134,6 +139,30 @@ class ArtefactTest(PackagingTestCase):
     def test_never_packaged_crate_as_dev_dependency_of_an_artefact_passes(self) -> None:
         for name in self.never_packaged():
             self.metadata.depend(self.shipped, name, "dev")
+        self.assertEqual(self.check(), [])
+
+    def test_test_feature_through_a_linked_dependency_fails(self) -> None:
+        core = self.names["core"]
+        for kind in sorted(cw.LINKED_KINDS):
+            for source in (self.shipped, self.names["gw"]):
+                with self.subTest(kind=kind, source=source):
+                    self.setUp()
+                    self.metadata.depend(source, core, kind, (cp.TEST_FEATURE,))
+                    violations = self.check()
+                    expected = f"enables feature {cp.TEST_FEATURE} of {core} through a"
+                    self.assertTrue(any(expected in violation for violation in violations), violations)
+
+    def test_test_feature_in_a_feature_of_a_linked_crate_fails(self) -> None:
+        core = self.names["core"]
+        for enabled in ([cp.TEST_FEATURE], [f"{core}/{cp.TEST_FEATURE}"]):
+            with self.subTest(enabled=enabled):
+                self.setUp()
+                self.metadata.packages[self.shipped]["features"] = {"default": enabled}
+                violations = self.check()
+                self.assertTrue(any(f"whose feature default enables {cp.TEST_FEATURE}" in v for v in violations), violations)
+
+    def test_test_feature_through_a_dev_dependency_passes(self) -> None:
+        self.metadata.depend(self.shipped, self.names["core"], "dev", (cp.TEST_FEATURE,))
         self.assertEqual(self.check(), [])
 
     def test_artefact_named_like_a_testbed_executable_fails(self) -> None:

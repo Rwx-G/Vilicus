@@ -8,7 +8,10 @@ target of a workspace package. The check fails when an artefact
   vilicus-testbed), carries the name of one of their executables, or has a name matching the
   name pattern of such a node (a `vilicus-double-*` binary built by a shipped crate);
 - links such a crate through a normal or build dependency, at any depth, in `cargo metadata`;
-- names a package that is not a workspace member, or a binary that package does not build.
+- names a package that is not a workspace member, or a binary that package does not build;
+- enables the `testing` feature of a workspace crate, which compiles test code such as the write
+  path fuzz test of vilicus-core (Story 3.4), from the artefact's package or any crate it links:
+  through a normal or build dependency, or in a feature of its own. A dev-dependency may.
 
 With `--contents FILE`, it also reads a listing of the files a release ships, one path per line,
 and fails on any path that names a never-packaged crate or one of its targets. No package exists
@@ -37,6 +40,8 @@ import check_workspace as cw
 ARTEFACTS_FILE = cw.CI_DIR / "release_artefacts.toml"
 CONFIG_KEYS = frozenset({"never_packaged", "artefact"})
 ARTEFACT_KEYS = frozenset({"package", "binary"})
+# The feature of a workspace crate that compiles test code; no release artefact enables it.
+TEST_FEATURE = "testing"
 
 
 @dataclass(frozen=True)
@@ -145,11 +150,35 @@ def check_artefacts(metadata: dict, graph: cw.Graph, config: dict) -> list[str]:
                 violations.append(
                     f"packaging: {label} matches {node.pattern}, the name pattern of never-packaged node {node.id} (D102)"
                 )
-        for reached, path in cw.linked_closure(by_name[artefact.package], by_name):
+        closure = cw.linked_closure(by_name[artefact.package], by_name)
+        for reached, path in closure:
             if reached in never_packaged:
                 violations.append(
                     f"packaging: {label} links {reached}, a crate of never-packaged node {never_packaged[reached]} "
                     f"({' -> '.join(path)}; D102)"
+                )
+        linked = [artefact.package, *(reached for reached, _ in closure)]
+        violations.extend(test_feature_violations(label, linked, members))
+    return violations
+
+
+def test_feature_violations(label: str, linked: list[str], members: dict[str, dict]) -> list[str]:
+    """The places where `linked`, an artefact's package and the crates it links, enable the test
+    feature: a normal or build dependency that names it, or a feature of their own that does."""
+    violations = []
+    for name in linked:
+        package = members[name]
+        for dep in package.get("dependencies", []):
+            if dep.get("kind") in (None, "build") and TEST_FEATURE in dep.get("features", []):
+                violations.append(
+                    f"packaging: {label} enables feature {TEST_FEATURE} of {dep['name']} through a "
+                    f"{dep.get('kind') or 'normal'} dependency of {name} (Story 3.4)"
+                )
+        for feature, enabled in package.get("features", {}).items():
+            if any(entry == TEST_FEATURE or entry.endswith(f"/{TEST_FEATURE}") for entry in enabled):
+                violations.append(
+                    f"packaging: {label} links {name}, whose feature {feature} enables {TEST_FEATURE} "
+                    f"(Story 3.4)"
                 )
     return violations
 

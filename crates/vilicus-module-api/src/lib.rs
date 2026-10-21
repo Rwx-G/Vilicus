@@ -22,10 +22,15 @@
 //! `text_taint` and `data_types` (AD-6, AD-7). A write gives each field a [`Value`], which [`Field::check_value`]
 //! holds to the field's declaration (FR-58, D98): the Core runs it on every write, and checks in
 //! the write transaction that a reviewed-vocabulary label is one an adult confirmed (D104).
+//!
+//! A module's code is bound to its declaration by name in a [`ModuleCode`], the module port's
+//! handler table: the function of each tool, undo handler and consumer, each a synchronous
+//! function the Core calls on the file's writer thread inside the boundary of AD-9.
 
 mod check;
 mod declaration;
 mod event;
+mod handler;
 mod records;
 mod tool;
 mod value;
@@ -40,12 +45,16 @@ pub use declaration::{
     Fts5Tokenizer, Migration, ModuleDeclaration, SqlType, Structured, Table,
 };
 pub use event::{Consumer, EVENT_PAYLOAD_MAX_LEN, Event, Topic, is_topic, topic_module};
+pub use handler::{
+    BindingError, ConsumeFn, ConsumerHandler, ModuleCode, ToolCall, ToolFn, ToolHandler, UndoCall,
+    UndoFn, UndoHandler, UndoneEffect,
+};
 pub use records::{Records, WriteError, Written};
 pub use tool::{Confirmation, MatrixRow, Tool};
 pub use value::{Value, ValueError, check_vocabulary_label, is_free_text_character};
 pub use vilicus_types::{
-    DataType, ExceptionClass, Id, Rev, Tier, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS,
-    is_vocabulary_label, is_vocabulary_label_letter, sha256_hex,
+    CallId, DataType, ExceptionClass, Id, Rev, Tier, VOCABULARY_LABEL_MAX_LEN,
+    VOCABULARY_LABEL_SEPARATORS, is_vocabulary_label, is_vocabulary_label_letter, sha256_hex,
 };
 
 #[cfg(test)]

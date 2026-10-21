@@ -1232,7 +1232,7 @@ const fn listed(list: &[&str], name: &str) -> bool {
     false
 }
 
-const fn same(left: &str, right: &str) -> bool {
+pub(crate) const fn same(left: &str, right: &str) -> bool {
     same_bytes(left.as_bytes(), right.as_bytes())
 }
 

@@ -1355,3 +1355,324 @@ fn every_event_error_names_its_rule_and_its_item() {
         "two consumers share a name: react"
     );
 }
+
+// Story 3.9: the module port's handler table.
+
+fn run_nothing(_: &ToolCall<'_>, _: &mut dyn Records) -> Result<(), WriteError> {
+    Ok(())
+}
+
+fn undo_nothing(_: &UndoCall<'_>, _: &mut dyn Records) -> Result<(), WriteError> {
+    Ok(())
+}
+
+fn consume_nothing(_: &Event<'_>, _: &mut dyn Records) -> Result<(), WriteError> {
+    Ok(())
+}
+
+/// `VALID` with tools of each kind, two of them naming one undo handler, and two consumers.
+fn with_code_to_bind() -> ModuleDeclaration {
+    let second_cart = Tool {
+        name: "refill_cart",
+        ..CART_TOOL
+    };
+    ModuleDeclaration {
+        tools: leak(vec![
+            READ_TOOL,
+            WRITE_TOOL,
+            CART_TOOL,
+            second_cart,
+            LIGHT_TOOL,
+        ]),
+        consumers: leak(vec![
+            consumer("react", "tasks.task.added"),
+            consumer("forget", "tasks.task.removed"),
+        ]),
+        ..VALID
+    }
+}
+
+/// A function for every name `declaration` holds, each once.
+fn code_of(declaration: &ModuleDeclaration) -> ModuleCode {
+    let mut undo: Vec<&'static str> = Vec::new();
+    for name in declaration
+        .tools
+        .iter()
+        .filter_map(|tool| tool.undo_handler)
+    {
+        if !undo.contains(&name) {
+            undo.push(name);
+        }
+    }
+    ModuleCode {
+        module: declaration.name,
+        tools: leak(
+            declaration
+                .tools
+                .iter()
+                .map(|tool| ToolHandler {
+                    tool: tool.name,
+                    run: run_nothing,
+                })
+                .collect(),
+        ),
+        undo_handlers: leak(
+            undo.into_iter()
+                .map(|name| UndoHandler {
+                    name,
+                    undo: undo_nothing,
+                })
+                .collect(),
+        ),
+        consumers: leak(
+            declaration
+                .consumers
+                .iter()
+                .map(|consumer| ConsumerHandler {
+                    consumer: consumer.name,
+                    consume: consume_nothing,
+                })
+                .collect(),
+        ),
+    }
+}
+
+#[test]
+fn code_bound_to_every_name_of_its_declaration_is_accepted() {
+    let declaration = with_code_to_bind();
+    let code = code_of(&declaration);
+    assert_eq!(code.check(&declaration), Ok(()));
+    assert_eq!(
+        code.undo_handlers.len(),
+        2,
+        "two tools share one undo handler"
+    );
+    for tool in declaration.tools {
+        assert_eq!(
+            code.tool(tool.name).map(|bound| bound.tool),
+            Some(tool.name)
+        );
+    }
+    assert_eq!(
+        code.undo_handler("empty_cart").map(|bound| bound.name),
+        Some("empty_cart")
+    );
+    assert_eq!(
+        code.consumer("forget").map(|bound| bound.consumer),
+        Some("forget")
+    );
+    assert!(code.tool("unknown").is_none());
+    assert!(code.undo_handler("unknown").is_none());
+    assert!(code.consumer("unknown").is_none());
+    let nothing_to_bind = ModuleDeclaration {
+        tools: &[],
+        consumers: &[],
+        ..VALID
+    };
+    let empty = ModuleCode {
+        module: VALID.name,
+        tools: &[],
+        undo_handlers: &[],
+        consumers: &[],
+    };
+    assert_eq!(empty.check(&nothing_to_bind), Ok(()));
+    assert_eq!(
+        empty.check(&VALID),
+        Err(BindingError::MissingTool {
+            tool: VALID.tools[0].name
+        })
+    );
+}
+
+/// The handlers of `handlers` but the one at `index`.
+fn all_but<T: Copy>(handlers: &[T], index: usize) -> &'static [T] {
+    leak(
+        handlers
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, handler)| *handler)
+            .collect(),
+    )
+}
+
+/// `handlers` with the one at `index` once more.
+fn doubled<T: Copy>(handlers: &[T], index: usize) -> &'static [T] {
+    leak([handlers, &[handlers[index]]].concat())
+}
+
+/// Every name the declaration holds needs exactly one function, and no function may name what the
+/// declaration does not hold: checked for each tool, undo handler and consumer in turn, by
+/// leaving its function out and by binding it twice, then for a function of each kind bound to a
+/// name of nothing.
+#[test]
+fn code_that_misses_doubles_or_invents_a_name_is_refused() {
+    let declaration = with_code_to_bind();
+    let code = code_of(&declaration);
+    for (index, handler) in code.tools.iter().enumerate() {
+        let tool = handler.tool;
+        let missing = ModuleCode {
+            tools: all_but(code.tools, index),
+            ..code
+        };
+        assert_eq!(
+            missing.check(&declaration),
+            Err(BindingError::MissingTool { tool })
+        );
+        let twice = ModuleCode {
+            tools: doubled(code.tools, index),
+            ..code
+        };
+        assert_eq!(
+            twice.check(&declaration),
+            Err(BindingError::DuplicateTool { tool })
+        );
+    }
+    for (index, handler) in code.undo_handlers.iter().enumerate() {
+        let name = handler.name;
+        let missing = ModuleCode {
+            undo_handlers: all_but(code.undo_handlers, index),
+            ..code
+        };
+        assert_eq!(
+            missing.check(&declaration),
+            Err(BindingError::MissingUndoHandler { name })
+        );
+        let twice = ModuleCode {
+            undo_handlers: doubled(code.undo_handlers, index),
+            ..code
+        };
+        assert_eq!(
+            twice.check(&declaration),
+            Err(BindingError::DuplicateUndoHandler { name })
+        );
+    }
+    for (index, handler) in code.consumers.iter().enumerate() {
+        let consumer = handler.consumer;
+        let missing = ModuleCode {
+            consumers: all_but(code.consumers, index),
+            ..code
+        };
+        assert_eq!(
+            missing.check(&declaration),
+            Err(BindingError::MissingConsumer { consumer })
+        );
+        let twice = ModuleCode {
+            consumers: doubled(code.consumers, index),
+            ..code
+        };
+        assert_eq!(
+            twice.check(&declaration),
+            Err(BindingError::DuplicateConsumer { consumer })
+        );
+    }
+    let unknown_tool = ToolHandler {
+        tool: "nothing",
+        run: run_nothing,
+    };
+    let unknown_undo = UndoHandler {
+        name: "nothing",
+        undo: undo_nothing,
+    };
+    let unknown_consumer = ConsumerHandler {
+        consumer: "nothing",
+        consume: consume_nothing,
+    };
+    let invented = [
+        (
+            ModuleCode {
+                tools: leak([code.tools, &[unknown_tool]].concat()),
+                ..code
+            },
+            BindingError::UnknownTool { tool: "nothing" },
+        ),
+        (
+            ModuleCode {
+                undo_handlers: leak([code.undo_handlers, &[unknown_undo]].concat()),
+                ..code
+            },
+            BindingError::UnknownUndoHandler { name: "nothing" },
+        ),
+        (
+            ModuleCode {
+                consumers: leak([code.consumers, &[unknown_consumer]].concat()),
+                ..code
+            },
+            BindingError::UnknownConsumer {
+                consumer: "nothing",
+            },
+        ),
+        (
+            ModuleCode {
+                module: "tasks",
+                ..code
+            },
+            BindingError::OtherModule { module: "tasks" },
+        ),
+    ];
+    for (code, error) in invented {
+        assert_eq!(code.check(&declaration), Err(error));
+    }
+}
+
+#[test]
+fn every_binding_error_names_its_rule_and_its_item() {
+    let errors = [
+        BindingError::OtherModule { module: "tasks" },
+        BindingError::MissingTool { tool: "add_item" },
+        BindingError::UnknownTool { tool: "add_item" },
+        BindingError::DuplicateTool { tool: "add_item" },
+        BindingError::MissingUndoHandler { name: "empty_cart" },
+        BindingError::UnknownUndoHandler { name: "empty_cart" },
+        BindingError::DuplicateUndoHandler { name: "empty_cart" },
+        BindingError::MissingConsumer { consumer: "react" },
+        BindingError::UnknownConsumer { consumer: "react" },
+        BindingError::DuplicateConsumer { consumer: "react" },
+    ];
+    for error in errors {
+        let shown = error.to_string();
+        assert!(shown.starts_with(error.rule()), "{shown}");
+        assert!(
+            ["tasks", "add_item", "empty_cart", "react"]
+                .iter()
+                .any(|item| shown.ends_with(&format!(": {item}"))),
+            "{shown}"
+        );
+    }
+    let mut rules: Vec<&str> = errors.iter().map(|error| error.rule()).collect();
+    rules.sort_unstable();
+    rules.dedup();
+    assert_eq!(
+        rules.len(),
+        errors.len(),
+        "each error has a rule of its own"
+    );
+}
+
+#[test]
+fn a_tool_call_and_an_undo_call_give_what_they_hold() {
+    let arguments = [
+        ("label", Value::Text("Pommes".into())),
+        ("quantity", Value::Integer(3)),
+    ];
+    let call = ToolCall::new(&arguments);
+    assert_eq!(call.arguments().len(), 2);
+    assert_eq!(call.argument("quantity"), Some(&Value::Integer(3)));
+    assert_eq!(call.argument("unknown"), None);
+    let id = Id::from_bytes([
+        0x01, 0x7f, 0x22, 0xe2, 0x79, 0xb0, 0x7c, 0xc3, 0x98, 0xc4, 0xdc, 0x0c, 0x0c, 0x07, 0x39,
+        0x8f,
+    ])
+    .expect("a UUIDv7");
+    let call_id = CallId::from(id);
+    let effects = [UndoneEffect {
+        id,
+        effect: "cart_add",
+        idempotency_key: b"key",
+        payload: b"",
+    }];
+    let undo = UndoCall::new("prepare_cart", call_id, &effects);
+    assert_eq!(undo.tool(), "prepare_cart");
+    assert_eq!(undo.call_id(), call_id);
+    assert_eq!(undo.effects(), &effects[..]);
+}

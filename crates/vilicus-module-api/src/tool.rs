@@ -76,8 +76,9 @@ pub struct Tool {
     pub crosses_partitions: bool,
     /// The name of the module's undo handler for this tool, an identifier. The Core's journal
     /// undoes a tier 1 write inside the module's file (Story 10.7); an outbound effect needs the
-    /// module's own handler, so every exception-class tool names one (I13). Binding the name to
-    /// the handler is the module port's handler table (Story 3.9).
+    /// module's own handler, so every exception-class tool names one (I13). The module's
+    /// [`ModuleCode`](crate::ModuleCode) binds the name to its function, and a name without one
+    /// is refused.
     pub undo_handler: Option<&'static str>,
     /// The capability matrix row the tool implements.
     pub matrix_row: MatrixRow,

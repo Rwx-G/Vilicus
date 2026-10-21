@@ -7,7 +7,9 @@
 //! delete by id. For each write the Core stamps the envelope (id, `source`, `author`, times,
 //! `rev`) and computes `taint`, `text_taint` and `data_types` from the [`Call`] (who makes it, on
 //! what authority) and from the records the write is derived from; the module gives field values
-//! and input ids only. A refused write rolls back the whole call.
+//! and input ids only. A refused write rolls back the whole call. In the same transaction the
+//! Core journals each record the call changes (`journal`, AD-26); a repeated call, by its
+//! principal, `source` and `call_id`, returns the first one's result without running again.
 //!
 //! The row writer holds each field a write gives to its declaration (D98, D104, I40), and each
 //! envelope value to its stored form (`envelope`, D146), and refuses the whole write with a typed
@@ -47,12 +49,15 @@ mod call;
 mod envelope;
 #[cfg(any(test, feature = "testing"))]
 mod fuzz;
+mod journal;
 mod provenance;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_call;
+#[cfg(test)]
+mod tests_journal;
 
 use core::fmt;
 
@@ -63,9 +68,13 @@ use vilicus_module_api::{
 use vilicus_storage::{Handle, Inspect, SqlValue, Write};
 use vilicus_types::{Id, UtcMillis};
 
-pub use call::{Authority, Call, CallOutcome, Consumed, RecordChange, Stamper, run_call};
+pub use call::{
+    Authority, Call, CallOutcome, CallResult, Consumed, EarlierCall, Invocation, RecordChange,
+    Stamper, run_call,
+};
 #[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
+pub use journal::{INPUT_COLUMNS, JournaledInput, Row, decode_inputs, decode_row};
 pub use provenance::{DRAFT_RUN_WORDS, RecordProvenance};
 
 /// Why the Core refuses a write, a label confirmation or a stored row. No variant carries a
@@ -182,6 +191,8 @@ pub enum RecordError {
     /// or `Cli` call that is not the member's own action, or a `source` its principal does not
     /// produce.
     InconsistentCall,
+    /// A journal row of the file does not decode, or names a table the module does not declare.
+    InvalidJournal,
     /// The module's code ended the call with its own error; the call was rolled back.
     Aborted(WriteError),
     /// The storage layer failed; the transaction was rolled back.
@@ -252,6 +263,7 @@ impl fmt::Display for RecordError {
             Self::InconsistentCall => {
                 formatter.write_str("the call's authority does not fit its principal")
             }
+            Self::InvalidJournal => formatter.write_str("a journal row of the file is malformed"),
             Self::Aborted(error) => write!(formatter, "the module ended the call: {error}"),
             Self::Storage(error) => write!(formatter, "{error}"),
         }

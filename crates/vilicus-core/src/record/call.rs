@@ -1,13 +1,16 @@
 //! One call of a module through the typed record API (AD-9): every write of the call in one
-//! `BEGIN IMMEDIATE` transaction on the module file's write handle, each stamped by the Core.
+//! `BEGIN IMMEDIATE` transaction on the module file's write handle, each stamped by the Core and
+//! journaled in the same transaction (AD-26), the call deduplicated by its caller's `call_id`
+//! (AD-28).
 
 use vilicus_module_api::{
     FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written,
 };
-use vilicus_storage::{Handle, SqlValue, Write};
+use vilicus_storage::{AuthorityKind, CallKey, Handle, JournalEntry, JournalRow, SqlValue, Write};
 use vilicus_types::{DataType, EffectiveTaint, Id, Principal, Rev, Source, Taint, UtcMillis};
 
 use super::envelope::{self, data_types_text};
+use super::journal;
 use super::provenance::{self, RecordProvenance, Stamp, Stored};
 use super::{
     RecordError, declared_table, from_stored, in_write_transaction, insert_row, update_row,
@@ -106,6 +109,14 @@ pub trait Stamper {
     fn id_random(&mut self) -> [u8; 10];
 }
 
+/// What one call is beside who makes it: the id its caller gave it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Invocation {
+    /// The call's id, a UUIDv7 the caller generated before any queueing (AD-28): a second call of
+    /// the same principal and `source` with this id, against the same file, is this call.
+    pub call_id: Id,
+}
+
 /// A record a call changed: what the write journal of the call records (AD-26).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordChange {
@@ -131,13 +142,40 @@ pub struct CallOutcome<T> {
     pub changes: Vec<RecordChange>,
 }
 
+/// What became of a call.
+#[derive(Debug)]
+pub enum CallResult<T> {
+    /// The module's code ran and the call committed.
+    Committed(CallOutcome<T>),
+    /// A call of the same principal, `source` and `call_id` wrote in this file before: the
+    /// module's code did not run, nothing was written, and this is that call's result, read
+    /// back from the journal (AD-26, AD-28).
+    Deduplicated(EarlierCall),
+}
+
+/// The result of an earlier call of the same key, as the file holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EarlierCall {
+    /// Every record it changed, in order.
+    pub changes: Vec<RecordChange>,
+}
+
 /// Runs `body`, the module's code for one call, in one `BEGIN IMMEDIATE` transaction on
 /// `handle`, the write handle of a file of `module`. `body` writes through the
 /// [`Records`] it receives, and the transaction commits only when `body` returns `Ok` and no
-/// write of the call was refused; otherwise it is rolled back and nothing of the call is stored.
-/// A refused write ends the call with that refusal, whatever `body` returns after it; an error
-/// `body` returns of its own is [`RecordError::Aborted`]. A panic, in `body` or in the Core while
-/// it writes, rolls the transaction back as it unwinds; catching it is the caller's (AD-9).
+/// write of the call was refused; otherwise it is rolled back and nothing of the call is stored,
+/// its journal rows included. A refused write ends the call
+/// with that refusal, whatever `body` returns after it; an error `body` returns of its own is
+/// [`RecordError::Aborted`]. A panic, in `body` or in the Core while it writes, rolls the
+/// transaction back as it unwinds; catching it is the caller's (AD-9).
+///
+/// In the transaction, before `body` runs, the Core looks the call up by its principal, its
+/// `source` and the `call_id` of `invocation` in the file's journal: a call of that key that
+/// wrote is this one, and its result is returned without running `body`
+/// ([`CallResult::Deduplicated`]); a call that wrote nothing left no row, so it is not
+/// deduplicated (AD-26, AD-28). Each write of the call journals its record, before and after
+/// images, revisions, the call's principal, authority and member, and the provenance of its
+/// inputs, implicit ones included.
 ///
 /// The call is refused before any write when its authority does not fit its principal
 /// ([`RecordError::InconsistentCall`]).
@@ -145,15 +183,25 @@ pub fn run_call<T>(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
     call: &Call,
+    invocation: &Invocation,
     stamper: &mut dyn Stamper,
     body: impl FnOnce(&mut dyn Records) -> Result<T, WriteError>,
-) -> Result<CallOutcome<T>, RecordError> {
+) -> Result<CallResult<T>, RecordError> {
     check_call(call)?;
+    let key = CallKey {
+        principal: call.principal,
+        source: &call.source,
+        call_id: invocation.call_id,
+    };
     in_write_transaction(handle, || {
+        if let Some(earlier) = earlier_call(handle, module, &key)? {
+            return Ok(CallResult::Deduplicated(earlier));
+        }
         let mut records = CallRecords {
             handle,
             module,
             call,
+            key,
             stamper,
             changes: Vec::new(),
             refusal: None,
@@ -162,11 +210,49 @@ pub fn run_call<T>(
         match (records.refusal, returned) {
             (Some(refusal), _) => Err(refusal),
             (None, Err(error)) => Err(RecordError::Aborted(error)),
-            (None, Ok(value)) => Ok(CallOutcome {
+            (None, Ok(value)) => Ok(CallResult::Committed(CallOutcome {
                 value,
                 changes: records.changes,
-            }),
+            })),
         }
+    })
+}
+
+/// The result of the earlier call of `key` in this file, if one wrote there: its journal rows.
+fn earlier_call(
+    handle: &Handle<Write>,
+    module: &'static ModuleDeclaration,
+    key: &CallKey<'_>,
+) -> Result<Option<EarlierCall>, RecordError> {
+    let journal = handle.journaled_call(key)?;
+    if journal.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(EarlierCall {
+        changes: journal
+            .into_iter()
+            .map(|row| journaled_change(module, row))
+            .collect::<Result<_, _>>()?,
+    }))
+}
+
+/// The change a journal row of `module`'s file records.
+fn journaled_change(
+    module: &'static ModuleDeclaration,
+    row: JournalRow,
+) -> Result<RecordChange, RecordError> {
+    let table = module
+        .table(&row.table)
+        .ok_or(RecordError::InvalidJournal)?;
+    Ok(RecordChange {
+        table: table.name,
+        id: row.record,
+        before: row.rev_before,
+        after: row.rev_after,
+        inputs: journal::decode_inputs(&row.inputs)?
+            .into_iter()
+            .map(|input| input.id)
+            .collect(),
     })
 }
 
@@ -187,6 +273,16 @@ fn check_call(call: &Call) -> Result<(), RecordError> {
         Ok(())
     } else {
         Err(RecordError::InconsistentCall)
+    }
+}
+
+/// How the journal names a call's authority, and the member it names: the one who made or
+/// approved the call, or the one it acts for.
+fn journaled_authority(authority: &Authority) -> (AuthorityKind, Option<Id>) {
+    match *authority {
+        Authority::OwnAction { member } => (AuthorityKind::OwnAction, Some(member)),
+        Authority::Approved { member, .. } => (AuthorityKind::Approved, Some(member)),
+        Authority::Unapproved { acting_for, .. } => (AuthorityKind::Unapproved, acting_for),
     }
 }
 
@@ -233,12 +329,13 @@ fn source_fits(call: &Call) -> bool {
     }
 }
 
-/// The [`Records`] of one call: the module's writes, each stamped and checked in the call's
-/// transaction.
+/// The [`Records`] of one call: the module's writes, each stamped, checked and journaled in the
+/// call's transaction.
 struct CallRecords<'a> {
     handle: &'a Handle<Write>,
     module: &'static ModuleDeclaration,
     call: &'a Call,
+    key: CallKey<'a>,
     stamper: &'a mut dyn Stamper,
     changes: Vec<RecordChange>,
     /// The first refused write of the call, which ends it.
@@ -294,6 +391,7 @@ impl CallRecords<'_> {
         inputs: &[Id],
     ) -> Result<Written, RecordError> {
         let table = declared_table(self.module, table)?;
+        let declared = inputs;
         let (input_ids, inputs) = self.resolve_inputs(table, inputs)?;
         let stamp = provenance::stamp(self.call, table, fields, &inputs, None)?;
         let now = self.stamper.now();
@@ -329,13 +427,20 @@ impl CallRecords<'_> {
             fields,
             &provenance::floor(self.call, &inputs),
         )?;
-        self.changes.push(RecordChange {
-            table: table.name,
-            id,
-            before: None,
-            after: Some(Rev::FIRST),
-            inputs: input_ids,
-        });
+        let after = journal::image(self.handle, table, id)?;
+        self.journal(
+            RecordChange {
+                table: table.name,
+                id,
+                before: None,
+                after: Some(Rev::FIRST),
+                inputs: input_ids,
+            },
+            None,
+            after,
+            &journal::encode_inputs(&inputs, declared),
+            now,
+        )?;
         Ok(Written {
             id,
             rev: Rev::FIRST,
@@ -351,6 +456,7 @@ impl CallRecords<'_> {
         inputs: &[Id],
     ) -> Result<Written, RecordError> {
         let table = declared_table(self.module, table)?;
+        let declared = inputs;
         let (input_ids, inputs) = self.resolve_inputs(table, inputs)?;
         let (stored, rev) = read_stored(self.handle, table, id)?;
         if rev != expected {
@@ -381,6 +487,7 @@ impl CallRecords<'_> {
             ("updated_at", Value::Integer(now.as_millis())),
             ("rev", Value::Integer(next.get())),
         ];
+        let before = journal::image(self.handle, table, id)?;
         update_row(
             self.handle,
             table,
@@ -389,13 +496,20 @@ impl CallRecords<'_> {
             fields,
             &provenance::floor(self.call, &inputs),
         )?;
-        self.changes.push(RecordChange {
-            table: table.name,
-            id,
-            before: Some(rev),
-            after: Some(next),
-            inputs: input_ids,
-        });
+        let after = journal::image(self.handle, table, id)?;
+        self.journal(
+            RecordChange {
+                table: table.name,
+                id,
+                before: Some(rev),
+                after: Some(next),
+                inputs: input_ids,
+            },
+            before,
+            after,
+            &journal::encode_inputs(&inputs, declared),
+            now,
+        )?;
         Ok(Written { id, rev: next })
     }
 
@@ -412,15 +526,52 @@ impl CallRecords<'_> {
             .next()
             .ok_or(RecordError::RecordNotFound { table: table.name })?;
         let rev = stored_rev(table, row.into_iter().next().map(from_stored))?;
+        let before = journal::image(self.handle, table, id)?;
         self.handle
             .execute_values(&format!("DELETE FROM {} WHERE id = ?1", table.name), &key)?;
-        self.changes.push(RecordChange {
-            table: table.name,
-            id,
-            before: Some(rev),
-            after: None,
-            inputs: Vec::new(),
-        });
+        let now = self.stamper.now();
+        self.journal(
+            RecordChange {
+                table: table.name,
+                id,
+                before: Some(rev),
+                after: None,
+                inputs: Vec::new(),
+            },
+            before,
+            None,
+            &journal::encode_inputs(&[], &[]),
+            now,
+        )
+    }
+
+    /// Journals `change` in the call's transaction, with the record's images and the encoded
+    /// provenance of its inputs, then keeps it for the call's outcome.
+    fn journal(
+        &mut self,
+        change: RecordChange,
+        image_before: Option<Vec<u8>>,
+        image_after: Option<Vec<u8>>,
+        inputs: &[u8],
+        now: UtcMillis,
+    ) -> Result<(), RecordError> {
+        let (authority, member) = journaled_authority(&self.call.authority);
+        self.handle.append_journal(&JournalEntry {
+            call: self.key,
+            authority,
+            member,
+            change_index: u32::try_from(self.changes.len())
+                .map_err(|_| RecordError::InvalidJournal)?,
+            table: change.table,
+            record: change.id,
+            rev_before: change.before,
+            rev_after: change.after,
+            image_before: image_before.as_deref(),
+            image_after: image_after.as_deref(),
+            inputs,
+            created_at: now,
+        })?;
+        self.changes.push(change);
         Ok(())
     }
 
@@ -649,6 +800,7 @@ fn write_error(error: &RecordError) -> WriteError {
         RecordError::UnknownInput { table } => WriteError::UnknownInput { table },
         RecordError::UndeclaredDataType { table } => WriteError::UndeclaredDataType { table },
         RecordError::IdChanged { .. }
+        | RecordError::InvalidJournal
         | RecordError::InvalidEnvelope { .. }
         | RecordError::UnknownVocabulary { .. }
         | RecordError::InvalidLabel { .. }

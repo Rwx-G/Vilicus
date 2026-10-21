@@ -18,8 +18,8 @@ use vilicus_types::{
 use super::envelope::data_types_text;
 use super::tests::{content, module, noon, open_new, rows, text};
 use super::{
-    Authority, Call, CallOutcome, Consumed, RecordChange, RecordError, RecordProvenance, Stamper,
-    check_stored_rows, insert, run_call,
+    Authority, Call, CallOutcome, CallResult, Consumed, Invocation, RecordChange, RecordError,
+    RecordProvenance, Stamper, check_stored_rows, insert, run_call,
 };
 
 const NOTE_FIELDS: &[Field] = &[
@@ -52,7 +52,7 @@ const DIGEST_FIELDS: &[Field] = &[Field {
 }];
 
 /// A module with a `notes` table of two data types and a `digests` table of every data type.
-fn notes_module() -> &'static ModuleDeclaration {
+pub(super) fn notes_module() -> &'static ModuleDeclaration {
     module(
         "notes",
         vec![
@@ -71,36 +71,36 @@ fn notes_module() -> &'static ModuleDeclaration {
     )
 }
 
-fn member_id(last: u8) -> Id {
+pub(super) fn member_id(last: u8) -> Id {
     let mut random = [0x3c; 10];
     random[9] = last;
     Id::new_v7(noon(), random).expect("after the epoch")
 }
 
-fn ella() -> Id {
+pub(super) fn ella() -> Id {
     member_id(1)
 }
 
-fn noe() -> Id {
+pub(super) fn noe() -> Id {
     member_id(2)
 }
 
-fn task() -> Id {
+pub(super) fn task() -> Id {
     member_id(9)
 }
 
 /// A clock that moves only when a test moves it, and distinct random bits for each new id.
-struct TestStamper {
+pub(super) struct TestStamper {
     now: UtcMillis,
     issued: u32,
 }
 
 impl TestStamper {
-    fn at(now: UtcMillis) -> Self {
+    pub(super) fn at(now: UtcMillis) -> Self {
         Self { now, issued: 0 }
     }
 
-    fn later(&mut self, millis: i64) {
+    pub(super) fn later(&mut self, millis: i64) {
         self.now = UtcMillis::from_millis(self.now.as_millis() + millis).expect("in range");
     }
 }
@@ -118,7 +118,7 @@ impl Stamper for TestStamper {
     }
 }
 
-fn own_action(member: Id) -> Call {
+pub(super) fn own_action(member: Id) -> Call {
     Call {
         principal: Principal::Member,
         source: Source::Member(member),
@@ -131,7 +131,7 @@ fn own_action(member: Id) -> Call {
 }
 
 /// What a session of taint `session` consumed: nothing, or an `external` meals datum.
-fn consumed_in(session: Taint) -> Consumed {
+pub(super) fn consumed_in(session: Taint) -> Consumed {
     match session {
         Taint::Trusted => Consumed::NOTHING,
         Taint::External => Consumed {
@@ -142,7 +142,7 @@ fn consumed_in(session: Taint) -> Consumed {
 }
 
 /// An AI task acting for Ella, its writes unapproved.
-fn ai_task(session: Taint) -> Call {
+pub(super) fn ai_task(session: Taint) -> Call {
     Call {
         principal: Principal::AiTask,
         source: Source::AiTask(task()),
@@ -158,7 +158,7 @@ fn ai_task(session: Taint) -> Call {
 }
 
 /// An AI task's request Ella approved.
-fn approved(session: Taint, written: &[&str], drafts: &[&str]) -> Call {
+pub(super) fn approved(session: Taint, written: &[&str], drafts: &[&str]) -> Call {
     Call {
         principal: Principal::AiTask,
         source: Source::AiTask(task()),
@@ -175,7 +175,7 @@ fn approved(session: Taint, written: &[&str], drafts: &[&str]) -> Call {
 }
 
 /// The source a call of `principal` stamps, `member(<member>)` for a member's own action.
-fn source_for(principal: Principal, member: Id) -> Source {
+pub(super) fn source_for(principal: Principal, member: Id) -> Source {
     match principal {
         Principal::Member | Principal::Cli => Source::Member(member),
         Principal::AiTask => Source::AiTask(task()),
@@ -188,7 +188,7 @@ fn source_for(principal: Principal, member: Id) -> Source {
     }
 }
 
-fn unapproved(principal: Principal, source: Source) -> Call {
+pub(super) fn unapproved(principal: Principal, source: Source) -> Call {
     Call {
         principal,
         source,
@@ -203,11 +203,23 @@ fn unapproved(principal: Principal, source: Source) -> Call {
     }
 }
 
-fn note(title: &str) -> Vec<(&'static str, Value)> {
+pub(super) fn note(title: &str) -> Vec<(&'static str, Value)> {
     vec![("title", text(title)), ("status", text("open"))]
 }
 
-/// Runs `body` as one call and returns its outcome.
+/// A new invocation for each call the tests make: a call id no other call of the test run has.
+pub(super) fn new_invocation(_call: &Call) -> Invocation {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let issued = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = |prefix: u8| {
+        let mut random = [prefix; 10];
+        random[6..].copy_from_slice(&issued.to_be_bytes());
+        Id::new_v7(noon(), random).expect("after the epoch")
+    };
+    Invocation { call_id: id(0xca) }
+}
+
+/// Runs `body` as one call, under a call id of its own, and returns its outcome.
 fn call<T>(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
@@ -215,11 +227,14 @@ fn call<T>(
     stamper: &mut TestStamper,
     body: impl FnOnce(&mut dyn Records) -> Result<T, WriteError>,
 ) -> Result<CallOutcome<T>, RecordError> {
-    run_call(handle, module, call, stamper, body)
+    match run_call(handle, module, call, &new_invocation(call), stamper, body)? {
+        CallResult::Committed(outcome) => Ok(outcome),
+        CallResult::Deduplicated(_) => panic!("a call of a new call id always runs"),
+    }
 }
 
 /// Inserts one record in a call of its own, which must commit.
-fn insert_one(
+pub(super) fn insert_one(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
     by: &Call,
@@ -265,7 +280,7 @@ fn stored_taint(handle: &Handle<Write>, table: &str, id: Id) -> String {
 }
 
 /// The stored `taint` and `text_taint` of a record.
-fn stored_labels(handle: &Handle<Write>, table: &str, id: Id) -> (String, String) {
+pub(super) fn stored_labels(handle: &Handle<Write>, table: &str, id: Id) -> (String, String) {
     match stored(handle, table, id, "text_taint") {
         SqlValue::Text(text_taint) => (stored_taint(handle, table, id), text_taint),
         other => panic!("a text taint is text: {other:?}"),
@@ -752,6 +767,7 @@ fn a_panic_during_a_call_rolls_it_back() {
             &handle,
             module,
             &own_action(ella()),
+            &new_invocation(&own_action(ella())),
             &mut failing_clock,
             |records| {
                 records.insert("notes", &note("Pommes"), &[])?;
@@ -1097,7 +1113,7 @@ fn inputs_of_other_files_and_the_updated_record_count() {
     );
 }
 
-fn provenance(
+pub(super) fn provenance(
     id: Id,
     taint: Taint,
     author: Option<Id>,

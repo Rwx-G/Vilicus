@@ -176,8 +176,10 @@ pub fn available_space(directory: &Path) -> Result<u64> {
 
 /// Clears what an interrupted migration of `file` may have left: its working directory, a cold
 /// copy that is still the live file (a crash between the link and the rename of the swap), and
-/// a cold copy's sidecar without its copy.
-fn clear_interrupted(file: &ModuleFile) -> Result<()> {
+/// what a cold copy may have beside it without the copy itself. A working copy may hold records
+/// shredded in the live file since (D132), so the Core clears every file it is about to serve,
+/// not only those with a migration pending; [`copy_for_migration`] does it first too.
+pub fn clear_interrupted_migration(file: &ModuleFile) -> Result<()> {
     remove_working_directory(&working_directory(file))?;
     let live = fs::metadata(file.path())?;
     for copy in cold_copies(file)? {
@@ -304,7 +306,7 @@ pub fn copy_for_migration(
     key: &[u8; 32],
     verified_backup: Option<VerifiedBackup>,
 ) -> Result<MigrationCopy> {
-    clear_interrupted(file)?;
+    clear_interrupted_migration(file)?;
     if let Some(backup) = verified_backup {
         remove_covered_cold_copies(file, backup)?;
     }

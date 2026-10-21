@@ -195,10 +195,13 @@ impl Registry {
     /// Migrates each of `files` forward to the code's versions, on a copy swapped in on success
     /// (AD-23, D84), and returns what became of each, in order.
     ///
-    /// The caller has closed every connection to these files. The run does not start, and
-    /// touches nothing, when a file belongs to no registered module, or when a data directory
-    /// has less free space than twice the largest file it would copy there
-    /// ([`MigrationRunError::InsufficientSpace`]). Then, per file: a migration whose SQL differs
+    /// The caller has closed every connection to these files, and gives every file it is about
+    /// to serve, pending or not: what an interrupted migration left beside any of them (a
+    /// working copy, which may hold records shredded since, D132, or a cold copy that is still
+    /// the live file) is cleared first. The run does not start, and touches nothing else, when a
+    /// file belongs to no registered module, or when a data directory has less free space than
+    /// twice the largest file it would copy there ([`MigrationRunError::InsufficientSpace`]).
+    /// Then, per file: a migration whose SQL differs
     /// from its frozen hash, or a file that recorded other frozen hashes for the versions it is
     /// at, fails before anything runs; a file newer than the code is left alone; a file with
     /// pending migrations is migrated on a copy (Core track first, then the module's), the copy
@@ -320,10 +323,17 @@ impl Registry {
     }
 }
 
-/// Where `target` stands: the code's own migrations checked against their frozen hashes, then
-/// the file's versions and its record of frozen hashes, read on a read handle closed at once.
+/// Where `target` stands, once what an interrupted migration left beside it is cleared: the
+/// code's own migrations checked against their frozen hashes, then the file's versions and its
+/// record of frozen hashes, read on a read handle closed at once.
 fn standing(module: &'static ModuleDeclaration, target: &FileToMigrate<'_>) -> Standing {
     let file = target.file;
+    if let Err(error) = maintenance::clear_interrupted_migration(file) {
+        return Standing::Failed(
+            InstanceAdminAlert::migration_failed(file, MigrationTrack::Module, 0),
+            MigrationError::Storage(error),
+        );
+    }
     let migrations = match frozen_migrations(module) {
         Ok(migrations) => migrations,
         Err(error) => {

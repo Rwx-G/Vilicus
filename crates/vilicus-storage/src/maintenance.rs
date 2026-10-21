@@ -27,7 +27,8 @@ use crate::handle::{self, Setup};
 
 pub use crate::migration_copy::{
     ColdCopy, MAX_COLD_COPIES, MigrationCopy, SchemaVersions, Swapped, VerifiedBackup,
-    available_space, cold_copies, copy_for_migration, remove_covered_cold_copies,
+    available_space, clear_interrupted_migration, cold_copies, copy_for_migration,
+    remove_covered_cold_copies,
 };
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {

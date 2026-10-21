@@ -267,6 +267,33 @@ fn a_pending_file_is_migrated_on_a_copy_and_its_original_kept_cold() {
     );
 }
 
+/// Review of Story 3.7, L2: what a crash in a migration left beside a file (its working copy,
+/// which may hold a record shredded in the live file since, D132, and a cold copy that is still
+/// the live file) is cleared by the next run for every file, not only those with a migration
+/// pending; the current file is served as it is.
+#[test]
+fn a_run_clears_interrupted_migrations_of_every_file() {
+    let v1 = shop(None, false);
+    let dir = scratch_dir("migrate-leftovers");
+    let file = create_at(v1, &dir, Partition::Household);
+    let working = dir.join("shop.household.db.migration");
+    fs::create_dir(&working).expect("a working directory");
+    fs::copy(file.path(), working.join("shop.household.db")).expect("a working copy");
+    let stale = dir.join(format!("shop.household.db.pre-{CORE}.0"));
+    fs::hard_link(file.path(), &stale).expect("a link the swap left");
+    let before = fs::read(file.path()).expect("read");
+    let outcomes = registry_of(vec![v1])
+        .migrate_files(&[target(&file)])
+        .expect("run");
+    assert!(
+        matches!(outcomes.as_slice(), [FileMigration::Current]),
+        "{outcomes:?}"
+    );
+    assert!(!working.exists(), "the working copy is gone");
+    assert!(!stale.exists(), "the stale link is gone");
+    assert_eq!(fs::read(file.path()).expect("read"), before);
+}
+
 /// AC4: one file's migration fails, here on a back-fill the declaration refuses in that file
 /// only; its previous file stays in place untouched, the Core still refuses to start the module
 /// on it, and the alert names the file and the version; the other file of the run is migrated.

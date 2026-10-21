@@ -104,7 +104,8 @@ pub struct CallOutcome<T> {
 /// [`Records`] it receives, and the transaction commits only when `body` returns `Ok` and no
 /// write of the call was refused; otherwise it is rolled back and nothing of the call is stored.
 /// A refused write ends the call with that refusal, whatever `body` returns after it; an error
-/// `body` returns of its own is [`RecordError::Aborted`].
+/// `body` returns of its own is [`RecordError::Aborted`]. A panic, in `body` or in the Core while
+/// it writes, rolls the transaction back as it unwinds; catching it is the caller's (AD-9).
 ///
 /// The call is refused before any write when its authority does not fit its principal
 /// ([`RecordError::InconsistentCall`]).

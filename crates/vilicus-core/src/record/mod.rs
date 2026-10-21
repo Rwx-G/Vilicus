@@ -482,24 +482,44 @@ fn declared_table(
 }
 
 /// Runs `body` in a `BEGIN IMMEDIATE` transaction on `handle`, committed when it succeeds. When
-/// `body` or the `COMMIT` fails, the transaction is rolled back, so a refused write leaves the
-/// file as it was and the handle never stays inside the transaction.
+/// `body` or the `COMMIT` fails, or `body` panics, the transaction is rolled back, so a refused
+/// write leaves the file as it was and the handle never stays inside the transaction.
 fn in_write_transaction<T>(
     handle: &Handle<Write>,
     body: impl FnOnce() -> Result<T, RecordError>,
 ) -> Result<T, RecordError> {
     handle.execute_batch("BEGIN IMMEDIATE")?;
-    let outcome = body().and_then(|value| {
-        handle.execute_batch("COMMIT")?;
-        Ok(value)
-    });
-    if outcome.is_err() {
-        // The rollback's own failure is not reported: the refusal says why nothing was written.
-        // A COMMIT that failed on a deferred constraint leaves the transaction open, which this
-        // rollback ends.
-        let _ = handle.execute_batch("ROLLBACK");
+    let transaction = OpenTransaction { handle, open: true };
+    let value = body()?;
+    transaction.commit()?;
+    Ok(value)
+}
+
+/// A write transaction that rolls back when it is dropped uncommitted: on a refusal, on a failed
+/// `COMMIT` (a deferred constraint leaves the transaction open) and while a panic unwinds, in
+/// module code or in the Core's, so the next call on the handle starts from the committed file
+/// (AD-9).
+struct OpenTransaction<'a> {
+    handle: &'a Handle<Write>,
+    open: bool,
+}
+
+impl OpenTransaction<'_> {
+    fn commit(mut self) -> Result<(), RecordError> {
+        self.handle.execute_batch("COMMIT")?;
+        self.open = false;
+        Ok(())
     }
-    outcome
+}
+
+impl Drop for OpenTransaction<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            // The rollback's own failure is not reported: the refusal, or the panic, says why
+            // nothing was written.
+            let _ = self.handle.execute_batch("ROLLBACK");
+        }
+    }
 }
 
 /// The fields a write gives, each declared once in `table`, each value within its declaration

@@ -633,6 +633,87 @@ fn a_refused_write_rolls_back_the_whole_call() {
     assert_eq!(rows(&handle, "SELECT id FROM notes").len(), 2);
 }
 
+/// A clock that panics on its second reading: a panic inside the Core, after a write of the call.
+struct PanickingStamper(TestStamper, u32);
+
+impl Stamper for PanickingStamper {
+    fn now(&mut self) -> UtcMillis {
+        self.1 += 1;
+        assert!(self.1 < 2, "the clock failed");
+        self.0.now()
+    }
+
+    fn id_random(&mut self) -> [u8; 10] {
+        self.0.id_random()
+    }
+}
+
+/// Story 3.5 review, minor 5 (AD-9): a panic in the module's code or in the Core's, after a
+/// write of the call, rolls the call's transaction back as it unwinds: nothing of the call is
+/// visible on the handle, no transaction stays open, and the next call commits alone.
+#[test]
+fn a_panic_during_a_call_rolls_it_back() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "panic");
+    let mut stamper = TestStamper::at(noon());
+    let empty = content(&handle);
+    let in_module = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        call(
+            &handle,
+            module,
+            &own_action(ella()),
+            &mut stamper,
+            |records| -> Result<(), WriteError> {
+                records.insert("notes", &note("Pommes"), &[])?;
+                panic!("a module bug");
+            },
+        )
+    }));
+    assert!(
+        in_module.is_err(),
+        "the module's panic unwinds out of the call"
+    );
+    assert_eq!(
+        content(&handle),
+        empty,
+        "the write before the panic is gone"
+    );
+    let mut failing_clock = PanickingStamper(TestStamper::at(noon()), 0);
+    let in_core = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_call(
+            &handle,
+            module,
+            &own_action(ella()),
+            &mut failing_clock,
+            |records| {
+                records.insert("notes", &note("Pommes"), &[])?;
+                records.insert("notes", &note("Poires"), &[])
+            },
+        )
+    }));
+    assert!(in_core.is_err(), "the Core's panic unwinds out of the call");
+    assert_eq!(
+        content(&handle),
+        empty,
+        "the first write of the call is gone"
+    );
+    assert!(
+        handle.execute_batch("COMMIT").is_err(),
+        "no transaction is left open to commit"
+    );
+    insert_one(
+        &handle,
+        module,
+        &own_action(ella()),
+        &mut stamper,
+        "notes",
+        &note("Prunes"),
+        &[],
+    );
+    let titles = rows(&handle, "SELECT title FROM notes");
+    assert_eq!(titles, [[SqlValue::Text("Prunes".into())]]);
+}
+
 /// A call whose authority does not fit its principal is refused before any write.
 #[test]
 fn a_call_whose_authority_does_not_fit_its_principal_is_refused() {

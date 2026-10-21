@@ -2,7 +2,7 @@
 title: 'SQLCipher storage layer and connection authorizer'
 epic: 3
 story: 1
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [AD-5, AD-9, D2, D3, I6, E11, FR-23, D126, D127, D132, D136, E17, DC-75]

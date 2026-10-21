@@ -62,6 +62,10 @@ pub enum FileMigration {
         to: SchemaVersions,
         /// The cold copy of the original.
         cold_copy: ColdCopy,
+        /// What failed after the migrated file was put in place, if anything: the sync of the
+        /// directory or the removal of the working copy. A warning for the logs, not a failed
+        /// migration; the next migration of the file clears the working copy.
+        cleanup: Option<vilicus_storage::Error>,
     },
     /// The file could not be migrated (AD-54 `failed migration`): the previous file stays in
     /// place untouched, at its versions, which the Core's open refuses as pending, so the module
@@ -262,10 +266,11 @@ impl Registry {
                     },
                 );
         match swapped {
-            Ok(cold_copy) => FileMigration::Migrated {
+            Ok(swapped) => FileMigration::Migrated {
                 from,
                 to,
-                cold_copy,
+                cold_copy: swapped.cold_copy,
+                cleanup: swapped.cleanup,
             },
             Err(error) => {
                 let (track, version) = failed_step(&error, from);

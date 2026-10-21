@@ -252,6 +252,17 @@ fn closed_live_state(file: &ModuleFile) -> Result<LiveState> {
     Ok(state)
 }
 
+/// A migrated copy swapped into place: the file is migrated.
+#[derive(Debug)]
+pub struct Swapped {
+    /// The cold copy of the original.
+    pub cold_copy: ColdCopy,
+    /// What failed after the rename that put the migrated file in place, if anything: the sync
+    /// of the directory or the removal of the working copy, which the next migration of the file
+    /// clears. The file is migrated either way.
+    pub cleanup: Option<Error>,
+}
+
 /// The working copy of a migration (AD-23, D84): a copy of the live file, made on the Core
 /// maintenance path, which the caller migrates and checks through the handles of
 /// [`file`](Self::file), then swaps into place or discards. Dropped without either, it is
@@ -351,12 +362,14 @@ impl MigrationCopy {
     /// directory synced. `<file>` names the original until the rename and the migrated file after
     /// it, never nothing; `<file>.epoch` is not touched, since a migration keeps the key and its
     /// epoch. A failure before the rename leaves the original as the file, without its cold copy,
-    /// and the working copy to discard.
+    /// and the working copy to discard. Once the rename is done the file is migrated, whatever
+    /// follows: a failure of the directory sync or of the working copy's removal is returned in
+    /// [`Swapped::cleanup`], not as an error.
     ///
     /// The checks narrow the window in which a connection could open on the live file between
     /// the copy and the rename, they do not close it: only the Core, which serializes every
     /// connection to a file on its writer thread (AD-9), keeps one from opening there.
-    pub fn swap_in(mut self) -> Result<ColdCopy> {
+    pub fn swap_in(mut self) -> Result<Swapped> {
         let swapped = self.swap();
         if swapped.is_ok() {
             self.done = true;
@@ -364,7 +377,7 @@ impl MigrationCopy {
         swapped
     }
 
-    fn swap(&self) -> Result<ColdCopy> {
+    fn swap(&self) -> Result<Swapped> {
         let copy_wal = self.copy.wal_path();
         if !handle::wal_of_is_empty(&copy_wal)? {
             return Err(Error::WalNotEmpty(copy_wal));
@@ -402,9 +415,13 @@ impl MigrationCopy {
             file::sync_parent(&cold.path)?;
             return Err(error);
         }
-        file::sync_parent(&self.live.path())?;
-        remove_working_directory(self.copy.directory())?;
-        Ok(cold)
+        let cleanup = file::sync_parent(&self.live.path())
+            .and_then(|()| remove_working_directory(self.copy.directory()))
+            .err();
+        Ok(Swapped {
+            cold_copy: cold,
+            cleanup,
+        })
     }
 
     /// Discards the working copy, its WAL and sidecar included, and its directory; the live file

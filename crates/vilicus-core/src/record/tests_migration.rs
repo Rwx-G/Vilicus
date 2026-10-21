@@ -217,6 +217,7 @@ fn a_pending_file_is_migrated_on_a_copy_and_its_original_kept_cold() {
             from,
             to,
             cold_copy,
+            cleanup: None,
         },
     ] = outcomes.as_slice()
     else {

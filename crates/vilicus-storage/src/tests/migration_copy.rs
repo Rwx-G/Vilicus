@@ -69,7 +69,9 @@ fn migrate_on_copy(file: &ModuleFile, count: usize, backup: Option<VerifiedBacku
         .apply_module_migrations(&frozen_all(&MIGRATIONS[..count]))
         .expect("migrate the copy");
     migration.close().expect("close");
-    copy.swap_in().expect("swap in")
+    let swapped = copy.swap_in().expect("swap in");
+    assert!(swapped.cleanup.is_none(), "{:?}", swapped.cleanup);
+    swapped.cold_copy
 }
 
 /// AC2 and AC8: the copy is made from the checkpointed file, migrated on a migration handle set
@@ -110,7 +112,7 @@ fn a_migration_runs_on_a_copy_swapped_in_with_the_original_as_its_cold_copy() {
         "the live file is untouched"
     );
 
-    let cold = copy.swap_in().expect("swap in");
+    let cold = copy.swap_in().expect("swap in").cold_copy;
     assert_eq!(cold.versions(), versions(CORE, 0));
     assert_eq!(
         cold.path(),
@@ -396,9 +398,34 @@ fn an_interrupted_migration_is_cleared_by_the_next_one() {
         .apply_module_migrations(&frozen_all(&MIGRATIONS[..1]))
         .expect("migrate");
     migration.close().expect("close");
-    let cold = copy.swap_in().expect("swap in");
+    let cold = copy.swap_in().expect("swap in").cold_copy;
     assert_eq!(fs::read(cold.path()).expect("read"), live);
     assert_eq!(module_version(&file), 1);
+}
+
+/// Review of Story 3.7, L1: once the migrated copy is renamed over the file, the file is
+/// migrated; a working copy that cannot be removed afterwards, here because its directory holds
+/// what the removal does not take, is reported as the swap's cleanup, not as a failed swap, and
+/// the next migration of the file clears it.
+#[test]
+fn a_cleanup_that_fails_after_the_rename_is_not_a_failed_swap() {
+    let dir = scratch_dir("copy-cleanup");
+    let file = create_module_file(&dir);
+    let copy = copy_for_migration(&file, &KEY, None).expect("copy");
+    let mut migration = open::<Migration>(copy.file(), &KEY).expect("open the copy");
+    migration
+        .apply_module_migrations(&frozen_all(&MIGRATIONS[..1]))
+        .expect("migrate the copy");
+    migration.close().expect("close");
+    let blocker = copy.file().directory().join("blocker");
+    fs::create_dir(&blocker).expect("a directory the removal does not take");
+    let swapped = copy.swap_in().expect("the file is swapped in");
+    assert!(swapped.cleanup.is_some());
+    assert_eq!(module_version(&file), 1);
+    assert_eq!(swapped.cold_copy.versions(), versions(CORE, 0));
+    fs::remove_dir(&blocker).expect("unblock");
+    migrate_on_copy(&file, 2, None);
+    assert!(!dir.join("fixture.household.db.migration").exists());
 }
 
 /// AC6: the free space of the file system that holds the files, as `statvfs` reports it.

@@ -176,9 +176,10 @@ pub enum RecordError {
         /// The table.
         table: &'static str,
     },
-    /// The call's authority does not fit its principal: a member's own action from a principal
-    /// other than `Member` or `Cli`, an approval for a principal other than `AiTask` or
-    /// `Plugin`, or a `Member` or `Cli` call that is not the member's own action.
+    /// The call does not hold together: a member's own action from a principal other than
+    /// `Member` or `Cli`, an approval for a principal other than `AiTask` or `Plugin`, a `Member`
+    /// or `Cli` call that is not the member's own action, or a `source` its principal does not
+    /// produce.
     InconsistentCall,
     /// The module's code ended the call with its own error; the call was rolled back.
     Aborted(WriteError),

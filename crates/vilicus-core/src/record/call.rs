@@ -138,21 +138,42 @@ pub fn run_call<T>(
     })
 }
 
-/// Refuses a call whose authority does not fit its principal: only `Member` and `Cli` act as a
-/// member themselves, and always do; only a request of a token principal is approved.
+/// Refuses a call whose authority or source does not fit its principal: only `Member` and `Cli`
+/// act as a member themselves, and always do; only a request of a token principal is approved;
+/// and the `source` stamped on its records is one the principal produces.
 fn check_call(call: &Call) -> Result<(), RecordError> {
     let acts_as_member = matches!(call.principal, Principal::Member | Principal::Cli);
-    let consistent = match call.authority {
+    let authority_fits = match call.authority {
         Authority::OwnAction { .. } => acts_as_member,
         Authority::Approved { .. } => {
             matches!(call.principal, Principal::AiTask | Principal::Plugin)
         }
         Authority::Unapproved { .. } => !acts_as_member,
     };
-    if consistent {
+    if authority_fits && source_fits(call) {
         Ok(())
     } else {
         Err(RecordError::InconsistentCall)
+    }
+}
+
+/// The closed mapping from a principal to the `source` its records carry (spine conventions,
+/// `source` vocabulary): a member's own action is `member(<that member>)`; a scheduled task acts
+/// as an AI task; a plugin delivers its own content or an import; every other principal stamps
+/// its own kind. `system` and `module(<name>)` are the Core's own writes, which no call makes.
+fn source_fits(call: &Call) -> bool {
+    match (call.principal, &call.source) {
+        (Principal::Member | Principal::Cli, Source::Member(source)) => {
+            matches!(call.authority, Authority::OwnAction { member } if member == *source)
+        }
+        (Principal::AiTask, Source::AiTask(_) | Source::ScheduledTask(_))
+        | (Principal::Plugin, Source::Plugin(_) | Source::Import(_))
+        | (Principal::Event, Source::Event(_))
+        | (Principal::Rule, Source::Rule(_))
+        | (Principal::Display, Source::Display(_))
+        | (Principal::Adapter, Source::Adapter(_))
+        | (Principal::Playbook, Source::Playbook(_)) => true,
+        _ => false,
     }
 }
 

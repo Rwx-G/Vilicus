@@ -10,7 +10,7 @@ use vilicus_module_api::{
     ValueError, WriteError, Written,
 };
 use vilicus_storage::{Handle, SqlValue, Write};
-use vilicus_types::{Id, Principal, Rev, Source, Taint, UtcMillis};
+use vilicus_types::{Id, ModuleName, Principal, Rev, Source, Taint, UtcMillis};
 
 use super::envelope::data_types_text;
 use super::tests::{content, module, noon, open_new, rows, text};
@@ -151,6 +151,20 @@ fn approved(session: Taint, written: &[&str], drafts: &[&str]) -> Call {
             drafts: drafts.iter().map(|text| (*text).to_owned()).collect(),
         },
         read: Vec::new(),
+    }
+}
+
+/// The source a call of `principal` stamps, `member(<member>)` for a member's own action.
+fn source_for(principal: Principal, member: Id) -> Source {
+    match principal {
+        Principal::Member | Principal::Cli => Source::Member(member),
+        Principal::AiTask => Source::AiTask(task()),
+        Principal::Plugin => Source::Plugin(task()),
+        Principal::Event => Source::Event(task()),
+        Principal::Rule => Source::Rule(task()),
+        Principal::Display => Source::Display(task()),
+        Principal::Adapter => Source::Adapter(task()),
+        Principal::Playbook => Source::Playbook(task()),
     }
 }
 
@@ -726,12 +740,15 @@ fn a_call_whose_authority_does_not_fit_its_principal_is_refused() {
         let token = matches!(principal, Principal::AiTask | Principal::Plugin);
         let mut own = own_action(ella());
         own.principal = *principal;
+        own.source = source_for(*principal, ella());
         cases.push((own, member));
         let mut approval = approved(Taint::External, &[], &[]);
         approval.principal = *principal;
+        approval.source = source_for(*principal, ella());
         cases.push((approval, token));
         let mut none = ai_task(Taint::Trusted);
         none.principal = *principal;
+        none.source = source_for(*principal, ella());
         cases.push((none, !member));
     }
     let before = content(&handle);
@@ -752,6 +769,75 @@ fn a_call_whose_authority_does_not_fit_its_principal_is_refused() {
                 by.principal
             );
         }
+    }
+    assert_eq!(
+        content(&handle),
+        before,
+        "every call named an unknown input"
+    );
+}
+
+/// Story 3.5 review, nit 9: a call whose `source` its principal does not produce is refused
+/// before any write, over every principal and every kind of source; a member's own action
+/// carries that member's source, not another's.
+#[test]
+fn a_call_whose_source_does_not_fit_its_principal_is_refused() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "source-fit");
+    let mut stamper = TestStamper::at(noon());
+    let sources = [
+        Source::Member(ella()),
+        Source::Member(noe()),
+        Source::System,
+        Source::Module(ModuleName::from_static("notes")),
+        Source::Plugin(task()),
+        Source::Import(task()),
+        Source::AiTask(task()),
+        Source::ScheduledTask(task()),
+        Source::Playbook(task()),
+        Source::Event(task()),
+        Source::Rule(task()),
+        Source::Display(task()),
+        Source::Adapter(task()),
+    ];
+    let fits = |principal: Principal, source: &Source| match principal {
+        Principal::Member | Principal::Cli => *source == Source::Member(ella()),
+        Principal::AiTask => matches!(source, Source::AiTask(_) | Source::ScheduledTask(_)),
+        Principal::Plugin => matches!(source, Source::Plugin(_) | Source::Import(_)),
+        Principal::Event => matches!(source, Source::Event(_)),
+        Principal::Rule => matches!(source, Source::Rule(_)),
+        Principal::Display => matches!(source, Source::Display(_)),
+        Principal::Adapter => matches!(source, Source::Adapter(_)),
+        Principal::Playbook => matches!(source, Source::Playbook(_)),
+    };
+    let before = content(&handle);
+    for principal in Principal::ALL {
+        let mut accepted = 0;
+        for source in &sources {
+            let mut by = if matches!(principal, Principal::Member | Principal::Cli) {
+                own_action(ella())
+            } else {
+                ai_task(Taint::Trusted)
+            };
+            by.principal = *principal;
+            by.source = source.clone();
+            let outcome = call(&handle, module, &by, &mut stamper, |records| {
+                records.insert("notes", &note("Pommes"), &[member_id(77)])
+            });
+            if fits(*principal, source) {
+                accepted += 1;
+                assert!(
+                    matches!(outcome, Err(RecordError::UnknownInput { .. })),
+                    "{principal:?} {source}"
+                );
+            } else {
+                assert!(
+                    matches!(outcome, Err(RecordError::InconsistentCall)),
+                    "{principal:?} {source}"
+                );
+            }
+        }
+        assert!(accepted > 0, "{principal:?} produces a source");
     }
     assert_eq!(
         content(&handle),
@@ -781,7 +867,7 @@ fn a_derived_write_without_inputs_is_refused() {
         if matches!(principal, Principal::Member | Principal::Cli) {
             continue;
         }
-        let by = unapproved(*principal, Source::Rule(task()));
+        let by = unapproved(*principal, source_for(*principal, ella()));
         let outside = matches!(principal, Principal::Plugin | Principal::Adapter);
         let before = content(&handle);
         let inserted = call(&handle, module, &by, &mut stamper, |records| {
@@ -1422,7 +1508,7 @@ fn stored_taint_is_never_member() {
         };
         let by = Call {
             principal,
-            source: Source::System,
+            source: source_for(principal, member),
             session,
             authority,
             read: Vec::new(),

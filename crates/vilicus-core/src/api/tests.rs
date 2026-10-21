@@ -17,7 +17,7 @@ use vilicus_types::{
 };
 
 use super::{ApiFiles, Apis, read_scope};
-use crate::availability::{ModuleStates, Stage};
+use crate::availability::{ModuleStates, Stage, StageRefused};
 use crate::boundary::{Boundary, HandlerError};
 use crate::record::tests::{KEY, create_sql, noon, scratch_dir};
 use crate::record::tests_call::{TestStamper, ella, noe};
@@ -963,5 +963,73 @@ fn a_delete_journals_its_inputs_combined_with_the_reads_of_the_call() {
             "rev after {:?}",
             row.rev_after
         );
+    }
+}
+
+/// The fixture's read connections, which, when a read asks for the household's `shop` file, try
+/// to put that file to `migrating` as a bring-up would, and note whether the states let them.
+struct MigratingDuringRead<'a> {
+    readers: &'a Readers,
+    states: &'a ModuleStates,
+    tried: RefCell<Vec<Result<(), StageRefused>>>,
+}
+
+impl ApiFiles for MigratingDuringRead<'_> {
+    fn reader(&self, module: &ModuleName, partition: Partition) -> Option<&Handle<Read>> {
+        if module.as_str() == "shop" && partition == Partition::Household {
+            let tried =
+                self.states
+                    .set_stage(self.states.generation(partition), module, Stage::Migrating);
+            self.tried.borrow_mut().push(tried);
+        }
+        self.readers.reader(module, partition)
+    }
+}
+
+/// Review item 3 (D149, D151): a read is registered as a call on the file it reads for as long as
+/// it lasts, so the file cannot be put to re-keying or migrating meanwhile; once the read ended,
+/// it can.
+#[test]
+fn a_read_keeps_the_file_it_reads_from_being_migrated() {
+    let fixture = Fixture::new("api-in-flight");
+    let item = fixture.items[1];
+    let migrating = MigratingDuringRead {
+        readers: &fixture.readers,
+        states: &fixture.states,
+        tried: RefCell::new(Vec::new()),
+    };
+    let boundary = Boundary {
+        apis: Some(Apis {
+            registry: fixture.registry,
+            files: &migrating,
+        }),
+        ..fixture.boundary()
+    };
+    let notes = fixture.writer("notes", Partition::Household);
+    let declaration = fixture
+        .registry
+        .module(notes.file().module())
+        .expect("registered");
+    let result = boundary.run(
+        notes,
+        declaration,
+        &rule(),
+        &fixture.invocation(),
+        &mut *fixture.stamper.borrow_mut(),
+        |records| records.read("shop", "item", item),
+    );
+    assert!(matches!(result, Ok(CallResult::Committed(_))), "{result:?}");
+    assert_eq!(
+        migrating.tried.take(),
+        [Err(StageRefused::CallsInFlight { calls: 1 })]
+    );
+    let shop = ModuleName::from_static("shop");
+    let generation = fixture.states.generation(Partition::Household);
+    for stage in [Stage::ReKeying, Stage::Migrating] {
+        assert_eq!(fixture.states.set_stage(generation, &shop, stage), Ok(()));
+        fixture
+            .states
+            .set_stage(generation, &shop, Stage::Ready)
+            .expect("the writer is released");
     }
 }

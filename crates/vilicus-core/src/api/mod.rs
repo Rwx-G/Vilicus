@@ -6,12 +6,14 @@
 //! [`Records::read`](vilicus_module_api::Records::read), naming the module, the query and the
 //! record's id; the Core then checks, in this order, that the module offers the query, that the
 //! query's access list names the calling module, and, for each partition in the call's scope,
-//! that the file read is ready (AD-54, the gate [`ModuleStates::check`]) before it looks the
-//! record up on a read connection of that file ([`ApiFiles`]), never on its writer, so the read
-//! never re-enters another writer thread (AD-9). A file that is not ready is skipped: a record is
+//! that the file read is ready (AD-54) before it looks the record up on a read connection of that
+//! file ([`ApiFiles`]), never on its writer, so the read never re-enters another writer thread
+//! (AD-9). The read is registered as a call on the file read for as long as it lasts, so the file
+//! is not re-keyed or migrated meanwhile (D151). A file that is not ready is skipped: a record is
 //! found in another file of the scope, ids being unique, and a record found nowhere else is
-//! answered `module_unavailable`, with the skipped file's retry class. The scope of a call is the partition of its own file,
-//! and the household partition when that file is a member's personal partition ([`read_scope`]):
+//! answered `module_unavailable`, with the skipped file's retry class. The scope of a call is the
+//! partition of its own file, and the household partition when that file is a member's personal
+//! partition ([`read_scope`]):
 //! a household or home call reads no member's partition, and no call reads another member's
 //! (FR-19), so the Core never asks for a file outside the scope.
 //!
@@ -26,7 +28,7 @@ use vilicus_module_api::{ModuleDeclaration, ReadRecord};
 use vilicus_storage::{Handle, Partition, Read};
 use vilicus_types::{Id, ModuleName};
 
-use crate::availability::{ModuleStates, ModuleUnavailable};
+use crate::availability::{CallTicket, ModuleStates, ModuleUnavailable};
 use crate::record::{RecordError, RecordProvenance, read_record};
 use crate::registry::Registry;
 
@@ -128,10 +130,16 @@ pub(crate) fn read(
     let name = ModuleName::from_static(target.name);
     let mut unavailable = None;
     for partition in read_scope(partition) {
-        if let Err(state) = reads.states.check(&name, partition) {
-            unavailable.get_or_insert(state);
-            continue;
-        }
+        let _reading = match reads.states.begin_call(&name, partition) {
+            Ok(ticket) => Reading {
+                states: reads.states,
+                ticket: Some(ticket),
+            },
+            Err(state) => {
+                unavailable.get_or_insert(state);
+                continue;
+            }
+        };
         let Some(handle) = reads.apis.files.reader(&name, partition).filter(|handle| {
             *handle.file().module() == name && handle.file().partition() == partition
         }) else {
@@ -160,4 +168,19 @@ pub(crate) fn read(
         Some(unavailable) => RecordError::Unavailable(unavailable),
         None => RecordError::RecordNotFound { table: table.name },
     })
+}
+
+/// A read registered as a call on the file it reads, ended when dropped, on return and while a
+/// panic unwinds alike: while it lasts, the file is neither re-keyed nor migrated.
+struct Reading<'a> {
+    states: &'a ModuleStates,
+    ticket: Option<CallTicket>,
+}
+
+impl Drop for Reading<'_> {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            self.states.end_call(ticket);
+        }
+    }
 }

@@ -171,7 +171,8 @@ fn blob(id: Id) -> SqlValue {
 /// new, the second at the unlock after its release, which keeps the record written in between and
 /// adds the note field and the journal kind; each run records the frozen hash of what it ran, the
 /// second keeps the file at version 1 as its cold copy, and the event written at version 1 is
-/// delivered only once the file is migrated (AD-29).
+/// delivered only once the file is migrated (AD-29). Before the second, the lock closed the
+/// file's write and read connections: no WAL or shared-memory file remains beside it.
 #[test]
 fn the_two_migrations_run_in_sequence_through_the_runner() {
     let mut house = House::new("migrations", &REGISTRY, &[Partition::Household]);
@@ -209,6 +210,19 @@ fn the_two_migrations_run_in_sequence_through_the_runner() {
     );
     let item = added.committed().changes[0].id;
     house.lock(Partition::Household);
+    // The lock closed the file's write and read connections, so the migration's copy finds no WAL
+    // or shared-memory file beside it (D149).
+    for module in [NAME, crate::reader::NAME] {
+        let path = house.file(module, Partition::Household).path();
+        for suffix in ["-wal", "-shm"] {
+            let mut beside = path.clone().into_os_string();
+            beside.push(suffix);
+            assert!(
+                !std::path::Path::new(&beside).exists(),
+                "{beside:?} outlived the lock"
+            );
+        }
+    }
 
     let report = house.unlock(Partition::Household, &REGISTRY, HANDLERS);
     every_file_is_ready(&report);

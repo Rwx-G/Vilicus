@@ -9,7 +9,9 @@ use vilicus_module_api::{
 use vilicus_storage::{
     AuthorityKind, CallKey, EffectIntent, Handle, JournalEntry, JournalRow, SqlValue, Write,
 };
-use vilicus_types::{DataType, EffectiveTaint, Id, Principal, Rev, Source, Taint, UtcMillis};
+use vilicus_types::{
+    CallId, DataType, EffectiveTaint, Id, Principal, Rev, Source, Taint, UtcMillis,
+};
 
 use super::envelope::{self, data_types_text};
 use super::journal;
@@ -111,13 +113,19 @@ pub trait Stamper {
     fn id_random(&mut self) -> [u8; 10];
 }
 
-/// What one call is beside who makes it: the id its caller gave it, and, for a consumer of an
-/// event, the delivery it reacts to.
+/// What one call is beside who makes it: the id its caller gave it, the hash of its request, and,
+/// for a consumer of an event, the delivery it reacts to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Invocation {
-    /// The call's id, a UUIDv7 the caller generated before any queueing (AD-28): a second call of
-    /// the same principal and `source` with this id, against the same file, is this call.
-    pub call_id: Id,
+    /// The call's id: a UUIDv7 the caller generated before any queueing (AD-28), or a rule
+    /// action's name-based id (AD-39). A second call of the same principal and `source` with this
+    /// id, against the same file, is this call.
+    pub call_id: CallId,
+    /// The SHA-256 of the request's canonical encoding (AD-13), when the pipeline gives it: a
+    /// second call of the same key whose journaled or outbox rows carry another hash reuses the
+    /// call id for another request and is refused ([`RecordError::CallIdReused`]), rather than
+    /// answered with the first call's result. Either side without a hash compares as equal.
+    pub request_hash: Option<[u8; 32]>,
     /// The event an `Event` call consumes; `None` for every other principal (AD-27).
     pub delivery: Option<EventDelivery>,
 }
@@ -233,7 +241,7 @@ pub fn run_call<T>(
         call_id: invocation.call_id,
     };
     in_write_transaction(handle, || {
-        if let Some(earlier) = earlier_call(handle, module, &key)? {
+        if let Some(earlier) = earlier_call(handle, module, &key, invocation.request_hash)? {
             return Ok(CallResult::Deduplicated(earlier));
         }
         if let Some(delivery) = invocation.delivery
@@ -246,6 +254,7 @@ pub fn run_call<T>(
             module,
             call,
             key,
+            request_hash: invocation.request_hash,
             stamper,
             changes: Vec::new(),
             effects: Vec::new(),
@@ -277,16 +286,26 @@ pub fn run_call<T>(
 }
 
 /// The result of the earlier call of `key` in this file, if one wrote there: its journal rows and
-/// its effect intents.
+/// its effect intents. A row whose request hash differs from `request_hash`, both being given,
+/// is another request under the same call id, refused with [`RecordError::CallIdReused`].
 fn earlier_call(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
     key: &CallKey<'_>,
+    request_hash: Option<[u8; 32]>,
 ) -> Result<Option<EarlierCall>, RecordError> {
     let journal = handle.journaled_call(key)?;
     let effects = handle.effects_of_call(key)?;
     if journal.is_empty() && effects.is_empty() {
         return Ok(None);
+    }
+    let other_request = |earlier: &Option<Vec<u8>>| matches!((earlier, request_hash), (Some(earlier), Some(hash)) if earlier.as_slice() != hash);
+    if journal.iter().any(|row| other_request(&row.request_hash))
+        || effects
+            .iter()
+            .any(|effect| other_request(&effect.request_hash))
+    {
+        return Err(RecordError::CallIdReused);
     }
     Ok(Some(EarlierCall {
         changes: journal
@@ -355,6 +374,18 @@ fn journaled_authority(authority: &Authority) -> (AuthorityKind, Option<Id>) {
     }
 }
 
+/// Whom an `unknown` outcome of the call's effect is reported to: the member the journal names;
+/// when it names none (a rule, an event, an adapter, a display, a plugin acting for nobody), every
+/// adult of the household, the call's author first when it has one, the adult who validated the
+/// rule or playbook.
+fn effect_report(authority: &Authority) -> (Option<Id>, Option<Id>) {
+    match (journaled_authority(authority), authority) {
+        ((_, Some(member)), _) => (Some(member), None),
+        ((_, None), Authority::Unapproved { author, .. }) => (None, *author),
+        ((_, None), _) => (None, None),
+    }
+}
+
 /// True when what the call says it consumed fits its principal and its session taint: only an AI
 /// or plugin session consumes, and a tainted session consumed something other than `trusted`,
 /// which carries data types, while an untainted one consumed nothing `external`
@@ -405,6 +436,7 @@ struct CallRecords<'a> {
     module: &'static ModuleDeclaration,
     call: &'a Call,
     key: CallKey<'a>,
+    request_hash: Option<[u8; 32]>,
     stamper: &'a mut dyn Stamper,
     changes: Vec<RecordChange>,
     effects: Vec<RequestedEffect>,
@@ -637,6 +669,7 @@ impl CallRecords<'_> {
         let (authority, member) = journaled_authority(&self.call.authority);
         self.handle.append_journal(&JournalEntry {
             call: self.key,
+            request_hash: self.request_hash.as_ref().map(<[u8; 32]>::as_slice),
             authority,
             member,
             change_index: u32::try_from(self.changes.len())
@@ -656,7 +689,9 @@ impl CallRecords<'_> {
 
     /// Writes an effect intent of the call to the outbox (AD-28): the effect `effect`, an
     /// identifier, with its business idempotency key, which may not be empty, and its parameters.
-    /// An intent the file already holds under that key is returned instead, unchanged.
+    /// The same request of the same caller that the file already holds under that name and key
+    /// is returned instead, unchanged; any other request under them is
+    /// [`RecordError::EffectConflict`].
     fn request(
         &mut self,
         effect: &str,
@@ -669,16 +704,24 @@ impl CallRecords<'_> {
         let now = self.stamper.now();
         let id =
             Id::new_v7(now, self.stamper.id_random()).map_err(|_| RecordError::InvalidEffect)?;
-        let (_, member) = journaled_authority(&self.call.authority);
-        let intent = self.handle.append_effect(&EffectIntent {
-            call: self.key,
-            member,
-            id,
-            effect,
-            idempotency_key,
-            payload,
-            created_at: now,
-        })?;
+        let (member, first_adult) = effect_report(&self.call.authority);
+        let intent = self
+            .handle
+            .append_effect(&EffectIntent {
+                call: self.key,
+                request_hash: self.request_hash.as_ref().map(<[u8; 32]>::as_slice),
+                member,
+                first_adult,
+                id,
+                effect,
+                idempotency_key,
+                payload,
+                created_at: now,
+            })
+            .map_err(|error| match error {
+                vilicus_storage::Error::EffectConflict => RecordError::EffectConflict,
+                other => RecordError::Storage(other),
+            })?;
         if intent.id == id {
             self.effects.push(RequestedEffect {
                 id,
@@ -914,8 +957,10 @@ fn write_error(error: &RecordError) -> WriteError {
         RecordError::UnknownInput { table } => WriteError::UnknownInput { table },
         RecordError::UndeclaredDataType { table } => WriteError::UndeclaredDataType { table },
         RecordError::InvalidEffect => WriteError::InvalidEffect,
+        RecordError::EffectConflict => WriteError::EffectConflict,
         RecordError::IdChanged { .. }
         | RecordError::InvalidJournal
+        | RecordError::CallIdReused
         | RecordError::InvalidEnvelope { .. }
         | RecordError::UnknownVocabulary { .. }
         | RecordError::InvalidLabel { .. }

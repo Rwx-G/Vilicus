@@ -3,7 +3,10 @@
 //! A handler that needs an outbound effect does not perform it: the Core writes an effect intent
 //! to `_outbox`, with its business idempotency key, in the transaction of the call's writes, and
 //! performs it after the commit; the outcome is recorded in the same row, in a transaction of its
-//! own. An intent is `pending` until an outcome is recorded, then `done`, `failed` or `unknown`.
+//! own. An intent is unique in its file by its effect's name and its idempotency key: the same
+//! request of the same caller is the earlier intent, any other request of that pair is a conflict.
+//! A `done` intent blocks a repeat only while its row is kept, which the outbox's retention
+//! (Story 3.8) decides. An intent is `pending` until an outcome is recorded, then `done`, `failed` or `unknown`.
 //! Only a `failed` intent goes back to `pending`, keeping its id and key, so only the Core
 //! retries and always with the same key; an `unknown` one is reported to the member and never
 //! retried. A consumer of an event records the event id in `_consumed` in the transaction of its
@@ -16,7 +19,7 @@ use core::fmt;
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{OptionalExtension, Row};
-use vilicus_types::{EffectOutcome, Id, Principal, UtcMillis};
+use vilicus_types::{CallId, EffectOutcome, Id, Principal, UtcMillis};
 
 use crate::error::{Error, Result};
 use crate::handle::{self, Handle, Write};
@@ -80,15 +83,20 @@ impl fmt::Display for EffectState {
 pub struct EffectIntent<'a> {
     /// The call that needs the effect.
     pub call: CallKey<'a>,
+    /// The hash of the call's request, when the pipeline gives one.
+    pub request_hash: Option<&'a [u8]>,
     /// The member an `unknown` outcome is reported to: the one who made or approved the call, or
     /// the one it acts for.
     pub member: Option<Id>,
+    /// When no member is named, the adult an `unknown` outcome is reported to first, before every
+    /// other adult of the household: the adult who validated the rule or playbook of the call.
+    pub first_adult: Option<Id>,
     /// The intent's id, a UUIDv7 the Core stamped.
     pub id: Id,
     /// The effect, as the module names it.
     pub effect: &'a str,
-    /// The business idempotency key, derived from the effect's parameters (AD-28): an intent
-    /// with the key of an earlier one is that one.
+    /// The business idempotency key, derived from the effect's parameters (AD-28): with the
+    /// effect's name, it identifies the intent in the file.
     pub idempotency_key: &'a [u8],
     /// The parameters of the effect, as the module encoded them.
     pub payload: &'a [u8],
@@ -102,11 +110,17 @@ pub struct EffectRow {
     /// The intent's id.
     pub id: Id,
     /// The id of the call that wrote it.
-    pub call_id: Id,
+    pub call_id: CallId,
+    /// The hash of that call's request, if it carried one.
+    pub request_hash: Option<Vec<u8>>,
     /// The principal of that call.
     pub principal: Principal,
+    /// The `source` of that call.
+    pub source: String,
     /// The member an `unknown` outcome is reported to.
     pub member: Option<Id>,
+    /// When no member is named, the adult an `unknown` outcome is reported to first.
+    pub first_adult: Option<Id>,
     /// The effect.
     pub effect: String,
     /// The business idempotency key.
@@ -124,14 +138,22 @@ pub struct EffectRow {
 }
 
 const EFFECT_COLUMNS: &str = "id, call_id, principal, member, name, idempotency_key, payload, \
-                              state, attempts, created_at, updated_at";
+                              state, attempts, created_at, updated_at, request_hash, source, \
+                              first_adult";
 
 fn effect_row(row: &Row<'_>) -> Result<EffectRow> {
     let principal: String = row.get(2)?;
     let state: String = row.get(7)?;
+    let call_id: Vec<u8> = row.get(1)?;
     Ok(EffectRow {
         id: read_id(row, 0, "_outbox", "id")?,
-        call_id: read_id(row, 1, "_outbox", "call_id")?,
+        call_id: <[u8; 16]>::try_from(call_id.as_slice())
+            .ok()
+            .and_then(|bytes| CallId::from_bytes(bytes).ok())
+            .ok_or(malformed("_outbox", "call_id"))?,
+        request_hash: row.get(11)?,
+        source: row.get(12)?,
+        first_adult: read_optional_id(row, 13, "_outbox", "first_adult")?,
         principal: Principal::ALL
             .iter()
             .copied()
@@ -178,9 +200,11 @@ fn effect_by_id(connection: &rusqlite::Connection, id: Id) -> Result<EffectRow> 
 
 impl Handle<Write> {
     /// Writes `intent` to `_outbox` as `pending`, inside the write transaction the caller holds,
-    /// so the intent commits with the call's writes or not at all (AD-28). When an intent with
-    /// the same idempotency key is already in the file, nothing is written and that intent is
-    /// returned: the same effect is never requested twice, whatever call asks again. Fails with
+    /// so the intent commits with the call's writes or not at all (AD-28). When an intent of the
+    /// same effect name and idempotency key is already in the file, nothing is written: if it
+    /// carries the same payload and was requested by the same principal and `source`, it is
+    /// returned, the same effect never requested twice; otherwise the request fails with
+    /// [`Error::EffectConflict`], since one key cannot name two effects. Fails with
     /// [`Error::NoTransaction`] outside a transaction, and refuses an empty key or effect name
     /// with [`Error::InvalidEffectIntent`].
     pub fn append_effect(&self, intent: &EffectIntent<'_>) -> Result<EffectRow> {
@@ -191,16 +215,27 @@ impl Handle<Write> {
             require_transaction(connection)?;
             let earlier = query_effects(
                 connection,
-                "idempotency_key = ?1",
-                &[SqlValue::Blob(intent.idempotency_key.to_vec())],
+                "name = ?1 AND idempotency_key = ?2",
+                &[
+                    SqlValue::Text(intent.effect.to_owned()),
+                    SqlValue::Blob(intent.idempotency_key.to_vec()),
+                ],
             )?;
             if let Some(earlier) = earlier.into_iter().next() {
-                return Ok(earlier);
+                let same_request = earlier.payload == intent.payload
+                    && earlier.principal == intent.call.principal
+                    && earlier.source == intent.call.source.to_string();
+                return if same_request {
+                    Ok(earlier)
+                } else {
+                    Err(Error::EffectConflict)
+                };
             }
             connection.execute(
                 "INSERT INTO _outbox (id, kind, call_id, principal, source, member, name, \
-                 idempotency_key, payload, state, attempts, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?11)",
+                 idempotency_key, payload, state, attempts, created_at, updated_at, \
+                 request_hash, first_adult) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?11, ?12, ?13)",
                 rusqlite::params![
                     intent.id.to_bytes(),
                     EFFECT_KIND,
@@ -213,6 +248,8 @@ impl Handle<Write> {
                     intent.payload,
                     EffectState::Pending.as_str(),
                     intent.created_at.as_millis(),
+                    intent.request_hash,
+                    intent.first_adult.map(Id::to_bytes),
                 ],
             )?;
             effect_by_id(connection, intent.id)

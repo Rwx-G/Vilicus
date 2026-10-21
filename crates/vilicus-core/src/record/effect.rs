@@ -9,14 +9,28 @@ use vilicus_types::{EffectOutcome, Id, UtcMillis};
 
 use super::RecordError;
 
-/// An effect whose outcome is unknown: the Core reports it to the member, and never performs it
-/// again on its own.
+/// An effect whose outcome is unknown: the Core reports it, and never performs it again on its
+/// own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnknownEffect {
     /// The effect intent.
     pub intent: Id,
-    /// The member to report to: the one who made or approved the call, or the one it acts for.
-    pub member: Option<Id>,
+    /// Whom the report goes to.
+    pub report_to: ReportTo,
+}
+
+/// Whom the report of an `unknown` effect goes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportTo {
+    /// The member who made or approved the call, or the one it acts for.
+    Member(Id),
+    /// Every adult of the household, when the call names no member (a rule, an event, an
+    /// adapter, a display, a plugin acting for nobody): `first`, the adult who validated the
+    /// rule or playbook, before the others, when the call has one.
+    EveryAdult {
+        /// The adult reported to first.
+        first: Option<Id>,
+    },
 }
 
 /// The effect intents of the file the Core is to perform, in commit order: every `pending` one.
@@ -34,10 +48,16 @@ pub fn record_effect_outcome(
     at: UtcMillis,
 ) -> Result<Option<UnknownEffect>, RecordError> {
     let recorded = handle.record_effect_outcome(intent, outcome, at)?;
+    let report_to = match recorded.member {
+        Some(member) => ReportTo::Member(member),
+        None => ReportTo::EveryAdult {
+            first: recorded.first_adult,
+        },
+    };
     Ok(
         (recorded.state == EffectState::Unknown).then_some(UnknownEffect {
             intent: recorded.id,
-            member: recorded.member,
+            report_to,
         }),
     )
 }

@@ -10,7 +10,7 @@
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Row};
-use vilicus_types::{Id, Principal, Rev, Source, UtcMillis};
+use vilicus_types::{CallId, Id, Principal, Rev, Source, UtcMillis};
 
 use crate::error::{Error, Result};
 use crate::handle::{self, Handle, Write};
@@ -18,15 +18,17 @@ use crate::handle::{self, Handle, Write};
 /// The key a call is deduplicated by (AD-26, AD-28): its principal, the `source` its records
 /// carry, which names who acts within the principal's kind (the member of a `Member` or `Cli`
 /// call, the task of an `AiTask` call, the rule of a `Rule` call), and the `call_id` its caller
-/// generated. Two calls of one key are one call.
+/// generated. Two calls of one key are one call. The sources of one principal kind are separate
+/// spaces: a plugin's `plugin(id)` and `import(id)` calls, or an AI task's `ai_task(id)` and
+/// `scheduled_task(id)` calls, never deduplicate each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CallKey<'a> {
     /// The principal.
     pub principal: Principal,
     /// The `source` the call's records carry.
     pub source: &'a Source,
-    /// The id the caller gave the call, a UUIDv7 (AD-28).
-    pub call_id: Id,
+    /// The id the caller gave the call (AD-28, AD-39).
+    pub call_id: CallId,
 }
 
 impl CallKey<'_> {
@@ -74,6 +76,9 @@ impl AuthorityKind {
 pub struct JournalEntry<'a> {
     /// The call.
     pub call: CallKey<'a>,
+    /// The hash of the call's request, when the pipeline gives one: a later call of the same key
+    /// with another hash is refused rather than deduplicated.
+    pub request_hash: Option<&'a [u8]>,
     /// Whether a member made or approved the call.
     pub authority: AuthorityKind,
     /// The member who made or approved the call, or the one it acts for.
@@ -103,6 +108,8 @@ pub struct JournalEntry<'a> {
 pub struct JournalRow {
     /// The row's position in the file's journal, in commit order.
     pub seq: i64,
+    /// The hash of the call's request, if the call carried one.
+    pub request_hash: Option<Vec<u8>>,
     /// Whether a member made or approved the call.
     pub authority: AuthorityKind,
     /// The member who made or approved the call, or the one it acts for.
@@ -206,6 +213,7 @@ fn journal_row(row: &Row<'_>) -> Result<JournalRow> {
     let authority: String = row.get(1)?;
     Ok(JournalRow {
         seq: row.get(0)?,
+        request_hash: row.get(12)?,
         authority: AuthorityKind::from_name(&authority)
             .ok_or(malformed("_journal", "authority"))?,
         member: read_optional_id(row, 2, "_journal", "member")?,
@@ -243,8 +251,8 @@ impl Handle<Write> {
             connection.execute(
                 "INSERT INTO _journal (call_id, principal, source, authority, member, \
                  change_index, record_table, record_id, rev_before, rev_after, image_before, \
-                 image_after, inputs, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 image_after, inputs, created_at, request_hash) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params_from_iter([
                     call_id,
                     principal,
@@ -260,6 +268,7 @@ impl Handle<Write> {
                     optional_blob(entry.image_after),
                     SqlValue::Blob(entry.inputs.to_vec()),
                     SqlValue::Integer(entry.created_at.as_millis()),
+                    optional_blob(entry.request_hash),
                 ]),
             )?;
             Ok(())
@@ -273,7 +282,8 @@ impl Handle<Write> {
         self.under_core_policy(|connection| {
             let mut statement = connection.prepare(
                 "SELECT seq, authority, member, change_index, record_table, record_id, \
-                 rev_before, rev_after, image_before, image_after, inputs, created_at \
+                 rev_before, rev_after, image_before, image_after, inputs, created_at, \
+                 request_hash \
                  FROM _journal WHERE principal = ?1 AND source = ?2 AND call_id = ?3 \
                  ORDER BY change_index",
             )?;

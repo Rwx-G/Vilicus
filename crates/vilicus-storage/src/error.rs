@@ -120,6 +120,9 @@ pub enum Error {
     },
     /// An effect intent without an effect name or an idempotency key (AD-28).
     InvalidEffectIntent,
+    /// An effect intent of a name and idempotency key the file holds for another payload or
+    /// another caller: one key names one effect (AD-28).
+    EffectConflict,
     /// No effect intent of that id is in the file.
     EffectNotFound,
     /// An outcome was recorded for an effect intent that is not pending.
@@ -241,6 +244,8 @@ impl fmt::Display for Error {
             Self::InvalidEffectIntent => {
                 formatter.write_str("an effect intent needs an effect name and an idempotency key")
             }
+            Self::EffectConflict => formatter
+                .write_str("an effect intent of that name and key exists for another request"),
             Self::EffectNotFound => formatter.write_str("no such effect intent"),
             Self::EffectNotPending { state } => {
                 write!(formatter, "the effect intent is {state}, not pending")
@@ -286,6 +291,7 @@ impl fmt::Debug for Error {
             Self::NoTransaction => "NoTransaction",
             Self::MalformedCoreRow { .. } => "MalformedCoreRow",
             Self::InvalidEffectIntent => "InvalidEffectIntent",
+            Self::EffectConflict => "EffectConflict",
             Self::EffectNotFound => "EffectNotFound",
             Self::EffectNotPending { .. } => "EffectNotPending",
             Self::EffectNotRetryable { .. } => "EffectNotRetryable",

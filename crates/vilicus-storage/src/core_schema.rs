@@ -12,12 +12,14 @@
 //! - `_vocabulary`, the labels an adult confirmed for the file's reviewed vocabularies (D104,
 //!   D146);
 //! - `_journal`, one row per record a call changed: the call's key (principal, `source`,
-//!   `call_id`), its authority and member, the record's table, id and revisions, its before and
-//!   after images and the provenance of the write's inputs, written in the transaction of the
-//!   write (AD-26, AD-28, FR-29). The unique index on the call's key and the change's position
-//!   holds every call to one set of rows;
+//!   `call_id`), the hash of its request when the pipeline gives one, its authority and member,
+//!   the record's table, id and revisions, its before and after images and the provenance of the
+//!   write's inputs, written in the transaction of the write (AD-26, AD-28, FR-29). The unique
+//!   index on the call's key and the change's position holds every call to one set of rows;
 //! - `_outbox`, the event rows and effect intents a call commits with its writes (AD-10, AD-28),
-//!   an effect intent unique by its business idempotency key;
+//!   with the call's key and request hash, the member to report an `unknown` outcome to, or the
+//!   adult to report it to first when no member is named; an effect intent is unique by its
+//!   effect's name and its business idempotency key;
 //! - `_consumed`, the event ids a consumer recorded in the transaction of its effect (AD-10);
 //! - `_dead_letter`, the events a consumer kept failing (AD-29);
 //! - `_record_keys`, the wrapped record key of each record that has one (`doc/architecture.md`
@@ -40,6 +42,7 @@ pub(crate) const CORE_MIGRATIONS: &[&str] = &["CREATE TABLE _vocabulary (
     CREATE TABLE _journal (
         seq INTEGER PRIMARY KEY,
         call_id BLOB NOT NULL,
+        request_hash BLOB,
         principal TEXT NOT NULL,
         source TEXT NOT NULL,
         authority TEXT NOT NULL,
@@ -60,11 +63,13 @@ pub(crate) const CORE_MIGRATIONS: &[&str] = &["CREATE TABLE _vocabulary (
         id BLOB NOT NULL UNIQUE,
         kind TEXT NOT NULL,
         call_id BLOB NOT NULL,
+        request_hash BLOB,
         principal TEXT NOT NULL,
         source TEXT NOT NULL,
         member BLOB,
+        first_adult BLOB,
         name TEXT NOT NULL,
-        idempotency_key BLOB UNIQUE,
+        idempotency_key BLOB,
         payload BLOB NOT NULL,
         state TEXT NOT NULL,
         attempts INTEGER NOT NULL,
@@ -72,6 +77,7 @@ pub(crate) const CORE_MIGRATIONS: &[&str] = &["CREATE TABLE _vocabulary (
         updated_at INTEGER NOT NULL
     ) STRICT;
     CREATE INDEX _outbox_call ON _outbox (principal, source, call_id);
+    CREATE UNIQUE INDEX _outbox_effect ON _outbox (name, idempotency_key);
     CREATE TABLE _consumed (
         event_id BLOB NOT NULL,
         consumer TEXT NOT NULL,

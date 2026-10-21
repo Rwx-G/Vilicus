@@ -173,6 +173,7 @@ fn new_writer(label: &str) -> crate::Handle<Write> {
 fn entry<'a>(call: CallKey<'a>, change_index: u32, record: Id, at: UtcMillis) -> JournalEntry<'a> {
     JournalEntry {
         call,
+        request_hash: None,
         authority: AuthorityKind::OwnAction,
         member: Some(id(1)),
         change_index,
@@ -194,7 +195,7 @@ fn a_journal_row_joins_the_callers_transaction_and_is_read_back_by_its_call() {
     let call = CallKey {
         principal: Principal::Member,
         source: &source,
-        call_id: id(9),
+        call_id: id(9).into(),
     };
     assert!(matches!(
         writer.append_journal(&entry(call, 0, id(20), at(0))),
@@ -236,7 +237,7 @@ fn a_journal_row_joins_the_callers_transaction_and_is_read_back_by_its_call() {
             ..call
         },
         CallKey {
-            call_id: id(8),
+            call_id: id(8).into(),
             ..call
         },
     ] {
@@ -262,7 +263,7 @@ fn the_purge_deletes_the_rows_before_the_cutoff_and_empties_the_wal() {
         let call = CallKey {
             principal: Principal::Member,
             source: &source,
-            call_id,
+            call_id: call_id.into(),
         };
         writer.execute_batch("BEGIN IMMEDIATE").expect("begin");
         writer
@@ -278,7 +279,7 @@ fn the_purge_deletes_the_rows_before_the_cutoff_and_empties_the_wal() {
             .journaled_call(&CallKey {
                 principal: Principal::Member,
                 source: &source,
-                call_id,
+                call_id: Id::into(call_id),
             })
             .expect("read")
             .len()
@@ -303,7 +304,7 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
     let call = CallKey {
         principal: Principal::Member,
         source: &source,
-        call_id: id(1),
+        call_id: id(1).into(),
     };
     let file = writer.file().clone();
     for (index, created_at) in [(0, at(0)), (1, at(0))] {
@@ -311,7 +312,7 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
         writer
             .append_journal(&entry(
                 CallKey {
-                    call_id: id(index + 1),
+                    call_id: id(index + 1).into(),
                     ..call
                 },
                 0,
@@ -352,7 +353,7 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
     writer
         .append_journal(&entry(
             CallKey {
-                call_id: id(5),
+                call_id: id(5).into(),
                 ..call
             },
             0,
@@ -376,7 +377,9 @@ fn the_purge_retries_its_checkpoint_until_a_reader_ends() {
 fn intent<'a>(call: CallKey<'a>, intent_id: Id, key: &'a [u8]) -> EffectIntent<'a> {
     EffectIntent {
         call,
+        request_hash: None,
         member: Some(id(1)),
+        first_adult: None,
         id: intent_id,
         effect: "send_message",
         idempotency_key: key,
@@ -392,7 +395,7 @@ fn an_effect_intent_commits_with_its_call_once_per_key() {
     let call = CallKey {
         principal: Principal::AiTask,
         source: &source,
-        call_id: id(9),
+        call_id: id(9).into(),
     };
     assert!(matches!(
         writer.append_effect(&intent(call, id(50), b"key-1")),
@@ -458,7 +461,7 @@ fn outcomes_are_recorded_and_only_a_failed_intent_is_retried() {
     let call = CallKey {
         principal: Principal::AiTask,
         source: &source,
-        call_id: id(9),
+        call_id: id(9).into(),
     };
     writer.execute_batch("BEGIN IMMEDIATE").expect("begin");
     for (intent_id, key) in [
@@ -583,4 +586,81 @@ fn a_wrapped_record_key_is_stored_once_and_destroyed_with_a_checkpoint() {
         writer.destroy_wrapped_record_key(id(80)),
         Err(Error::RecordKeyNotFound)
     ));
+}
+
+/// Story 3.6 review, M2: an intent is identified by its effect's name and its key. The same key
+/// under two names is two intents; under one name, the same request of the same caller is the
+/// earlier intent, and another payload or another caller is a conflict, with nothing written.
+#[test]
+fn an_effect_key_names_one_effect_of_one_caller() {
+    let writer = new_writer("effect-conflicts");
+    let source = Source::AiTask(id(7));
+    let other_source = Source::AiTask(id(8));
+    let call = CallKey {
+        principal: Principal::AiTask,
+        source: &source,
+        call_id: id(9).into(),
+    };
+    writer.execute_batch("BEGIN IMMEDIATE").expect("begin");
+    let first = writer
+        .append_effect(&intent(call, id(90), b"order-1"))
+        .expect("intent");
+    let other_name = writer
+        .append_effect(&EffectIntent {
+            effect: "cancel_order",
+            ..intent(call, id(91), b"order-1")
+        })
+        .expect("the same key under another name is another intent");
+    assert_ne!(other_name.id, first.id);
+    let same = writer
+        .append_effect(&EffectIntent {
+            call: CallKey {
+                call_id: id(10).into(),
+                ..call
+            },
+            ..intent(call, id(92), b"order-1")
+        })
+        .expect("the same request of the same caller");
+    assert_eq!(same, first);
+    let conflicts = [
+        EffectIntent {
+            payload: b"other parameters",
+            ..intent(call, id(93), b"order-1")
+        },
+        EffectIntent {
+            call: CallKey {
+                source: &other_source,
+                ..call
+            },
+            ..intent(call, id(94), b"order-1")
+        },
+        EffectIntent {
+            call: CallKey {
+                principal: Principal::Plugin,
+                ..call
+            },
+            ..intent(call, id(95), b"order-1")
+        },
+    ];
+    for conflict in conflicts {
+        let outcome = writer.append_effect(&conflict);
+        assert!(
+            matches!(outcome, Err(Error::EffectConflict)),
+            "{conflict:?}: {outcome:?}"
+        );
+    }
+    writer.execute_batch("COMMIT").expect("commit");
+    let names: Vec<(String, Vec<u8>)> = writer
+        .effects_in_state(EffectState::Pending)
+        .expect("read")
+        .into_iter()
+        .map(|row| (row.effect, row.idempotency_key))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("send_message".to_owned(), b"order-1".to_vec()),
+            ("cancel_order".to_owned(), b"order-1".to_vec()),
+        ]
+    );
 }

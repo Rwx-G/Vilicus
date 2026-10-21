@@ -75,8 +75,10 @@ pub trait Records {
     /// and `idempotency_key`, a key the module derives from those parameters, so the same
     /// effect asked twice has the same key (AD-28). The request is written in the call's
     /// transaction and the Core performs the effect after the commit; it is never performed when
-    /// the call is rolled back. A request whose key the file already holds is that earlier
-    /// request: nothing is written, and its id is returned. Returns the id of the request.
+    /// the call is rolled back. A request of a name and key the file already holds, with the same
+    /// payload and from the same caller, is that earlier request: nothing is written, and its id
+    /// is returned; with another payload or from another caller it is
+    /// [`WriteError::EffectConflict`]. Returns the id of the request.
     fn request_effect(
         &mut self,
         effect: &str,
@@ -172,6 +174,9 @@ pub enum WriteError {
     },
     /// An effect request whose effect is not an identifier, or whose idempotency key is empty.
     InvalidEffect,
+    /// An effect request of a name and key the file holds for another request: one key names one
+    /// effect, with one payload, of one caller.
+    EffectConflict,
     /// An earlier write of this call was refused; the call is rolled back.
     CallRefused,
     /// The Core could not complete the write; the call is rolled back.
@@ -220,6 +225,9 @@ impl fmt::Display for WriteError {
             }
             Self::InvalidEffect => {
                 formatter.write_str("an effect request needs an identifier and an idempotency key")
+            }
+            Self::EffectConflict => {
+                formatter.write_str("an effect of that name and key exists for another request")
             }
             Self::CallRefused => formatter.write_str("an earlier write of this call was refused"),
             Self::Failed => formatter.write_str("the write failed and the call was rolled back"),

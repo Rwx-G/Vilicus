@@ -218,7 +218,8 @@ pub(super) fn new_invocation(call: &Call) -> Invocation {
         Id::new_v7(noon(), random).expect("after the epoch")
     };
     Invocation {
-        call_id: id(0xca),
+        call_id: id(0xca).into(),
+        request_hash: None,
         delivery: (call.principal == Principal::Event).then(|| EventDelivery {
             event: id(0xe7),
             consumer: "notes",

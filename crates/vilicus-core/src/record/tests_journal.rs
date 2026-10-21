@@ -19,8 +19,8 @@ use super::tests_call::{
     provenance, task,
 };
 use super::{
-    Authority, Call, CallResult, Consumed, EventDelivery, Invocation, RecordError, decode_row,
-    effects_to_perform, record_effect_outcome, retry_failed_effect, run_call,
+    Authority, Call, CallResult, Consumed, EventDelivery, Invocation, RecordError, ReportTo,
+    decode_row, effects_to_perform, record_effect_outcome, retry_failed_effect, run_call,
 };
 
 fn key<'a>(call: &'a Call, invocation: &Invocation) -> CallKey<'a> {
@@ -496,8 +496,8 @@ fn an_effect_intent_commits_with_its_call_and_its_outcome_is_recorded_after() {
         .expect("record")
         .expect("an unknown outcome is reported");
     assert_eq!(
-        (unknown.intent, unknown.member),
-        (requested[2], Some(ella()))
+        (unknown.intent, unknown.report_to),
+        (requested[2], ReportTo::Member(ella()))
     );
     assert!(
         retry_failed_effect(&handle, requested[2], later).is_err(),
@@ -553,8 +553,9 @@ fn a_consumers_call_records_its_event_with_its_effect() {
         event: member_id(60),
         consumer: "notes",
     };
-    let invocation = |call_id| Invocation {
-        call_id,
+    let invocation = |call_id: Id| Invocation {
+        call_id: call_id.into(),
+        request_hash: None,
         delivery: Some(delivery),
     };
     let refused = run_call(
@@ -605,7 +606,8 @@ fn a_consumers_call_records_its_event_with_its_effect() {
     assert!(!ran.get());
     assert_eq!(content(&handle), after);
     let other_consumer = Invocation {
-        call_id: member_id(64),
+        call_id: member_id(64).into(),
+        request_hash: None,
         delivery: Some(EventDelivery {
             consumer: "digest",
             ..delivery
@@ -620,7 +622,8 @@ fn a_consumers_call_records_its_event_with_its_effect() {
     ));
 
     let without_delivery = Invocation {
-        call_id: member_id(65),
+        call_id: member_id(65).into(),
+        request_hash: None,
         delivery: None,
     };
     let by_member = own_action(ella());
@@ -699,4 +702,205 @@ fn an_image_holds_the_tables_columns_and_never_a_wrapped_key() {
             );
         }
     }
+}
+
+/// Story 3.6 review, decision (a): a call id reused for another request, both carrying a request
+/// hash, is refused rather than answered with the first result; the same hash, or a side without
+/// one, is the same call.
+#[test]
+fn a_call_id_reused_for_another_request_is_refused() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "call-id-reused");
+    let mut stamper = TestStamper::at(noon());
+    let by = own_action(ella());
+    let first = Invocation {
+        request_hash: Some([1; 32]),
+        ..new_invocation(&by)
+    };
+    let body = |records: &mut dyn Records| records.insert("notes", &note("Pommes"), &[]);
+    assert!(matches!(
+        run_call(&handle, module, &by, &first, &mut stamper, body).expect("commits"),
+        CallResult::Committed(_)
+    ));
+    let after = content(&handle);
+    let reused = Invocation {
+        request_hash: Some([2; 32]),
+        ..first
+    };
+    let outcome = run_call(&handle, module, &by, &reused, &mut stamper, body);
+    assert!(
+        matches!(outcome, Err(RecordError::CallIdReused)),
+        "{outcome:?}"
+    );
+    assert_eq!(content(&handle), after);
+    for same in [
+        first,
+        Invocation {
+            request_hash: None,
+            ..first
+        },
+    ] {
+        assert!(matches!(
+            run_call(&handle, module, &by, &same, &mut stamper, body).expect("answered"),
+            CallResult::Deduplicated(_)
+        ));
+    }
+}
+
+/// Story 3.6 review, M2, through the typed API: a second request of one name and key with
+/// another payload is a conflict that rolls its call back; the same key under another name is
+/// another effect.
+#[test]
+fn an_effect_request_conflicting_with_an_earlier_one_is_refused() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "effect-conflict");
+    let mut stamper = TestStamper::at(noon());
+    let by = own_action(ella());
+    let request = |payload: &'static [u8], effect: &'static str| {
+        move |records: &mut dyn Records| records.request_effect(effect, b"order-7", payload)
+    };
+    for (payload, effect) in [(&b"one"[..], "send_message"), (b"one", "cancel_order")] {
+        assert!(matches!(
+            run_call(
+                &handle,
+                module,
+                &by,
+                &new_invocation(&by),
+                &mut stamper,
+                request(payload, effect)
+            )
+            .expect("commits"),
+            CallResult::Committed(_)
+        ));
+    }
+    let after = content(&handle);
+    let conflict = run_call(
+        &handle,
+        module,
+        &by,
+        &new_invocation(&by),
+        &mut stamper,
+        |records| {
+            records.insert("notes", &note("Pommes"), &[])?;
+            records.request_effect("send_message", b"order-7", b"two")
+        },
+    );
+    assert!(
+        matches!(conflict, Err(RecordError::EffectConflict)),
+        "{conflict:?}"
+    );
+    assert_eq!(content(&handle), after, "the call is rolled back");
+    let from_noe = own_action(noe());
+    let other_caller = run_call(
+        &handle,
+        module,
+        &from_noe,
+        &new_invocation(&from_noe),
+        &mut stamper,
+        request(b"one", "send_message"),
+    );
+    assert!(
+        matches!(other_caller, Err(RecordError::EffectConflict)),
+        "{other_caller:?}"
+    );
+}
+
+/// Story 3.6 review, minor 3: an `unknown` effect of a call that names no member is reported to
+/// every adult, the adult who validated the rule first; a call with no author names none first.
+#[test]
+fn an_unknown_effect_of_a_call_naming_no_member_is_reported_to_every_adult() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "unknown-every-adult");
+    let mut stamper = TestStamper::at(noon());
+    let rule = Call {
+        principal: Principal::Rule,
+        source: Source::Rule(task()),
+        session: Taint::Trusted,
+        consumed: Consumed::NOTHING,
+        authority: Authority::Unapproved {
+            author: Some(noe()),
+            acting_for: None,
+        },
+        read: Vec::new(),
+        implicit_inputs: Vec::new(),
+    };
+    let adapter = Call {
+        principal: Principal::Adapter,
+        source: Source::Adapter(task()),
+        authority: Authority::Unapproved {
+            author: None,
+            acting_for: None,
+        },
+        ..rule.clone()
+    };
+    for (by, first) in [(rule, Some(noe())), (adapter, None)] {
+        let key: &'static [u8] = if first.is_some() {
+            b"rule-key"
+        } else {
+            b"adapter-key"
+        };
+        let CallResult::Committed(outcome) = run_call(
+            &handle,
+            module,
+            &by,
+            &new_invocation(&by),
+            &mut stamper,
+            |records| records.request_effect("open_valve", key, b"x"),
+        )
+        .expect("commits") else {
+            panic!("a new call runs")
+        };
+        let report = record_effect_outcome(&handle, outcome.value, EffectOutcome::Unknown, noon())
+            .expect("record")
+            .expect("reported");
+        assert_eq!(
+            report.report_to,
+            ReportTo::EveryAdult { first },
+            "{:?}",
+            by.principal
+        );
+    }
+}
+
+/// Story 3.6 review, minor 2 (AD-39): a rule action's name-based call id (a version 5 UUID) is a
+/// call id, and a re-delivered trigger with it is deduplicated.
+#[test]
+fn a_name_based_call_id_deduplicates_a_rule_action() {
+    let module = notes_module();
+    let (_, handle) = open_new(module, "name-based-call-id");
+    let mut stamper = TestStamper::at(noon());
+    let mut bytes = [0x6b; 16];
+    bytes[6] = 0x5b;
+    bytes[8] = 0x9b;
+    let invocation = Invocation {
+        call_id: vilicus_types::CallId::from_bytes(bytes).expect("a version 5 UUID"),
+        request_hash: None,
+        delivery: None,
+    };
+    let rule = Call {
+        principal: Principal::Rule,
+        source: Source::Rule(task()),
+        session: Taint::Trusted,
+        consumed: Consumed::NOTHING,
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for: Some(ella()),
+        },
+        read: Vec::new(),
+        implicit_inputs: vec![provenance(
+            member_id(70),
+            Taint::Trusted,
+            Some(ella()),
+            &[DataType::Meals],
+        )],
+    };
+    let body = |records: &mut dyn Records| records.insert("notes", &note("Arrosage"), &[]);
+    assert!(matches!(
+        run_call(&handle, module, &rule, &invocation, &mut stamper, body).expect("commits"),
+        CallResult::Committed(_)
+    ));
+    assert!(matches!(
+        run_call(&handle, module, &rule, &invocation, &mut stamper, body).expect("answered"),
+        CallResult::Deduplicated(_)
+    ));
 }

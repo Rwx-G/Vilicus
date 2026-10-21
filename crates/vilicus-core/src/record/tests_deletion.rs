@@ -134,7 +134,8 @@ fn commit<T>(
     body: impl FnOnce(&mut dyn vilicus_module_api::Records) -> Result<T, vilicus_module_api::WriteError>,
 ) -> T {
     let invocation = Invocation {
-        call_id,
+        call_id: call_id.into(),
+        request_hash: None,
         delivery: None,
     };
     match run_call(

@@ -80,7 +80,9 @@ pub use call::{
     Authority, Call, CallOutcome, CallResult, Consumed, EarlierCall, EventDelivery, Invocation,
     RecordChange, RequestedEffect, Stamper, run_call,
 };
-pub use effect::{UnknownEffect, effects_to_perform, record_effect_outcome, retry_failed_effect};
+pub use effect::{
+    ReportTo, UnknownEffect, effects_to_perform, record_effect_outcome, retry_failed_effect,
+};
 #[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
 pub use journal::{
@@ -208,6 +210,12 @@ pub enum RecordError {
     InvalidEffect,
     /// A journal row of the file does not decode, or names a table the module does not declare.
     InvalidJournal,
+    /// An effect request of a name and idempotency key the file holds for another payload or
+    /// another caller (AD-28).
+    EffectConflict,
+    /// A call whose principal, `source` and `call_id` name an earlier call of the file that
+    /// carried another request hash: the call id is reused for another request.
+    CallIdReused,
     /// The module's code ended the call with its own error; the call was rolled back.
     Aborted(WriteError),
     /// The storage layer failed; the transaction was rolled back.
@@ -282,6 +290,10 @@ impl fmt::Display for RecordError {
                 formatter.write_str("an effect intent needs an identifier and an idempotency key")
             }
             Self::InvalidJournal => formatter.write_str("a journal row of the file is malformed"),
+            Self::EffectConflict => {
+                formatter.write_str("an effect of that name and key exists for another request")
+            }
+            Self::CallIdReused => formatter.write_str("the call id names another request"),
             Self::Aborted(error) => write!(formatter, "the module ended the call: {error}"),
             Self::Storage(error) => write!(formatter, "{error}"),
         }

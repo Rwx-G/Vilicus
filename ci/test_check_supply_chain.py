@@ -301,7 +301,16 @@ GATE_JOBS = {
             'python3 ci/check_audit_report.py spikes/hpke-review/audit-exceptions.toml "$RUNNER_TEMP/hpke-audit.json"',
         ),
     ),
+    "sqlcipher-regenerate": (
+        "SQLCipher amalgamation regenerated from its tag (D143)",
+        (
+            'run="$(python3 ci/must_run.py --event "$EVENT" --base "$BASE" "${watched[@]}")"',
+            'docker run --rm -v "$PWD:/w:ro" -w /w rust:1.99-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a bash crates/vilicus-storage/sqlcipher/regenerate.sh',
+        ),
+    ),
 }
+# Gate jobs whose steps after a path detection run only when it says so (ci/must_run.py).
+PATH_FILTERED_JOBS = ("hpke-review", "sqlcipher-regenerate")
 # The Debian 13 VM job of Story 2.3, written out by hand like GATE_JOBS. It is not a merge gate
 # yet, so it may run its result collection and its teardown under `if: always()`, and the smoke
 # and the release gates of Story 2.6 on any booted VM, even after a failed run step, so that the
@@ -394,15 +403,23 @@ class WorkflowAgreementTest(unittest.TestCase):
             job = self.jobs[job_id]
             with self.subTest(job=job_id):
                 self.assertNotRegex(job, r"(?m)^    if:")
-                if job_id != "hpke-review":
+                if job_id not in PATH_FILTERED_JOBS:
                     self.assertNotRegex(job, r"(?m)^\s+if:")
 
-    def test_hpke_steps_after_the_detection_run_only_on_its_decision(self) -> None:
-        steps = self.jobs["hpke-review"].split("\n      - ")
-        detection = next(i for i, step in enumerate(steps) if "id: changes" in step)
-        for step in steps[detection + 1 :]:
-            with self.subTest(step=step.splitlines()[0]):
-                self.assertIn("if: steps.changes.outputs.run == 'true'", step)
+    def test_path_filtered_steps_after_the_detection_run_only_on_its_decision(self) -> None:
+        for job_id in PATH_FILTERED_JOBS:
+            steps = self.jobs[job_id].split("\n      - ")
+            detection = next(i for i, step in enumerate(steps) if "id: changes" in step)
+            self.assertLess(detection, len(steps) - 1, job_id)
+            for step in steps[detection + 1 :]:
+                with self.subTest(job=job_id, step=step.splitlines()[0]):
+                    self.assertIn("if: steps.changes.outputs.run == 'true'", step)
+
+    def test_sqlcipher_regeneration_watches_the_vendored_source(self) -> None:
+        job = self.jobs["sqlcipher-regenerate"]
+        self.assertIn("crates/vilicus-storage/sqlcipher", job)
+        self.assertIn("ci/check_sqlcipher_source.py", job)
+        self.assertIn('-v "$PWD:/w:ro"', job)
 
     def test_every_workspace_cargo_build_reads_the_vendored_sources(self) -> None:
         flag = f"--config {sc.VENDORED_CONFIG_FILE}"

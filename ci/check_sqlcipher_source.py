@@ -11,10 +11,17 @@ compiles into every build. So:
 - the source build.rs compiles (its `SOURCE` constant) is one of the listed files;
 - the release tag regenerate.sh clones names the SQLCipher version the amalgamation defines;
 - README.md states the tag, tag object and commit of regenerate.sh and every hash of SHA256SUMS,
-  so the record a reader sees cannot drift from what is pinned.
+  so the record a reader sees cannot drift from what is pinned;
+- regenerate.sh clones the official SQLCipher repository, pinned here as OFFICIAL_REPOSITORY, and
+  names no other URL: a tag name resolves only among that repository's own refs, so with the
+  repository fixed outside the vendored directory, a change under it cannot point the
+  regeneration at a fork.
 
-Regenerating the amalgamation from the tag needs the network and runs by hand
-(`regenerate.sh`, README.md); this check needs neither. Standard library only, Python 3.11 or
+These checks prove the directory consistent, not that it is what the tag produces: the
+`sqlcipher-regenerate` job of .github/workflows/ci.yml regenerates the amalgamation from the tag
+and compares it byte for byte. Pinning the file hashes here a second time would add nothing that
+job does not prove, since a change to the source and to such a pin would sit in the same
+reviewed diff; the repository pin does add something, since it fixes what that job trusts. Standard library only, Python 3.11 or
 later. Exits 1 and prints every violation when a check fails.
 """
 
@@ -42,6 +49,9 @@ BUILD_SOURCE = re.compile(r'^const SOURCE: &str = "([^"]+)";$', re.MULTILINE)
 TAG = re.compile(r"^TAG=v(\d+\.\d+\.\d+)$", re.MULTILINE)
 CIPHER_VERSION = re.compile(r"^#define CIPHER_VERSION_NUMBER (\d+\.\d+\.\d+)$", re.MULTILINE)
 PINNED_IDS = re.compile(r"^(TAG_OBJECT|COMMIT)=([0-9a-f]{40})$", re.MULTILINE)
+OFFICIAL_REPOSITORY = "https://github.com/sqlcipher/sqlcipher"
+REPOSITORY = re.compile(r"^REPOSITORY=(\S+)$", re.MULTILINE)
+URL = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"')]+|git@[^\s\"')]+")
 
 
 def read_sums(sums_file: Path) -> tuple[dict[str, str], list[str]]:
@@ -108,6 +118,11 @@ def check(crate_dir: Path) -> list[str]:
     for value in pinned:
         if value not in stated:
             violations.append(f"sqlcipher: {readme} does not state {value}, pinned by regenerate.sh or {SUMS_NAME}")
+
+    if REPOSITORY.findall(script) != [OFFICIAL_REPOSITORY]:
+        violations.append(f"sqlcipher: regenerate.sh must set exactly REPOSITORY={OFFICIAL_REPOSITORY}")
+    for url in sorted(set(URL.findall(script)) - {OFFICIAL_REPOSITORY}):
+        violations.append(f"sqlcipher: regenerate.sh names {url}; it may name {OFFICIAL_REPOSITORY} only")
     return violations
 
 

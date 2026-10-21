@@ -56,4 +56,11 @@ if ! diff -u "$here/SHA256SUMS" "$work/SHA256SUMS"; then
   exit 1
 fi
 (cd "$here" && sha256sum --check --quiet SHA256SUMS)
-echo "SQLCipher $TAG ($COMMIT) regenerates to the files of SHA256SUMS"
+# Byte for byte as well, so the comparison does not rest on SHA256SUMS alone.
+for file in "${COPIED[@]}" "$GENERATED"; do
+  if ! cmp "$work/out/$file" "$here/$file"; then
+    echo "$file generated from $TAG differs from the committed $file" >&2
+    exit 1
+  fi
+done
+echo "SQLCipher $TAG ($COMMIT) regenerates to the files of SHA256SUMS, byte for byte"

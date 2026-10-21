@@ -16,7 +16,11 @@ AMALGAMATION = "/* amalgamation */\n#define CIPHER_VERSION_NUMBER 4.19.0\nint x;
 BUILD_RS = 'const SOURCE: &str = "sqlcipher/sqlite3.c";\nfn main() {}\n'
 TAG_OBJECT = "58beb4a302f0e3c37341d2312cef521f858b1273"
 COMMIT = "c4b275a47932888216bade83aff2bbc73df0ff85"
-REGENERATE = f"#!/usr/bin/env bash\nTAG=v4.19.0\nTAG_OBJECT={TAG_OBJECT}\nCOMMIT={COMMIT}\n"
+REGENERATE = (
+    f"#!/usr/bin/env bash\nTAG=v4.19.0\nTAG_OBJECT={TAG_OBJECT}\nCOMMIT={COMMIT}\n"
+    f"REPOSITORY={cs.OFFICIAL_REPOSITORY}\n"
+    'git clone --branch "$TAG" "$REPOSITORY" "$work/src"\n'
+)
 
 
 def sha256(text: str) -> str:
@@ -116,6 +120,20 @@ class CheckTest(unittest.TestCase):
         self.crate.write_readme()
         self.crate.write("regenerate.sh", "TAG=v4.19.0\n")
         self.assert_violation("TAG_OBJECT and COMMIT")
+
+
+    def test_a_regeneration_pointed_elsewhere_fails(self) -> None:
+        fork = "https://github.com/someone/sqlcipher"
+        self.crate.write("regenerate.sh", REGENERATE.replace(cs.OFFICIAL_REPOSITORY, fork))
+        self.assert_violation(f"must set exactly REPOSITORY={cs.OFFICIAL_REPOSITORY}")
+        self.assert_violation(f"names {fork}")
+        self.crate.write(
+            "regenerate.sh",
+            REGENERATE.replace('"$REPOSITORY"', f'"{fork}"'),
+        )
+        self.assert_violation(f"names {fork}")
+        self.crate.write("regenerate.sh", REGENERATE + "git fetch git@example.com:x/y.git\n")
+        self.assert_violation("names git@example.com:x/y.git")
 
 
 class TreeTest(unittest.TestCase):

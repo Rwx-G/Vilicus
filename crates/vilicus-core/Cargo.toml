@@ -31,6 +31,9 @@ vilicus-proto.workspace = true
 vilicus-module-api.workspace = true
 vilicus-crypto.workspace = true
 vilicus-storage.workspace = true
+# NFKC folding of the words of the verbatim test (D104, D147), at the version vilicus-proto
+# already ships (D130): a direct edge to a package of the release tree, not a new package.
+unicode-normalization.workspace = true
 
 # Test code only: the registry tests build real FTS5 tables in a module file without the
 # authorizer, as Story 3.7's migrations will, which no storage handle can before that story.

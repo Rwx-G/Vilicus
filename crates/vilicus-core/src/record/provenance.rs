@@ -14,6 +14,7 @@
 use core::fmt;
 use std::collections::HashSet;
 
+use unicode_normalization::UnicodeNormalization;
 use vilicus_module_api::{DataType, FieldKind, Table, Value};
 use vilicus_types::{EffectiveTaint, Id, Principal, RecordLabels, Taint, TextTaint};
 
@@ -164,16 +165,17 @@ fn written_labels(
     }
     match &call.authority {
         Authority::OwnAction { member } => {
-            let copied = untrusted_text(inputs, *member);
-            let text = free_texts(table, fields)
-                .map(|text| {
-                    if repeats_a_run(text, &copied) {
-                        TextTaint::External
-                    } else {
-                        TextTaint::Trusted
-                    }
-                })
-                .fold(TextTaint::Trusted, TextTaint::most_restrictive);
+            let given: Vec<&str> = free_texts(table, fields).collect();
+            let text = if given.is_empty() {
+                TextTaint::Trusted
+            } else if repeats_a_run(
+                &record_text(table, fields, stored),
+                &untrusted_text(inputs, *member),
+            ) {
+                TextTaint::External
+            } else {
+                TextTaint::Trusted
+            };
             RecordLabels::of(Taint::Trusted, text)
         }
         Authority::Approved {
@@ -181,16 +183,15 @@ fn written_labels(
             written,
             drafts,
         } => {
-            let copied = untrusted_text(inputs, *member);
-            let text = free_texts(table, fields)
-                .map(|text| {
-                    if repeats_a_run(text, &copied) {
-                        TextTaint::External
-                    } else {
-                        approved_text_taint(call.session, text, written, drafts)
-                    }
-                })
-                .fold(TextTaint::Trusted, TextTaint::most_restrictive);
+            let given: Vec<&str> = free_texts(table, fields).collect();
+            let record = record_text(table, fields, stored);
+            let text = if given.is_empty() {
+                TextTaint::Trusted
+            } else if repeats_a_run(&record, &untrusted_text(inputs, *member)) {
+                TextTaint::External
+            } else {
+                approved_text_taint(call.session, &given, &record, written, drafts)
+            };
             RecordLabels::of(Taint::Trusted, text)
         }
         Authority::Unapproved { acting_for, .. } => {
@@ -244,15 +245,40 @@ fn consumes(call: &Call) -> bool {
     matches!(call.principal, Principal::AiTask | Principal::Plugin)
 }
 
-/// The free text of the inputs that are not `trusted` for `member`: text a member's write may
-/// not copy into a record stored `trusted` (`doc/architecture.md` section 5.4, rule 5). An input
-/// another member wrote counts, as it does for a derivation (AD-7).
-fn untrusted_text(inputs: &[RecordProvenance], member: Id) -> Vec<&str> {
+/// The free text of the inputs that are not `trusted` for `member`, each input's fields joined
+/// into one word sequence: text a member's write may not copy into a record stored `trusted`
+/// (`doc/architecture.md` section 5.4, rule 5). An input another member wrote counts, as it does
+/// for a derivation (AD-7).
+fn untrusted_text(inputs: &[RecordProvenance], member: Id) -> Vec<String> {
     inputs
         .iter()
         .filter(|input| input.derived_taint(Some(member)) != Taint::Trusted)
-        .flat_map(|input| input.free_text.iter().map(String::as_str))
+        .map(|input| input.free_text.join("\n"))
         .collect()
+}
+
+/// The record's free text once the write is stored, its fields in declared order joined into one
+/// word sequence, so a copy split across fields, or across this write and the record's stored
+/// text, is still a run (D147): each free-text field the write gives, and the stored value of
+/// each it leaves.
+fn record_text(table: &'static Table, fields: &[(&str, Value)], stored: Option<&Stored>) -> String {
+    table
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| matches!(field.kind, FieldKind::FreeText { .. }))
+        .filter_map(|(index, field)| {
+            let given = fields
+                .iter()
+                .find(|(name, _)| *name == field.name)
+                .map(|(_, value)| value);
+            match given.or_else(|| stored.and_then(|stored| stored.held.get(index))) {
+                Some(Value::Text(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The union of data type sets, in the order of [`DataType::ALL`].
@@ -266,8 +292,10 @@ pub(crate) fn union<'a>(sets: impl IntoIterator<Item = &'a [DataType]>) -> Vec<D
 /// True when `text` repeats, word for word, a run of [`DRAFT_RUN_WORDS`] consecutive words of one
 /// of `sources`, the assistant's drafts or another record's free text (D104): a verbatim test,
 /// not an edit ratio, so editing the rest of the text does not matter. Words are the maximal runs
-/// of alphanumeric characters, compared in lowercase: spacing, punctuation and case do not break
-/// a run.
+/// of alphanumeric characters after NFKC folding, compared in lowercase: spacing, punctuation,
+/// case and compatibility forms (fullwidth letters, ligatures) do not break a run. A look-alike
+/// from another script and a single changed word do, accepted limits of D104 (D147). The stamp
+/// joins a record's fields, an input's fields and a request's drafts into one source each.
 pub(crate) fn repeats_a_run<S: AsRef<str>>(text: &str, sources: &[S]) -> bool {
     let source_words: Vec<Vec<String>> = sources
         .iter()
@@ -283,25 +311,33 @@ pub(crate) fn repeats_a_run<S: AsRef<str>>(text: &str, sources: &[S]) -> bool {
 }
 
 fn words(text: &str) -> Vec<String> {
-    text.split(|character: char| !character.is_alphanumeric())
+    let folded: String = text.nfkc().collect();
+    folded
+        .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
         .collect()
 }
 
-/// The label of a free text of an approved write (D99, D104): from a tainted session, text
-/// drafted, or drafted then edited, is an approved draft, `external` but readable by a planner as
-/// quoted data; only text the member wrote in full in an empty field is `trusted`, unless it
-/// repeats a run of a draft, which makes it an approved draft too. From a session that is not
-/// tainted, the approved text is `trusted`.
+/// The label of the free text `given` by an approved write (D99, D104), `record` being the
+/// record's free text once stored: from a tainted session, text drafted, or drafted then edited,
+/// is an approved draft, `external` but readable by a planner as quoted data; the text is
+/// `trusted` only when every value given is one the member wrote in full in an empty field and
+/// the record repeats no run of the request's drafts, read as one sequence. From a session that
+/// is not tainted, the approved text is `trusted`.
 fn approved_text_taint(
     session: Taint,
-    text: &str,
+    given: &[&str],
+    record: &str,
     written: &[String],
     drafts: &[String],
 ) -> TextTaint {
-    let written_in_full = written.iter().any(|member_text| member_text == text);
-    if session == Taint::Trusted || (written_in_full && !repeats_a_run(text, drafts)) {
+    let written_in_full = given
+        .iter()
+        .all(|text| written.iter().any(|member_text| member_text == text));
+    if session == Taint::Trusted
+        || (written_in_full && !repeats_a_run(record, &[drafts.join("\n")]))
+    {
         TextTaint::Trusted
     } else {
         TextTaint::ApprovedDraft
@@ -442,6 +478,25 @@ mod tests {
         assert!(repeats_a_run(
             "one two three four five six seven eight",
             &["one two three four five six seven eight nine".to_owned()]
+        ));
+    }
+
+    /// NFKC folds compatibility forms before the comparison: fullwidth letters and a ligature are
+    /// the words they stand for. A look-alike from another script is not folded (one Cyrillic
+    /// `о` here), an accepted limit of D104.
+    #[test]
+    fn compatibility_forms_are_folded_and_other_scripts_are_not() {
+        assert!(repeats_a_run(
+            "ｔｈｅ ＯＲＧＡＮＩＣ apples at the market on Saturday",
+            &drafts()
+        ));
+        assert!(repeats_a_run(
+            "ﬁne organic apples at the market on Saturday morning",
+            &["fine organic apples at the market on Saturday morning"]
+        ));
+        assert!(!repeats_a_run(
+            "the \u{43e}rganic apples at the market on Saturday",
+            &drafts()
         ));
     }
 

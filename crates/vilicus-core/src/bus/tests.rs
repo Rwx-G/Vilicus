@@ -1509,3 +1509,75 @@ fn an_event_carries_the_taint_of_its_emitting_call() {
         "Ella's note, then the plugin's deletion of it"
     );
 }
+
+/// A payload longer than the bound is refused, and the call with it.
+#[test]
+fn an_event_payload_longer_than_the_bound_is_refused() {
+    let (_, files, mut stamper) = standard("payload");
+    let handle = files.of("notes");
+    for (length, accepted) in [
+        (vilicus_module_api::EVENT_PAYLOAD_MAX_LEN, true),
+        (vilicus_module_api::EVENT_PAYLOAD_MAX_LEN + 1, false),
+    ] {
+        let payload = vec![0x5a; length];
+        let (_, result) = run(
+            handle,
+            notes(),
+            &own_action(ella()),
+            &mut stamper,
+            |records| {
+                let note = records.insert("notes", &title("Pommes"), &[])?;
+                records.emit(ADDED, note.id, &payload)
+            },
+        );
+        assert_eq!(
+            matches!(result, Ok(CallResult::Committed(_))),
+            accepted,
+            "{length}"
+        );
+        if !accepted {
+            assert!(matches!(result, Err(RecordError::PayloadTooLong)));
+        }
+    }
+    assert_eq!(handle.outbox_events().expect("read").len(), 1);
+    assert_eq!(titles(handle, "notes"), 1);
+}
+
+/// An AI task that read health data and deletes a note emits an event whose snapshot holds the
+/// data types the session consumed, as every write of the task holds them (AD-7, D103).
+#[test]
+fn an_event_of_an_ai_session_holds_the_data_types_it_consumed() {
+    let (_, files, mut stamper) = standard("consumed-types");
+    let handle = files.of("notes");
+    let (note, _, _) = add_note(handle, notes(), &own_action(ella()), &mut stamper, ADDED);
+    let task = Call {
+        principal: Principal::AiTask,
+        source: Source::AiTask(member_id(41)),
+        session: Taint::Trusted,
+        consumed: Consumed {
+            data_types: vec![DataType::Health],
+            taint: vilicus_types::EffectiveTaint::Trusted,
+        },
+        authority: Authority::Unapproved {
+            author: Some(ella()),
+            acting_for: Some(ella()),
+        },
+        read: Vec::new(),
+        implicit_inputs: Vec::new(),
+    };
+    let (_, removed) = run(handle, notes(), &task, &mut stamper, |records| {
+        records.delete("notes", note)?;
+        records.emit(REMOVED, note, b"")
+    });
+    assert!(
+        matches!(removed, Ok(CallResult::Committed(_))),
+        "{removed:?}"
+    );
+    let row = handle
+        .outbox_events()
+        .expect("read")
+        .pop()
+        .expect("the event");
+    let snapshot = crate::record::decode_provenance(&row.provenance).expect("decode");
+    assert_eq!(snapshot.data_types, [DataType::Health, DataType::Meals]);
+}

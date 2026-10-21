@@ -231,6 +231,8 @@ pub enum RecordError {
     ForeignTopic,
     /// An event or a link request about a record the call did not change.
     UnchangedRecord,
+    /// An event whose payload is longer than `EVENT_PAYLOAD_MAX_LEN`.
+    PayloadTooLong,
     /// A link request whose target module is not a module name, or is the module itself (AD-10).
     InvalidLink,
     /// A consumer's call requested an outbound effect or emitted an event: a write in reaction to
@@ -323,6 +325,7 @@ impl fmt::Display for RecordError {
             }
             Self::CallIdReused => formatter.write_str("the call id names another request"),
             Self::UnknownTopic => formatter.write_str("the module declares no such topic"),
+            Self::PayloadTooLong => formatter.write_str("an event payload longer than the bound"),
             Self::ForeignTopic => formatter.write_str("a topic of another module"),
             Self::UnchangedRecord => {
                 formatter.write_str("an event or a link about a record the call did not change")

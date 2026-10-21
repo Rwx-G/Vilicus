@@ -13,6 +13,12 @@
 
 use vilicus_types::Id;
 
+/// The longest event payload, in bytes: 1 MiB, the bound of a free-text field in characters
+/// ([`FREE_TEXT_MAX_LEN`](crate::FREE_TEXT_MAX_LEN)) taken as bytes. A payload carries the
+/// structured facts a consumer needs about a record, never a copy of the record, so it stays far
+/// below; the bound keeps one event from filling the outbox.
+pub const EVENT_PAYLOAD_MAX_LEN: usize = crate::FREE_TEXT_MAX_LEN as usize;
+
 /// A topic a module emits: its name, the version of its payload, and its access list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Topic {

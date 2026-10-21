@@ -5,8 +5,8 @@
 //! and the event it consumes recorded with it.
 
 use vilicus_module_api::{
-    FieldKind, ModuleDeclaration, Records, Table, Value, WriteError, Written, is_identifier,
-    topic_module,
+    EVENT_PAYLOAD_MAX_LEN, FieldKind, ModuleDeclaration, Records, Table, Value, WriteError,
+    Written, is_identifier, topic_module,
 };
 use vilicus_storage::{
     AuthorityKind, CallKey, EffectIntent, EventIntent, Handle, JournalEntry, JournalRow,
@@ -773,9 +773,11 @@ impl CallRecords<'_> {
     /// Writes an event of `topic` about `record` to the outbox (AD-10, AD-29): the topic is one the
     /// module declares, so the emitter is the module whose call this is, and the payload version
     /// is the topic's current one. The event carries the provenance of `record` as the call leaves
-    /// it, raised to what the call itself derives from ([`provenance::call_floor`]), without its
-    /// free text, and the call's author and member: what a consumer's call derives from (AD-27,
-    /// D147). A consumer's call emits nothing.
+    /// it, raised to what the call itself derives from ([`provenance::call_floor`]), its data
+    /// types joined by those an AI or plugin session consumed ([`provenance::floor`]), without
+    /// its free text, and the call's author and member: what a consumer's call derives from
+    /// (AD-27, D147). A consumer's call emits nothing; a payload is at most
+    /// `EVENT_PAYLOAD_MAX_LEN` bytes.
     fn emit_event(&mut self, topic: &str, record: Id, payload: &[u8]) -> Result<Id, RecordError> {
         if self.call.principal == Principal::Event {
             return Err(RecordError::NotInConsumer);
@@ -787,9 +789,13 @@ impl CallRecords<'_> {
                 Some(emitter) if emitter != self.module.name => RecordError::ForeignTopic,
                 _ => RecordError::UnknownTopic,
             })?;
+        if payload.len() > EVENT_PAYLOAD_MAX_LEN {
+            return Err(RecordError::PayloadTooLong);
+        }
         let mut provenance = self.changed_record(record)?;
         let floor = provenance::call_floor(self.call);
         provenance.labels = provenance.labels.most_restrictive(floor);
+        provenance.data_types = provenance::floor(self.call, std::slice::from_ref(&provenance));
         provenance.free_text = Vec::new();
         let encoded = journal::encode_inputs(std::slice::from_ref(&provenance), &[])?;
         let now = self.stamper.now();
@@ -1124,6 +1130,7 @@ fn write_error(error: &RecordError) -> WriteError {
         RecordError::UnknownTopic => WriteError::UnknownTopic,
         RecordError::ForeignTopic => WriteError::ForeignTopic,
         RecordError::UnchangedRecord => WriteError::UnchangedRecord,
+        RecordError::PayloadTooLong => WriteError::PayloadTooLong,
         RecordError::InvalidLink => WriteError::InvalidLink,
         RecordError::NotInConsumer => WriteError::NotInConsumer,
         RecordError::IdChanged { .. }

@@ -39,7 +39,7 @@ pub use declaration::{
     ENVELOPE, EnvelopeColumn, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table,
     Fts5Tokenizer, Migration, ModuleDeclaration, SqlType, Structured, Table,
 };
-pub use event::{Consumer, Event, Topic, is_topic, topic_module};
+pub use event::{Consumer, EVENT_PAYLOAD_MAX_LEN, Event, Topic, is_topic, topic_module};
 pub use records::{Records, WriteError, Written};
 pub use tool::{Confirmation, MatrixRow, Tool};
 pub use value::{Value, ValueError, check_vocabulary_label, is_free_text_character};

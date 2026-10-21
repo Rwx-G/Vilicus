@@ -92,7 +92,9 @@ pub trait Records {
 
     /// Emits an event of `topic`, one of the module's own topics, about `record`, a record this
     /// call inserted, updated or deleted, with `payload` encoded at the topic's current version
-    /// (AD-29). The event is written in the call's transaction and delivered after the commit;
+    /// (AD-29), at most [`EVENT_PAYLOAD_MAX_LEN`](crate::EVENT_PAYLOAD_MAX_LEN) bytes
+    /// ([`WriteError::PayloadTooLong`]). The event is written in the call's transaction and
+    /// delivered after the commit;
     /// it is never delivered when the call is rolled back. The Core stamps the emitter, the
     /// payload version and the provenance of `record` as the call leaves it, which every write of
     /// a consumer derives from (AD-27). A topic of another module is
@@ -214,6 +216,9 @@ pub enum WriteError {
     ForeignTopic,
     /// An event or a link request about a record this call did not change.
     UnchangedRecord,
+    /// An event whose payload is longer than
+    /// [`EVENT_PAYLOAD_MAX_LEN`](crate::EVENT_PAYLOAD_MAX_LEN).
+    PayloadTooLong,
     /// A link request to a module that is not a module name, or to the module itself.
     InvalidLink,
     /// A consumer's call requested an outbound effect or emitted an event: a write in reaction to
@@ -278,6 +283,7 @@ impl fmt::Display for WriteError {
                 formatter.write_str("an effect of that name and key exists for another request")
             }
             Self::UnknownTopic => formatter.write_str("the module declares no such topic"),
+            Self::PayloadTooLong => formatter.write_str("an event payload longer than the bound"),
             Self::ForeignTopic => formatter.write_str("a topic of another module"),
             Self::UnchangedRecord => {
                 formatter.write_str("an event or a link about a record the call did not change")

@@ -13,18 +13,19 @@ use core::fmt;
 use std::path::Path;
 
 use vilicus_module_api::{
-    ENVELOPE, Field, FieldKind, ModuleDeclaration, SqlType, Structured, Table,
-    VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, Value, ValueError,
-    check_vocabulary_label, is_vocabulary_label_letter,
+    DataType, ENVELOPE, EnvelopeColumn, Field, FieldKind, ModuleDeclaration, SqlType, Structured,
+    Table, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, Value, ValueError,
+    check_vocabulary_label, is_free_text_character, is_vocabulary_label_letter,
 };
 use vilicus_storage::{Handle, SqlValue, TableKind, Write};
-use vilicus_types::{Id, UtcMillis};
+use vilicus_types::{Id, Source, Taint, UtcMillis};
 
+use super::envelope::{EnvelopeRule, data_types_text, rule};
 use super::{RecordError, check_stored_rows, confirm_label, declared_vocabularies, insert, update};
 use crate::registry::{FileError, Registry, create_migrated};
 
-/// Longest free text the generator writes past its maximum length; a field declared longer is
-/// still fuzzed with every other case.
+/// Longest free text the generator writes within a declaration; past a maximum, it writes one
+/// character more than any declared maximum, which `FREE_TEXT_MAX_LEN` bounds.
 const FREE_TEXT_FUZZ_MAX: u32 = 1 << 16;
 
 /// Labels confirmed per vocabulary in each fuzzed file.
@@ -179,9 +180,15 @@ impl Registry {
     ///
     /// - once with each value outside its field's declaration that the generator knows for that
     ///   field kind (another storage class, `NULL` for a required field, a value outside the
-    ///   enumeration or the range, an invalid date or UUIDv7, text one character too long, an
-    ///   unconfirmed or malformed label), with a missing required field, an undeclared column
-    ///   and a column given twice;
+    ///   enumeration or the range, an invalid date or UUIDv7, free text one character too long or
+    ///   holding a refused character, an unconfirmed label, one confirmed in another vocabulary
+    ///   only, a malformed label), with a missing required field, an undeclared column and a
+    ///   column given twice;
+    /// - once with each envelope value outside its stored form the generator knows (an id or
+    ///   author that is not a UUIDv7, a forged `source`, a `taint` outside the stored set, data
+    ///   types the record kind does not declare or out of their form, a time out of range, a
+    ///   `rev` below 1, another storage class, `NULL`), with an update that changes the id and an
+    ///   update of a record the table does not hold;
     /// - `rounds` times with up to three fields made invalid at once, and with a write within
     ///   the declarations.
     ///
@@ -266,17 +273,21 @@ fn confirm_labels(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expected {
     Invalid(ValueError),
+    Envelope,
     Unconfirmed,
     Missing,
     Unknown,
     Duplicate,
+    IdChanged,
+    NotFound,
 }
 
-/// One value outside its field's declaration: the field, the rule broken, the value (`None` for
-/// a field left out) and the refusal expected.
+/// One value outside its column's declaration: the field or envelope column, the rule broken,
+/// the value (`None` for a field left out) and the refusal expected.
 #[derive(Clone, Debug)]
 struct Case {
     column: &'static str,
+    envelope: bool,
     rule: &'static str,
     value: Option<Value>,
     expected: Expected,
@@ -286,6 +297,22 @@ impl Case {
     fn new(field: &Field, rule: &'static str, value: Value, expected: Expected) -> Self {
         Self {
             column: field.name,
+            envelope: false,
+            rule,
+            value: Some(value),
+            expected,
+        }
+    }
+
+    fn envelope(
+        column: &'static EnvelopeColumn,
+        rule: &'static str,
+        value: Value,
+        expected: Expected,
+    ) -> Self {
+        Self {
+            column: column.name,
+            envelope: true,
             rule,
             value: Some(value),
             expected,
@@ -297,12 +324,15 @@ impl Case {
             (Expected::Invalid(expected), RecordError::Invalid { column, error, .. }) => {
                 *column == self.column && *error == expected
             }
-            (Expected::Unconfirmed, RecordError::UnconfirmedLabel { column, .. })
+            (Expected::Envelope, RecordError::InvalidEnvelope { column, .. })
+            | (Expected::Unconfirmed, RecordError::UnconfirmedLabel { column, .. })
             | (Expected::Missing, RecordError::MissingColumn { column, .. })
             | (Expected::Duplicate, RecordError::DuplicateColumn { column, .. }) => {
                 *column == self.column
             }
-            (Expected::Unknown, RecordError::UnknownColumn { .. }) => true,
+            (Expected::Unknown, RecordError::UnknownColumn { .. })
+            | (Expected::IdChanged, RecordError::IdChanged { .. })
+            | (Expected::NotFound, RecordError::RecordNotFound { .. }) => true,
             _ => false,
         }
     }
@@ -352,6 +382,7 @@ impl TableFuzz<'_> {
                 insert.retain(|(name, _)| *name != field.name);
                 let case = Case {
                     column: field.name,
+                    envelope: false,
                     rule: "a required field left out",
                     value: None,
                     expected: Expected::Missing,
@@ -378,6 +409,7 @@ impl TableFuzz<'_> {
         }
         let undeclared = Case {
             column: "undeclared",
+            envelope: false,
             rule: "a column the table does not declare",
             value: Some(Value::Integer(0)),
             expected: Expected::Unknown,
@@ -386,6 +418,19 @@ impl TableFuzz<'_> {
             let mut fields = self.valid_fields();
             fields.push(("undeclared", Value::Integer(0)));
             self.refuse(kind, id, &fields, std::slice::from_ref(&undeclared))?;
+        }
+        self.refuse_envelopes(id)?;
+        let missing = Case {
+            column: "id",
+            envelope: false,
+            rule: "an update of a record the table does not hold",
+            value: None,
+            expected: Expected::NotFound,
+        };
+        if let Some(field) = self.table.fields.first() {
+            let changes = vec![(field.name, self.valid_value(field))];
+            let other = self.rng.id();
+            self.refuse(WriteKind::Update, other, &changes, &[missing])?;
         }
         for _ in 0..rounds {
             self.random_round(id)?;
@@ -460,7 +505,200 @@ impl TableFuzz<'_> {
         Ok(id)
     }
 
-    /// Runs a write that must be refused by one of `cases`, with every table unchanged.
+    /// Each envelope value outside its stored form, on the insert (beside valid fields) and on the
+    /// update; an update that gives the id is refused whatever the id.
+    fn refuse_envelopes(&mut self, id: Id) -> Result<(), WriteFuzzError> {
+        for case in self.envelope_cases() {
+            let fields = self.valid_fields();
+            self.refuse(WriteKind::Insert, id, &fields, std::slice::from_ref(&case))?;
+            let column = ENVELOPE
+                .iter()
+                .find(|column| column.name == case.column)
+                .expect("an envelope column");
+            let case = if column.primary_key {
+                Case::envelope(
+                    column,
+                    "an update that gives the id",
+                    case.value.clone().unwrap_or(Value::Null),
+                    Expected::IdChanged,
+                )
+            } else {
+                case
+            };
+            self.refuse(WriteKind::Update, id, &[], &[case])?;
+        }
+        let id_column = ENVELOPE
+            .iter()
+            .find(|column| column.primary_key)
+            .expect("the envelope has an id");
+        let valid_id = Value::Blob(self.rng.id().to_bytes().to_vec());
+        let case = Case::envelope(
+            id_column,
+            "an update that gives a valid id",
+            valid_id,
+            Expected::IdChanged,
+        );
+        self.refuse(WriteKind::Update, id, &[], &[case])
+    }
+
+    /// The values of each envelope column outside its stored form, by the column's rule.
+    fn envelope_cases(&mut self) -> Vec<Case> {
+        let mut cases = Vec::new();
+        for column in ENVELOPE {
+            if column.not_null {
+                cases.push(Case::envelope(
+                    column,
+                    "null for a required envelope column",
+                    Value::Null,
+                    Expected::Invalid(ValueError::Null),
+                ));
+            }
+            let other_class = Expected::Invalid(ValueError::StorageClass {
+                expected: column.sql_type,
+            });
+            for value in [
+                Value::Integer(1),
+                Value::Text("1".into()),
+                Value::Blob(vec![1]),
+                Value::Real(1.0),
+            ] {
+                let same = matches!(
+                    (&value, column.sql_type),
+                    (Value::Integer(_), SqlType::Integer)
+                        | (Value::Text(_), SqlType::Text)
+                        | (Value::Blob(_), SqlType::Blob)
+                );
+                if !same {
+                    cases.push(Case::envelope(
+                        column,
+                        "an envelope value of another class",
+                        value,
+                        other_class,
+                    ));
+                }
+            }
+            let bytes = self.rng.id().to_bytes();
+            let mut other_version = bytes;
+            other_version[6] = (other_version[6] & 0x0f) | 0x40;
+            let malformed: Vec<(&'static str, Value, Expected)> = match rule(column.name) {
+                Some(EnvelopeRule::Id | EnvelopeRule::Author) => [
+                    vec![1, 2],
+                    vec![0; 16],
+                    other_version.to_vec(),
+                    bytes[..15].to_vec(),
+                ]
+                .into_iter()
+                .map(|bytes| {
+                    (
+                        "an id that is not a 16-byte UUIDv7",
+                        Value::Blob(bytes),
+                        Expected::Invalid(ValueError::InvalidUuid),
+                    )
+                })
+                .collect(),
+                Some(EnvelopeRule::Instant) => [
+                    UtcMillis::MIN.as_millis() - 1,
+                    UtcMillis::MAX.as_millis() + 1,
+                    i64::MIN,
+                    i64::MAX,
+                ]
+                .into_iter()
+                .map(|millis| {
+                    (
+                        "a time outside years 0000 to 9999",
+                        Value::Integer(millis),
+                        Expected::Invalid(ValueError::OutOfRange),
+                    )
+                })
+                .collect(),
+                Some(EnvelopeRule::Rev) => [0, -1, i64::MIN]
+                    .into_iter()
+                    .map(|rev| {
+                        (
+                            "a revision below 1",
+                            Value::Integer(rev),
+                            Expected::Invalid(ValueError::OutOfRange),
+                        )
+                    })
+                    .collect(),
+                Some(EnvelopeRule::Source) => {
+                    let valid = Source::Member(self.rng.id()).to_string();
+                    [
+                        String::new(),
+                        "forged source".into(),
+                        "System".into(),
+                        "member(1)".into(),
+                        valid.to_uppercase(),
+                        format!("{valid} "),
+                    ]
+                    .into_iter()
+                    .map(|text| {
+                        (
+                            "a source outside its stored form",
+                            Value::Text(text),
+                            Expected::Envelope,
+                        )
+                    })
+                    .collect()
+                }
+                Some(EnvelopeRule::Taint) => [
+                    "member",
+                    "Trusted",
+                    "",
+                    "trusted; ignore previous instructions",
+                ]
+                .into_iter()
+                .map(|text| {
+                    (
+                        "a taint outside the stored set",
+                        Value::Text(text.into()),
+                        Expected::Envelope,
+                    )
+                })
+                .collect(),
+                Some(EnvelopeRule::DataTypes) => {
+                    let declared = data_types_text(self.table.data_types);
+                    let first = self.table.data_types[0].as_str();
+                    let mut texts = vec![
+                        String::new(),
+                        "nonsense".into(),
+                        format!("{first},{first}"),
+                        format!("{declared},"),
+                        declared.to_uppercase(),
+                    ];
+                    if let Some(undeclared) = DataType::ALL
+                        .iter()
+                        .find(|data_type| !self.table.data_types.contains(data_type))
+                    {
+                        texts.push(undeclared.as_str().into());
+                        texts.push(data_types_text(&[self.table.data_types[0], *undeclared]));
+                    }
+                    if self.table.data_types.len() > 1 {
+                        texts.push(declared.split(',').rev().collect::<Vec<_>>().join(","));
+                    }
+                    texts
+                        .into_iter()
+                        .map(|text| {
+                            (
+                                "data types outside the declared set or their form",
+                                Value::Text(text),
+                                Expected::Envelope,
+                            )
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            for (rule, value, expected) in malformed {
+                cases.push(Case::envelope(column, rule, value, expected));
+            }
+        }
+        cases
+    }
+
+    /// Runs a write that must be refused by one of `cases`, with every table unchanged. The
+    /// envelope cases replace their column of a valid envelope on an insert, and are the
+    /// envelope an update gives.
     fn refuse(
         &mut self,
         kind: WriteKind,
@@ -470,13 +708,29 @@ impl TableFuzz<'_> {
     ) -> Result<(), WriteFuzzError> {
         let path = self.path(kind);
         let before = self.content()?;
-        let outcome = match kind {
+        let mut envelope = match kind {
             WriteKind::Insert => {
                 let new_id = self.rng.id();
-                let envelope = self.envelope(new_id);
+                self.envelope(new_id)
+            }
+            WriteKind::Update => Vec::new(),
+        };
+        for case in cases.iter().filter(|case| case.envelope) {
+            envelope.retain(|(name, _)| *name != case.column);
+            envelope.push((case.column, case.value.clone().unwrap_or(Value::Null)));
+        }
+        let outcome = match kind {
+            WriteKind::Insert => {
                 insert(self.handle, self.module, self.table.name, &envelope, fields)
             }
-            WriteKind::Update => update(self.handle, self.module, self.table.name, id, &[], fields),
+            WriteKind::Update => update(
+                self.handle,
+                self.module,
+                self.table.name,
+                id,
+                &envelope,
+                fields,
+            ),
         };
         let case = Case::describe(cases);
         match outcome {
@@ -517,19 +771,27 @@ impl TableFuzz<'_> {
             .collect()
     }
 
-    /// The envelope columns, by their SQL type: what they mean is the typed record API's.
+    /// A valid envelope for the record `id`, in the stored forms of `envelope::check`.
     fn envelope(&mut self, id: Id) -> Vec<(&'static str, Value)> {
         ENVELOPE
             .iter()
             .map(|column| {
-                let value = if column.primary_key {
-                    Value::Blob(id.to_bytes().to_vec())
-                } else {
-                    match column.sql_type {
-                        SqlType::Integer => Value::Integer(self.rng.instant().as_millis()),
-                        SqlType::Text => Value::Text(self.table.data_types[0].as_str().into()),
-                        SqlType::Blob => Value::Blob(self.rng.id().to_bytes().to_vec()),
+                let value = match rule(column.name) {
+                    Some(EnvelopeRule::Id) => Value::Blob(id.to_bytes().to_vec()),
+                    Some(EnvelopeRule::Author) if self.rng.chance(1, 2) => Value::Null,
+                    Some(EnvelopeRule::Author) => Value::Blob(self.rng.id().to_bytes().to_vec()),
+                    Some(EnvelopeRule::Source) => {
+                        Value::Text(Source::Member(self.rng.id()).to_string())
                     }
+                    Some(EnvelopeRule::Taint) => {
+                        Value::Text(self.rng.pick(Taint::ALL).as_str().into())
+                    }
+                    Some(EnvelopeRule::DataTypes) => {
+                        Value::Text(data_types_text(self.table.data_types))
+                    }
+                    Some(EnvelopeRule::Instant) => Value::Integer(self.rng.instant().as_millis()),
+                    Some(EnvelopeRule::Rev) => Value::Integer(self.rng.within(1, i64::MAX)),
+                    None => Value::Null,
                 };
                 (column.name, value)
             })
@@ -604,18 +866,29 @@ impl TableFuzz<'_> {
             cases.push(Case::new(field, rule, value, other_class));
         }
         match field.kind {
-            FieldKind::FreeText { max_len } if max_len <= FREE_TEXT_FUZZ_MAX => {
-                let longer = self.rng.text(max_len as usize + 1);
+            FieldKind::FreeText { max_len } => {
+                let max_len = max_len as usize;
+                let character = *self.rng.pick(&['a', 'é', '日', '\u{1f600}']);
                 cases.push(Case::new(
                     field,
                     "free text one character too long",
-                    Value::Text(longer),
-                    Expected::Invalid(ValueError::TooLong {
-                        max_len: max_len as usize,
-                    }),
+                    Value::Text(character.to_string().repeat(max_len + 1)),
+                    Expected::Invalid(ValueError::TooLong { max_len }),
+                ));
+                let refused = self.rng.refused_character();
+                let len = self.rng.index(max_len.min(16) + 1);
+                let text = self.rng.text(len);
+                let position = self.rng.index(text.chars().count() + 1);
+                let mut with_refused: String = text.chars().take(position).collect();
+                with_refused.push(refused);
+                with_refused.extend(text.chars().skip(position));
+                cases.push(Case::new(
+                    field,
+                    "free text holding a refused character",
+                    Value::Text(with_refused),
+                    Expected::Invalid(ValueError::InvalidCharacter),
                 ));
             }
-            FieldKind::FreeText { .. } => {}
             FieldKind::Structured(Structured::Enumeration(values)) => {
                 let value = *self.rng.pick(values);
                 let outside = [
@@ -719,6 +992,11 @@ impl TableFuzz<'_> {
                 let label = self.rng.pick(confirmed).clone();
                 let mut unconfirmed = vec![label.to_uppercase(), label.to_lowercase()];
                 unconfirmed.push(self.rng.any_label());
+                for (other, labels) in self.labels {
+                    if *other != vocabulary {
+                        unconfirmed.extend(labels.iter().cloned());
+                    }
+                }
                 for text in unconfirmed {
                     if check_vocabulary_label(&text).is_ok() && !confirmed.contains(&text) {
                         cases.push(Case::new(
@@ -903,8 +1181,8 @@ impl Rng {
         .expect("an instant after the Unix epoch")
     }
 
-    /// `len` characters of free text: ASCII, accented and CJK letters, emoji, quotes, white
-    /// space and control characters.
+    /// `len` characters of free text: ASCII, accented and CJK letters, an emoji and its joiner,
+    /// a combining accent, quotes, a tab and a line feed.
     fn text(&mut self, len: usize) -> String {
         const POOL: &[char] = &[
             'a',
@@ -916,16 +1194,29 @@ impl Rng {
             ';',
             '\n',
             '\t',
-            '\0',
             'é',
             'Œ',
             'ß',
             '日',
             '\u{1f600}',
-            '\u{202e}',
+            '\u{200d}',
             '\u{301}',
         ];
+        debug_assert!(
+            POOL.iter()
+                .all(|character| is_free_text_character(*character))
+        );
         (0..len).map(|_| *self.pick(POOL)).collect()
+    }
+
+    /// A character free text refuses, drawn from the controls and format characters below
+    /// U+2070 and the byte order mark.
+    fn refused_character(&mut self) -> char {
+        let refused: Vec<char> = ('\0'..='\u{2070}')
+            .chain(['\u{feff}'])
+            .filter(|character| !is_free_text_character(*character))
+            .collect();
+        *self.pick(&refused)
     }
 
     /// A label of the restricted alphabet, of `len` characters.

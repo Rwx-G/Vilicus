@@ -59,6 +59,9 @@ mod tests {
             2 * tables,
             "an insert and an update per table"
         );
+        if tables > 0 {
+            assert!(report.refused > 0 && report.accepted > 0, "{report:?}");
+        }
         std::fs::remove_dir_all(&directory).expect("remove the scratch directory");
     }
 

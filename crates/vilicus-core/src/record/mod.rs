@@ -9,20 +9,36 @@
 //! statement run. A value is never truncated or converted: it is stored as given, or the write
 //! is refused.
 //!
-//! The row writer takes the envelope columns (AD-6) as the caller gives them, holding them to
-//! their SQL type and nullability only; stamping them (id, source, taint, data types, author,
-//! times and `rev`) is the typed record API's, which writes through this module (Story 3.5).
-//!
-//! Confirming a label is a Core operation with no surface in V0.1 (FR-50 lists none): it is not
-//! public, so no crate outside the Core can call it.
+//! The row writer takes the envelope columns (AD-6) from its caller and holds each to its stored
+//! form (`envelope`); stamping them (id, source, taint, data types, author, times and `rev`) is
+//! the typed record API's, which writes through this module (Story 3.5). The row writer, label
+//! confirmation and the check of stored rows are crate-private: no crate outside the Core can
+//! write a row, choose an envelope or confirm a label, which has no surface in V0.1 (FR-50).
 //!
 //! ```compile_fail,E0603
 //! let _ = vilicus_core::record::confirm_label;
 //! ```
 //!
-//! [`Registry::fuzz_write_paths`](crate::registry::Registry::fuzz_write_paths) drives every write
-//! path of a registry's modules with values outside their declarations (AC4 of Story 3.4).
+//! ```compile_fail,E0603
+//! let _ = vilicus_core::record::insert;
+//! ```
+//!
+//! With the `testing` feature, which only test code enables, `Registry::fuzz_write_paths` drives
+//! every write path of a registry's modules with values outside their declarations (AC4 of Story
+//! 3.4).
 
+// Until the typed record API of Story 3.5 calls the row writer, only the write path fuzz test and
+// the unit tests do, so a build without either has no caller of it yet.
+#![cfg_attr(
+    not(any(test, feature = "testing")),
+    allow(
+        dead_code,
+        reason = "the typed record API of Story 3.5 calls the row writer; until then only tests do"
+    )
+)]
+
+mod envelope;
+#[cfg(any(test, feature = "testing"))]
 mod fuzz;
 
 #[cfg(test)]
@@ -37,6 +53,7 @@ use vilicus_module_api::{
 use vilicus_storage::{Handle, Inspect, SqlValue, Write};
 use vilicus_types::{Id, UtcMillis};
 
+#[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
 
 /// Why the Core refuses a write, a label confirmation or a stored row. No variant carries a
@@ -87,6 +104,14 @@ pub enum RecordError {
         column: &'static str,
         /// The rule the value breaks.
         error: ValueError,
+    },
+    /// An envelope value is outside its stored form: a `source`, `taint` or `data_types` text the
+    /// Core does not write, or data types the record kind does not declare (AD-6).
+    InvalidEnvelope {
+        /// The table.
+        table: &'static str,
+        /// The envelope column.
+        column: &'static str,
     },
     /// A reviewed-vocabulary label is not one an adult confirmed in this file (D104).
     UnconfirmedLabel {
@@ -140,6 +165,12 @@ impl fmt::Display for RecordError {
                 column,
                 error,
             } => write!(formatter, "{table}.{column}: {error}"),
+            Self::InvalidEnvelope { table, column } => {
+                write!(
+                    formatter,
+                    "{table}.{column}: outside the envelope's stored form"
+                )
+            }
             Self::UnconfirmedLabel {
                 table,
                 column,
@@ -271,25 +302,31 @@ pub(crate) fn confirm_label(
     Ok(())
 }
 
-/// Checks every stored row of every table of `module`'s file against the declaration, the
-/// vocabulary labels against the labels confirmed in the file: what a migration's back-fill
+/// Checks every stored row of every table of `module`'s file against the declaration: each
+/// envelope value against its stored form, each field against its declaration and each
+/// vocabulary label against the labels confirmed in the file. What a migration's back-fill
 /// writes passes no write path, so this is how such values are checked.
 pub(crate) fn check_stored_rows<R: Inspect>(
     handle: &Handle<R>,
     module: &'static ModuleDeclaration,
 ) -> Result<(), RecordError> {
     for table in module.tables {
-        if table.fields.is_empty() {
-            continue;
-        }
-        let names: Vec<&str> = table.fields.iter().map(|field| field.name).collect();
+        let names: Vec<&str> = ENVELOPE
+            .iter()
+            .map(|column| column.name)
+            .chain(table.fields.iter().map(|field| field.name))
+            .collect();
         let rows = handle.query_values(
             &format!("SELECT {} FROM {}", names.join(", "), table.name),
             &[],
         )?;
         for row in rows {
-            for (field, stored) in table.fields.iter().zip(row) {
-                check_value(handle, table, field, &from_stored(stored))?;
+            let mut stored = row.into_iter().map(from_stored);
+            for (column, value) in ENVELOPE.iter().zip(stored.by_ref()) {
+                envelope::check(table, column, &value)?;
+            }
+            for (field, value) in table.fields.iter().zip(stored) {
+                check_value(handle, table, field, &value)?;
             }
         }
     }
@@ -319,22 +356,22 @@ fn declared_table(
     })
 }
 
-/// Runs `body` in a `BEGIN IMMEDIATE` transaction on `handle`, committed when it succeeds and
-/// rolled back otherwise, so a refused write leaves the file as it was.
+/// Runs `body` in a `BEGIN IMMEDIATE` transaction on `handle`, committed when it succeeds. When
+/// `body` or the `COMMIT` fails, the transaction is rolled back, so a refused write leaves the
+/// file as it was and the handle never stays inside the transaction.
 fn in_write_transaction(
     handle: &Handle<Write>,
     body: impl FnOnce() -> Result<(), RecordError>,
 ) -> Result<(), RecordError> {
     handle.execute_batch("BEGIN IMMEDIATE")?;
-    match body() {
-        Ok(()) => Ok(handle.execute_batch("COMMIT")?),
-        Err(error) => {
-            // The rollback's own failure is not reported: the refusal says why nothing was
-            // written, and SQLite ends the transaction with the connection either way.
-            let _ = handle.execute_batch("ROLLBACK");
-            Err(error)
-        }
+    let outcome = body().and_then(|()| Ok(handle.execute_batch("COMMIT")?));
+    if outcome.is_err() {
+        // The rollback's own failure is not reported: the refusal says why nothing was written.
+        // A COMMIT that failed on a deferred constraint leaves the transaction open, which this
+        // rollback ends.
+        let _ = handle.execute_batch("ROLLBACK");
     }
+    outcome
 }
 
 /// The fields a write gives, each declared once in `table`, each value within its declaration
@@ -406,9 +443,9 @@ fn check_value<R: Inspect>(
     Ok(())
 }
 
-/// The envelope columns a write gives, each an envelope column given once, of its SQL type and
-/// not `NULL` unless the column may be; an update never gives `id`. With
-/// [`Completeness::Every`], every envelope column is given.
+/// The envelope columns a write gives, each an envelope column given once and in its stored form
+/// (`envelope::check`); an update never gives `id`. With [`Completeness::Every`], every envelope
+/// column is given.
 fn check_envelope<'a>(
     table: &'static Table,
     envelope: &'a [(&str, Value)],
@@ -429,21 +466,7 @@ fn check_envelope<'a>(
         if column.primary_key && completeness == Completeness::Some {
             return Err(RecordError::IdChanged { table: table.name });
         }
-        let error = match (value, column.sql_type) {
-            (Value::Null, _) if column.not_null => Some(ValueError::Null),
-            (Value::Null, _)
-            | (Value::Integer(_), vilicus_module_api::SqlType::Integer)
-            | (Value::Text(_), vilicus_module_api::SqlType::Text)
-            | (Value::Blob(_), vilicus_module_api::SqlType::Blob) => None,
-            (_, expected) => Some(ValueError::StorageClass { expected }),
-        };
-        if let Some(error) = error {
-            return Err(RecordError::Invalid {
-                table: table.name,
-                column: column.name,
-                error,
-            });
-        }
+        envelope::check(table, column, value)?;
         checked.push(Checked {
             column: column.name,
             value,

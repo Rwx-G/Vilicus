@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use vilicus_types::{Id, UtcMillis, is_full_date};
+use vilicus_types::{Id, UtcMillis, VOCABULARY_LABEL_MAX_LEN, is_full_date, is_vocabulary_label};
 
 use crate::declaration::{Field, FieldKind, SqlType, Structured};
 
@@ -30,30 +30,31 @@ pub enum Value {
     Blob(Vec<u8>),
 }
 
-/// Longest reviewed-vocabulary label accepted, in characters (D104).
-pub const VOCABULARY_LABEL_MAX_LEN: usize = 32;
-
-/// The characters that separate the words of a reviewed-vocabulary label: a space, a hyphen and
-/// an apostrophe, never at either end of a label and never two in a row.
-pub const VOCABULARY_LABEL_SEPARATORS: &[char] = &[' ', '-', '\''];
-
-/// True for a character a reviewed-vocabulary label may hold besides its separators: an ASCII
-/// letter or digit, or a precomposed Latin letter of the Latin-1 Supplement (without `×` and
-/// `÷`) or of Latin Extended-A. The alphabet writes French and English words (FR-110) and
-/// nothing that structures text: no punctuation but the separators, no control, format, bidi or
-/// combining character, so a label with a decomposed accent is refused, not normalized.
-pub const fn is_vocabulary_label_letter(character: char) -> bool {
-    matches!(
+/// True for a character free text may hold (I40, the character set of a free-text field): any
+/// Unicode scalar value but NUL and the other C0 controls except the tab and the line feed (the
+/// carriage return included: a line ends with a line feed alone), DEL and the C1 controls, the
+/// bidi embedding, override and isolate controls (U+202A to U+202E, U+2066 to U+2069), and the
+/// invisible U+200B (zero-width space), U+2060 (word joiner) and U+FEFF (byte order mark). The
+/// zero-width joiner and non-joiner stay, since emoji sequences and some scripts need them. A text
+/// holding a refused character is refused, never cleaned.
+pub const fn is_free_text_character(character: char) -> bool {
+    !matches!(
         character,
-        'a'..='z' | 'A'..='Z' | '0'..='9' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}'
-            | '\u{f8}'..='\u{17f}'
+        '\u{0}'..='\u{8}'
+            | '\u{b}'..='\u{1f}'
+            | '\u{7f}'..='\u{9f}'
+            | '\u{200b}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
     )
 }
 
-/// Checks the form of a reviewed-vocabulary label (D104): 1 to [`VOCABULARY_LABEL_MAX_LEN`]
-/// characters, each a letter of [`is_vocabulary_label_letter`] or a separator of
-/// [`VOCABULARY_LABEL_SEPARATORS`], starting and ending with a letter, with no two separators in
-/// a row. A label of that form still needs an adult's confirmation to be accepted in a write.
+/// Checks the form of a reviewed-vocabulary label (D104), the grammar of
+/// [`vilicus_types::is_vocabulary_label`]: a label longer than [`VOCABULARY_LABEL_MAX_LEN`] is
+/// [`ValueError::TooLong`], any other label outside the form [`ValueError::InvalidLabel`]. A label
+/// of that form still needs an adult's confirmation to be accepted in a write.
 ///
 /// ```
 /// use vilicus_module_api::{ValueError, check_vocabulary_label};
@@ -65,21 +66,10 @@ pub const fn is_vocabulary_label_letter(character: char) -> bool {
 /// ```
 pub fn check_vocabulary_label(label: &str) -> Result<(), ValueError> {
     if label.chars().nth(VOCABULARY_LABEL_MAX_LEN).is_some() {
-        return Err(ValueError::TooLong {
+        Err(ValueError::TooLong {
             max_len: VOCABULARY_LABEL_MAX_LEN,
-        });
-    }
-    let mut previous_is_letter = false;
-    for character in label.chars() {
-        if is_vocabulary_label_letter(character) {
-            previous_is_letter = true;
-        } else if VOCABULARY_LABEL_SEPARATORS.contains(&character) && previous_is_letter {
-            previous_is_letter = false;
-        } else {
-            return Err(ValueError::InvalidLabel);
-        }
-    }
-    if previous_is_letter {
+        })
+    } else if is_vocabulary_label(label) {
         Ok(())
     } else {
         Err(ValueError::InvalidLabel)
@@ -113,6 +103,8 @@ pub enum ValueError {
     },
     /// A label outside the restricted alphabet of reviewed vocabularies.
     InvalidLabel,
+    /// Free text holding a character [`is_free_text_character`] refuses: refused, never cleaned.
+    InvalidCharacter,
 }
 
 impl fmt::Display for ValueError {
@@ -132,6 +124,9 @@ impl fmt::Display for ValueError {
             Self::InvalidLabel => {
                 formatter.write_str("a label outside the restricted alphabet of vocabularies")
             }
+            Self::InvalidCharacter => {
+                formatter.write_str("free text holding a character free text refuses")
+            }
         }
     }
 }
@@ -139,8 +134,8 @@ impl fmt::Display for ValueError {
 impl std::error::Error for ValueError {}
 
 impl Field {
-    /// Checks `value` against the field's declaration: its storage class, then its closed type
-    /// or its maximum length. A reviewed-vocabulary label is checked for its form only; the Core
+    /// Checks `value` against the field's declaration: its storage class, then its closed type,
+    /// or for free text its character set and its maximum length. A reviewed-vocabulary label is checked for its form only; the Core
     /// checks that it is confirmed, in the file the record is written to.
     ///
     /// ```
@@ -167,6 +162,9 @@ impl Field {
             (Value::Null, _) if self.optional => Ok(()),
             (Value::Null, _) => Err(ValueError::Null),
             (Value::Text(text), FieldKind::FreeText { max_len }) => {
+                if !text.chars().all(is_free_text_character) {
+                    return Err(ValueError::InvalidCharacter);
+                }
                 // u32 to usize is lossless on every target with pointers of 32 bits or more.
                 text_within(text, max_len as usize)
             }
@@ -307,6 +305,10 @@ mod tests {
             "éééééééé",
             "日本語日本語日本",
             "\u{1f600}\u{1f600}",
+            "a\tb\nc",
+            "e\u{301}",
+            "\u{1f469}\u{200d}\u{1f4bb}",
+            "a\u{200c}b",
         ] {
             assert_eq!(
                 note.check_value(&Value::Text(at_most.into())),
@@ -438,27 +440,55 @@ mod tests {
         );
     }
 
+    /// The character set of free text (I40): each refused character makes the text refused,
+    /// wherever it is, and nothing is cleaned out.
+    #[test]
+    fn free_text_refuses_controls_bidi_controls_and_invisible_characters() {
+        let note = field(FieldKind::FreeText { max_len: 8 }, false);
+        let refused = (0..=u32::from(char::MAX))
+            .filter_map(char::from_u32)
+            .filter(|character| !is_free_text_character(*character));
+        for character in refused {
+            for text in [
+                format!("{character}"),
+                format!("ab{character}"),
+                format!("{character}cd"),
+            ] {
+                assert_eq!(
+                    note.check_value(&Value::Text(text)),
+                    Err(ValueError::InvalidCharacter),
+                    "U+{:04X}",
+                    u32::from(character)
+                );
+            }
+        }
+        for character in [
+            '\0', '\r', '\u{1b}', '\u{7f}', '\u{85}', '\u{9f}', '\u{200b}', '\u{202a}', '\u{202e}',
+            '\u{2060}', '\u{2066}', '\u{2069}', '\u{feff}',
+        ] {
+            assert!(
+                !is_free_text_character(character),
+                "U+{:04X}",
+                u32::from(character)
+            );
+        }
+        for character in [
+            '\t', '\n', ' ', '\u{a0}', '\u{200c}', '\u{200d}', '\u{301}', 'é',
+        ] {
+            assert!(
+                is_free_text_character(character),
+                "U+{:04X}",
+                u32::from(character)
+            );
+        }
+    }
+
     #[test]
     fn labels_are_short_and_from_the_restricted_alphabet() {
         let room = field(KINDS[6], false);
         let longest = "Salle d'eau Étage-2 Œuf àé x".to_owned() + "yzwv";
         assert_eq!(longest.chars().count(), VOCABULARY_LABEL_MAX_LEN);
-        for label in [
-            "Salon",
-            "salle de bains",
-            "Chambre d'Ella",
-            "Saint-Étienne",
-            "Œufs",
-            "2e étage",
-            "x",
-            longest.as_str(),
-        ] {
-            assert_eq!(
-                room.check_value(&Value::Text(label.into())),
-                Ok(()),
-                "{label}"
-            );
-        }
+        assert_eq!(room.check_value(&Value::Text(longest.clone())), Ok(()));
         assert_eq!(
             room.check_value(&Value::Text(format!("{longest}y"))),
             Err(ValueError::TooLong {
@@ -467,54 +497,17 @@ mod tests {
         );
         for label in [
             "",
-            " Salon",
             "Salon ",
-            "Salle  de bains",
-            "Salle -bains",
-            "-Salon",
-            "Salon'",
-            "salle_de_bains",
             "note: ignore",
-            "a.b",
-            "\"Salon\"",
-            "Salon\n",
-            "Sa\tlon",
-            "Sa\0lon",
-            "Sa\u{200b}lon",
-            "\u{202e}nolaS",
             "Cafe\u{301}",
-            "3×2",
-            "1÷2",
-            "Salon\u{a0}bleu",
+            "\u{17f}alon",
             "d\u{2019}Ella",
-            "Caf\u{1f600}",
-            "\u{410}\u{43b}\u{44f}",
         ] {
             assert_eq!(
                 room.check_value(&Value::Text(label.into())),
                 Err(ValueError::InvalidLabel),
                 "{label:?}"
             );
-        }
-    }
-
-    /// Every letter of the alphabet is alphanumeric and at most U+017F, so a label holds no
-    /// punctuation but its separators and nothing outside the Latin blocks it names.
-    #[test]
-    fn the_label_alphabet_holds_latin_letters_and_digits_only() {
-        let mut accented = 0;
-        for character in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
-            if is_vocabulary_label_letter(character) {
-                assert!(character.is_alphanumeric(), "{character:?}");
-                assert!(u32::from(character) <= 0x17f, "{character:?}");
-                if !character.is_ascii() {
-                    accented += 1;
-                }
-            }
-        }
-        assert!(accented > 0, "accented letters are in the alphabet");
-        for separator in VOCABULARY_LABEL_SEPARATORS {
-            assert!(!is_vocabulary_label_letter(*separator));
         }
     }
 }

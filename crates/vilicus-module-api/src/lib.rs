@@ -23,19 +23,20 @@ mod tool;
 mod value;
 
 pub use check::{
-    CORE_MATRIX_SECTION, DeclarationError, FTS5_RESERVED_COLUMNS, IDENTIFIER_MAX_LEN,
-    IdentifierKind, MATRIX_SECTION_MAX_LEN, ROWID_NAMES, is_identifier, is_matrix_section,
+    CORE_MATRIX_SECTION, DeclarationError, FREE_TEXT_MAX_LEN, FTS5_RESERVED_COLUMNS,
+    IDENTIFIER_MAX_LEN, IdentifierKind, MATRIX_SECTION_MAX_LEN, ROWID_NAMES, is_identifier,
+    is_matrix_section,
 };
 pub use declaration::{
     ENVELOPE, EnvelopeColumn, FTS5_SHADOW_SUFFIXES, Field, FieldKind, Fts5Content, Fts5Table,
     Fts5Tokenizer, Migration, ModuleDeclaration, SqlType, Structured, Table,
 };
 pub use tool::{Confirmation, MatrixRow, Tool};
-pub use value::{
-    VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, Value, ValueError,
-    check_vocabulary_label, is_vocabulary_label_letter,
+pub use value::{Value, ValueError, check_vocabulary_label, is_free_text_character};
+pub use vilicus_types::{
+    DataType, ExceptionClass, Tier, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS,
+    is_vocabulary_label, is_vocabulary_label_letter,
 };
-pub use vilicus_types::{DataType, ExceptionClass, Tier};
 
 #[cfg(test)]
 mod tests;

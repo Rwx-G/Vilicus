@@ -409,6 +409,15 @@ fn fields_without_a_bounded_declaration_are_refused() {
             },
         ),
         (
+            FieldKind::FreeText {
+                max_len: FREE_TEXT_MAX_LEN + 1,
+            },
+            DeclarationError::FreeTextTooLong {
+                table: "items",
+                field: "extra",
+            },
+        ),
+        (
             FieldKind::Structured(Structured::Enumeration(&[])),
             DeclarationError::EmptyEnumeration {
                 table: "items",
@@ -453,6 +462,9 @@ fn fields_without_a_bounded_declaration_are_refused() {
     }
     for kind in [
         FieldKind::FreeText { max_len: 1 },
+        FieldKind::FreeText {
+            max_len: FREE_TEXT_MAX_LEN,
+        },
         FieldKind::Structured(Structured::Integer { min: 5, max: 5 }),
         FieldKind::Structured(Structured::Enumeration(&["only"])),
     ] {

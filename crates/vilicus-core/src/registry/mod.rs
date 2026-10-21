@@ -31,8 +31,18 @@
 //!
 //! The declaration rules themselves are `vilicus-module-api`'s; the registry adds the
 //! comparison of each declaration with the schema its migrations produce in a file, in the
-//! build-time test ([`Registry::verify_migrations`]) and whenever the Core opens a file
-//! ([`Registry::open`]).
+//! build-time test ([`Registry::verify_migrations`]) and whenever the Core opens a file. Opening
+//! a file is the Core's alone: no crate outside it gets a handle, whose raw SQL would skip the
+//! validation of every write (FR-58).
+//!
+//! ```compile_fail,E0624
+//! fn open(
+//!     registry: &vilicus_core::registry::Registry,
+//!     file: &vilicus_storage::ModuleFile,
+//! ) {
+//!     let _ = registry.open::<vilicus_storage::Write>(file, &[0; 32]);
+//! }
+//! ```
 
 mod fts5;
 mod matrix;
@@ -187,8 +197,7 @@ impl fmt::Display for VerifyError {
 
 impl std::error::Error for VerifyError {}
 
-/// The key epoch of the scratch files [`Registry::verify_migrations`] and
-/// [`Registry::fuzz_write_paths`] build.
+/// The key epoch of the scratch files the build-time test and the write path fuzz test build.
 const VERIFY_EPOCH: KeyEpoch = KeyEpoch {
     partition_root_version: 1,
     generation: 0,
@@ -258,8 +267,9 @@ impl Registry {
     /// Opens `file` in role `R` with its raw `key`, after checking it against its module's
     /// declaration (AD-9): the module is registered, the file's module schema is at the module's
     /// latest version, and its schema is the declared one. Each refusal is a typed
-    /// [`FileError`]; the handle is closed before the error is returned.
-    pub fn open<R: Inspect>(
+    /// [`FileError`]; the handle is closed before the error is returned. Crate-private: a handle
+    /// executes raw SQL, so outside the Core it would write around field validation.
+    pub(crate) fn open<R: Inspect>(
         &self,
         file: &ModuleFile,
         key: &[u8; 32],
@@ -274,7 +284,7 @@ impl Registry {
 
     /// The build-time test of AD-9: for each module, builds a new file under `directory` with
     /// `key`, applies the module's migrations in order through the migration runner, then opens
-    /// it through [`open`](Self::open), which compares the migrated schema with the declaration.
+    /// it as the Core opens every file, comparing the migrated schema with the declaration.
     /// `directory` holds no file of these modules beforehand; the files stay there.
     pub fn verify_migrations(&self, directory: &Path, key: &[u8; 32]) -> Result<(), VerifyError> {
         for module in self.modules {
@@ -322,7 +332,7 @@ pub(crate) fn create_migrated(
     Ok(file)
 }
 
-/// The checks of [`Registry::open`] on an open handle.
+/// The checks of `Registry::open` on an open handle.
 fn check<R: Inspect>(module: &ModuleDeclaration, handle: &Handle<R>) -> Result<(), FileError> {
     let found = handle.schema_version(MigrationTrack::Module)?;
     let latest = module.latest_version();

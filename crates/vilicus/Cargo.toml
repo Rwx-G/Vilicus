@@ -17,3 +17,8 @@ vilicus-gateway.workspace = true
 vilicus-audit.workspace = true
 vilicus-egress.workspace = true
 vilicus-ai.workspace = true
+
+# The binary's tests run the write path fuzz test over its registry (Story 3.4); a dev-dependency
+# feature never reaches `cargo build -p vilicus`.
+[dev-dependencies]
+vilicus-core = { workspace = true, features = ["testing"] }

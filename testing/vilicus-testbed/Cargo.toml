@@ -12,5 +12,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-vilicus-core.workspace = true
+vilicus-core = { workspace = true, features = ["testing"] }
 vilicus-mod-reference.workspace = true

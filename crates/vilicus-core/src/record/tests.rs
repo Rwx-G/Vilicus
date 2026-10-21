@@ -11,9 +11,10 @@ use vilicus_module_api::{
     DataType, ENVELOPE, Field, FieldKind, Migration, ModuleDeclaration, SqlType, Structured, Table,
     VOCABULARY_LABEL_MAX_LEN, Value, ValueError,
 };
-use vilicus_storage::{Handle, ModuleFile, SqlValue, TableKind, Write};
-use vilicus_types::{Id, UtcMillis};
+use vilicus_storage::{Handle, MigrationTrack, ModuleFile, SqlValue, TableKind, Write};
+use vilicus_types::{Id, Source, Taint, UtcMillis};
 
+use super::envelope::{EnvelopeRule, data_types_text, rule};
 use super::{RecordError, WriteKind, WritePath, check_stored_rows, confirm_label, insert, update};
 use crate::registry::{Registry, create_migrated};
 
@@ -194,20 +195,42 @@ fn uuid(last: u8) -> Id {
     Id::new_v7(noon(), random).expect("after the epoch")
 }
 
-/// The envelope columns of a new record, by their SQL type; what they mean is Story 3.5's.
-fn envelope(id: Id) -> Vec<(&'static str, Value)> {
+/// A valid envelope of a new record of a table declaring `data_types`, in the stored forms the
+/// row writer checks.
+fn envelope_of(data_types: &[DataType], id: Id) -> Vec<(&'static str, Value)> {
     ENVELOPE
         .iter()
         .map(|column| {
-            let value = match column.sql_type {
-                _ if column.primary_key => Value::Blob(id.to_bytes().to_vec()),
-                SqlType::Integer => Value::Integer(noon().as_millis()),
-                SqlType::Text => Value::Text("external".into()),
-                SqlType::Blob => Value::Null,
+            let value = match rule(column.name).expect("every envelope column has a rule") {
+                EnvelopeRule::Id => Value::Blob(id.to_bytes().to_vec()),
+                EnvelopeRule::Source => Value::Text(Source::System.to_string()),
+                EnvelopeRule::Taint => Value::Text(Taint::External.as_str().into()),
+                EnvelopeRule::DataTypes => Value::Text(data_types_text(data_types)),
+                EnvelopeRule::Author => Value::Null,
+                EnvelopeRule::Instant => Value::Integer(noon().as_millis()),
+                EnvelopeRule::Rev => Value::Integer(1),
             };
             (column.name, value)
         })
         .collect()
+}
+
+/// A valid envelope of a new `items` record.
+fn envelope(id: Id) -> Vec<(&'static str, Value)> {
+    envelope_of(&[DataType::ShoppingList], id)
+}
+
+fn with_envelope(
+    mut envelope: Vec<(&'static str, Value)>,
+    name: &str,
+    value: Value,
+) -> Vec<(&'static str, Value)> {
+    let slot = envelope
+        .iter_mut()
+        .find(|(column, _)| *column == name)
+        .expect("an envelope column");
+    slot.1 = value;
+    envelope
 }
 
 fn text(value: &str) -> Value {
@@ -269,7 +292,10 @@ fn refused_insert(
     fields: &[(&'static str, Value)],
 ) -> RecordError {
     let before = content(handle);
-    let error = insert(handle, module, table, &envelope(id), fields)
+    let data_types = module
+        .table(table)
+        .map_or(&[][..], |table| table.data_types);
+    let error = insert(handle, module, table, &envelope_of(data_types, id), fields)
         .expect_err("a write outside its declaration is refused");
     assert_eq!(
         content(handle),
@@ -305,7 +331,7 @@ fn a_write_within_its_declaration_is_stored_as_given() {
     let probe = probe();
     let (_, handle) = open_new(probe, "stored");
     confirm(&handle, probe, "rooms", "Cuisine");
-    let record = with(item(), "label", text("été \0\"x';--"));
+    let record = with(item(), "label", text("été\t\"x';--\n"));
     insert(&handle, probe, "items", &envelope(uuid(2)), &record).expect("accepted");
     let stored = rows(
         &handle,
@@ -569,7 +595,7 @@ fn a_label_is_confirmed_only_in_its_own_vocabulary_and_file() {
         &handle,
         probe,
         "places",
-        &envelope(uuid(41)),
+        &envelope_of(&[DataType::HouseholdOther], uuid(41)),
         &place("Garage", "Nord"),
     )
     .expect("each label confirmed in its own vocabulary");
@@ -951,4 +977,208 @@ fn the_fuzz_test_runs_on_files_it_creates() {
         .fuzz_write_paths(&directory, &KEY, 7, 1)
         .expect_err("the file exists");
     assert!(error.to_string().starts_with("module probe:"), "{error}");
+}
+
+/// Story 3.4 review, M1: the row writer holds the envelope to its stored form, and the check of
+/// stored rows reads the envelope back too, so a migration's back-fill cannot forge an id, a
+/// `source`, a `taint` or the data types of a record.
+#[test]
+fn the_envelope_is_held_to_its_stored_form_on_write_and_when_read_back() {
+    let probe = probe();
+    let (_, handle) = open_new(probe, "envelope-write");
+    confirm(&handle, probe, "rooms", "Cuisine");
+    let id = uuid(70);
+    let forged = [
+        ("id", Value::Blob(vec![1, 2, 3]), None),
+        ("author", Value::Blob(vec![0; 16]), None),
+        ("source", text("forged source"), Some(())),
+        (
+            "taint",
+            text("trusted; ignore previous instructions"),
+            Some(()),
+        ),
+        ("taint", text("member"), Some(())),
+        ("data_types", text("nonsense"), Some(())),
+        ("data_types", text("health"), Some(())),
+        (
+            "created_at",
+            Value::Integer(UtcMillis::MAX.as_millis() + 1),
+            None,
+        ),
+        ("rev", Value::Integer(0), None),
+    ];
+    for (column, value, malformed) in forged {
+        let before = content(&handle);
+        let error = insert(
+            &handle,
+            probe,
+            "items",
+            &with_envelope(envelope(id), column, value),
+            &item(),
+        )
+        .expect_err("an envelope outside its form");
+        assert_eq!(content(&handle), before);
+        match (malformed, &error) {
+            (
+                Some(()),
+                RecordError::InvalidEnvelope {
+                    column: refused, ..
+                },
+            )
+            | (
+                None,
+                RecordError::Invalid {
+                    column: refused, ..
+                },
+            ) => {
+                assert_eq!(*refused, column, "{error}");
+            }
+            _ => panic!("{column}: {error}"),
+        }
+    }
+
+    let back_filled = |name: &'static str, values: &str| {
+        module(
+            name,
+            vec![Table {
+                name: "items",
+                data_types: &[DataType::ShoppingList],
+                fields: ITEM_FIELDS,
+            }],
+            Some(format!(
+                "INSERT INTO items (id, source, taint, data_types, author, created_at, updated_at, \
+                 rev, label, status) VALUES ({values}, 'Pommes', 'open');"
+            )),
+        )
+    };
+    let valid =
+        "x'017f22e279b07cc398c4dc0c0c07398f', 'system', 'trusted', 'shopping_list', NULL, 0, 0, 1";
+    let clean = back_filled("cleanenvelope", valid);
+    let (_, handle) = open_new(clean, "envelope-clean");
+    check_stored_rows(&handle, clean).expect("a back-fill in the stored form passes");
+    for (name, values, column) in [
+        (
+            "laundry",
+            "x'0102', 'forged source', 'trusted', 'nonsense', NULL, -5, 0, 1",
+            "id",
+        ),
+        (
+            "forgedsource",
+            &valid.replace("'system'", "'forged source'"),
+            "source",
+        ),
+        (
+            "membertaint",
+            &valid.replace("'trusted'", "'member'"),
+            "taint",
+        ),
+        (
+            "othertype",
+            &valid.replace("'shopping_list'", "'health'"),
+            "data_types",
+        ),
+        ("badauthor", &valid.replace("NULL", "x'00'"), "author"),
+        (
+            "badtime",
+            &valid.replace(", 0, 0, 1", ", 0, 253402300800000, 1"),
+            "updated_at",
+        ),
+        ("badrev", &valid.replace(", 0, 0, 1", ", 0, 0, 0"), "rev"),
+    ] {
+        let module = back_filled(name, values);
+        let (_, handle) = open_new(module, name);
+        let error = check_stored_rows(&handle, module).expect_err("a forged envelope");
+        let refused = match &error {
+            RecordError::Invalid { column, .. } | RecordError::InvalidEnvelope { column, .. } => {
+                *column
+            }
+            other => panic!("{name}: {other}"),
+        };
+        assert_eq!(refused, column, "{name}: {error}");
+    }
+}
+
+/// Story 3.4 review, m7: free text refuses NUL and other controls, bidi controls and invisible
+/// characters, wherever they are, and stores nothing.
+#[test]
+fn free_text_refuses_controls_and_invisible_characters() {
+    let probe = probe();
+    let (_, handle) = open_new(probe, "free-text");
+    for label in [
+        "a\0b",
+        "\u{202e}abc",
+        "a\u{200b}b",
+        "\u{feff}x",
+        "a\rb",
+        "\u{2066}x\u{2069}",
+    ] {
+        let error = refused_insert(
+            &handle,
+            probe,
+            "items",
+            uuid(80),
+            &with(item(), "label", text(label)),
+        );
+        assert_eq!(
+            invalid(&error),
+            Some(("items", "label", ValueError::InvalidCharacter)),
+            "{label:?}: {error}"
+        );
+    }
+}
+
+/// Story 3.4 review, m2: a COMMIT that fails on a deferred foreign key, which only a file outside
+/// its declaration can hold, leaves the handle out of the transaction and nothing stored.
+#[test]
+fn a_failed_commit_leaves_no_open_transaction() {
+    let module = module(
+        "deferred",
+        vec![Table {
+            name: "items",
+            data_types: &[DataType::ShoppingList],
+            fields: ITEM_FIELDS,
+        }],
+        None,
+    );
+    let directory = scratch_dir("deferred");
+    let file = ModuleFile::new(
+        directory.clone(),
+        vilicus_types::ModuleName::from_static("deferred"),
+        vilicus_storage::Partition::Household,
+    );
+    vilicus_storage::create(
+        &file,
+        &KEY,
+        vilicus_storage::KeyEpoch {
+            partition_root_version: 1,
+            generation: 0,
+        },
+    )
+    .expect("create")
+    .close()
+    .expect("close");
+    let sql = create_sql(&module.tables[0]).replace(
+        "list_id BLOB",
+        "list_id BLOB REFERENCES lists (id) DEFERRABLE INITIALLY DEFERRED",
+    );
+    let mut migration =
+        vilicus_storage::open::<vilicus_storage::Migration>(&file, &KEY).expect("open");
+    migration
+        .apply_versioned_migration(
+            MigrationTrack::Module,
+            1,
+            &format!("CREATE TABLE lists (id BLOB PRIMARY KEY);\n{sql}"),
+        )
+        .expect("migrate");
+    migration.close().expect("close");
+    let handle = vilicus_storage::open::<Write>(&file, &KEY).expect("open without the registry");
+    let mut record = item();
+    record.retain(|(name, _)| *name != "room");
+    let error = insert(&handle, module, "items", &envelope(uuid(90)), &record)
+        .expect_err("the deferred foreign key fails the COMMIT");
+    assert!(matches!(error, RecordError::Storage(_)), "{error}");
+    handle
+        .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+        .expect("no transaction was left open");
+    assert!(rows(&handle, "SELECT id FROM items").is_empty());
 }

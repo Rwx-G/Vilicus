@@ -22,6 +22,11 @@ use crate::tool::{Confirmation, Tool};
 /// value or a vocabulary name.
 pub const IDENTIFIER_MAX_LEN: usize = 64;
 
+/// Longest maximum length a free-text field may declare, in characters: 1 Mi characters, far above
+/// any note or draft the modules hold, and low enough that the write path fuzz test can write one
+/// character past any declared maximum.
+pub const FREE_TEXT_MAX_LEN: u32 = 1 << 20;
+
 /// Names SQLite gives the rowid of a table that has no column of that name: a field of one of
 /// these names would take the place of the rowid in every statement that names it. `_rowid_` is
 /// outside the identifier grammar already.
@@ -125,6 +130,13 @@ pub enum DeclarationError {
     },
     /// A free-text field has no maximum length (FR-58).
     FreeTextWithoutMaxLength {
+        /// The table.
+        table: &'static str,
+        /// The field.
+        field: &'static str,
+    },
+    /// A free-text field declares a maximum length above [`FREE_TEXT_MAX_LEN`].
+    FreeTextTooLong {
         /// The table.
         table: &'static str,
         /// The field.
@@ -300,6 +312,7 @@ impl DeclarationError {
             Self::NoDataType { .. } => "a record kind declares no data type",
             Self::DuplicateDataType { .. } => "a record kind declares a data type twice",
             Self::FreeTextWithoutMaxLength { .. } => "a free-text field has no maximum length",
+            Self::FreeTextTooLong { .. } => "a free-text field declares too long a maximum length",
             Self::EmptyEnumeration { .. } => "a compiled enumeration lists no value",
             Self::DuplicateEnumerationValue { .. } => "an enumeration lists a value twice",
             Self::EmptyIntegerRange { .. } => "a bounded integer admits no value",
@@ -369,6 +382,7 @@ impl fmt::Display for DeclarationError {
             Self::DuplicateField { table, field }
             | Self::EnvelopeName { table, field }
             | Self::FreeTextWithoutMaxLength { table, field }
+            | Self::FreeTextTooLong { table, field }
             | Self::EmptyEnumeration { table, field }
             | Self::EmptyIntegerRange { table, field } => write!(formatter, ": {table}.{field}"),
             Self::DuplicateDataType { table, data_type } => {
@@ -682,6 +696,12 @@ const fn validate_field(table: &'static str, field: &Field) -> Result<(), Declar
             table,
             field: field.name,
         }),
+        FieldKind::FreeText { max_len } if max_len > FREE_TEXT_MAX_LEN => {
+            Err(DeclarationError::FreeTextTooLong {
+                table,
+                field: field.name,
+            })
+        }
         FieldKind::FreeText { .. }
         | FieldKind::Structured(Structured::Date | Structured::Timestamp | Structured::Uuid) => {
             Ok(())

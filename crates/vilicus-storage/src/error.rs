@@ -222,7 +222,7 @@ impl Error {
     /// True for a failure that comes from the state of the host when it happened rather than
     /// from the file's content and the code: the file system or the disk, a lock or a connection
     /// held on the file, cold copies no verified backup covers yet, a key or an epoch the caller
-    /// gave, an interrupted change of epoch. The same operation on the same file, with the same
+    /// gave, an interrupted change of epoch, a permission the file system denies. The same operation on the same file, with the same
     /// code, may succeed later. Every other failure, a statement refused or failing on the
     /// file's content, a changed migration, a schema or a record outside its declaration, repeats
     /// until the code changes, and is not environmental.
@@ -251,6 +251,7 @@ impl Error {
                         | rusqlite::ErrorCode::CannotOpen
                         | rusqlite::ErrorCode::FileLockingProtocolFailed
                         | rusqlite::ErrorCode::ReadOnly
+                        | rusqlite::ErrorCode::PermissionDenied
                         | rusqlite::ErrorCode::OperationInterrupted
                 )
             ),
@@ -548,6 +549,7 @@ mod tests {
             sqlite(rusqlite::ffi::SQLITE_FULL),
             sqlite(rusqlite::ffi::SQLITE_BUSY),
             sqlite(rusqlite::ffi::SQLITE_IOERR),
+            sqlite(rusqlite::ffi::SQLITE_PERM),
             in_migration(sqlite(rusqlite::ffi::SQLITE_FULL)),
         ];
         for error in environmental {

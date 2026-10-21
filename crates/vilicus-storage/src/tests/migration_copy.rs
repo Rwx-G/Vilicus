@@ -204,6 +204,64 @@ fn no_copy_is_made_while_the_epoch_is_pending_or_the_wal_cannot_empty() {
     assert_eq!(names(&dir), before);
 }
 
+/// Review of Story 3.7, H1: a connection opened on the live file after the copy, which writes
+/// and stays open across the swap, keeps its write in the live WAL, where neither the file's
+/// length nor its times show it; the swap is refused, before the link, so the write is neither
+/// lost into the old inode nor read by a later connection from the old WAL into the new file.
+/// The same holds for a connection that only stays open. Once they close, the live file holds
+/// the write, opens and reads, and a new migration of it completes.
+#[test]
+fn a_connection_held_open_across_the_swap_refuses_it() {
+    let dir = scratch_dir("copy-held-open");
+    let file = create_module_file(&dir);
+    for writes in [true, false] {
+        let copy = copy_for_migration(&file, &KEY, None).expect("copy");
+        let held = open::<Write>(&file, &KEY).expect("a connection opened after the copy");
+        if writes {
+            held.execute("INSERT INTO items (label) VALUES ('held')", [])
+                .expect("a write committed into the WAL");
+        }
+        let mut migration = open::<Migration>(copy.file(), &KEY).expect("open the copy");
+        migration
+            .apply_module_migrations(&frozen_all(&MIGRATIONS[..1]))
+            .expect("migrate the copy");
+        migration.close().expect("close");
+        let outcome = copy.swap_in();
+        assert!(
+            matches!(outcome, Err(Error::CopyRaced(_))),
+            "writes {writes}: {outcome:?}"
+        );
+        assert!(maintenance::cold_copies(&file).expect("list").is_empty());
+        held.close().expect("close the held connection");
+        assert_eq!(module_version(&file), 0, "writes {writes}");
+    }
+    assert_eq!(labels(&file.path()), ["first", "held"]);
+    let integrity: String = raw_connection(&file.path())
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("integrity check");
+    assert_eq!(integrity, "ok");
+    migrate_on_copy(&file, 1, None);
+    assert_eq!(module_version(&file), 1);
+    assert_eq!(labels(&file.path()), ["first", "held"]);
+}
+
+/// A connection open on the live file when the copy is made, idle so the checkpoint passes,
+/// refuses the copy: its shared-memory file shows it.
+#[test]
+fn no_copy_is_made_while_a_connection_is_open() {
+    let dir = scratch_dir("copy-open-connection");
+    let file = create_module_file(&dir);
+    let reader = open::<Read>(&file, &KEY).expect("an idle reader");
+    let outcome = copy_for_migration(&file, &KEY, None);
+    assert!(matches!(outcome, Err(Error::CopyRaced(_))), "{outcome:?}");
+    reader.close().expect("close");
+    assert!(!dir.join("fixture.household.db.migration").exists());
+    copy_for_migration(&file, &KEY, None)
+        .expect("once it closed")
+        .discard()
+        .expect("discard");
+}
+
 /// AC2: a connection that writes the live file after it was copied makes the swap fail; the live
 /// file keeps the write and no cold copy is made.
 #[test]

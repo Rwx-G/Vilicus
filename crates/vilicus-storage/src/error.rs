@@ -185,7 +185,8 @@ pub enum Error {
     /// A file copy was asked for while the WAL still holds content (AD-23).
     WalNotEmpty(PathBuf),
     /// The file or its WAL changed while it was being copied, or between its copy and the swap
-    /// of a migration: a connection was open.
+    /// of a migration, or a connection is still open on it: its WAL or shared-memory file exists
+    /// once the copy closed its own.
     CopyRaced(PathBuf),
     /// A file already has the most cold copies it may keep, none of them covered by a verified
     /// backup, so a migration, which leaves one more, does not start (AD-23).
@@ -340,7 +341,7 @@ impl fmt::Display for Error {
             Self::WalNotEmpty(path) => write!(formatter, "{} holds WAL content", path.display()),
             Self::CopyRaced(path) => write!(
                 formatter,
-                "{} changed while it was copied; a connection was open",
+                "{} changed while it was copied, or a connection is open on it",
                 path.display()
             ),
             Self::ColdCopiesFull { kept } => write!(

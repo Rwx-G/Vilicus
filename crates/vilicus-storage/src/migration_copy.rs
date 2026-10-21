@@ -213,21 +213,43 @@ fn remove_working_directory(directory: &Path) -> Result<()> {
 }
 
 /// What the swap compares with the state the copy was made from, to notice a connection that
-/// wrote the live file meanwhile.
+/// wrote the live file meanwhile, or that is still open on it: the file's length, inode and
+/// modification and change times, in nanoseconds, and whether its WAL or its shared-memory file
+/// exists. SQLite removes both at the last close of a file in WAL mode, so a connection open on
+/// the file, whether it wrote or not, leaves at least the shared-memory file; a write committed
+/// into the WAL by a connection that stays open is never in the database file, and a swap past
+/// such a connection would lose the write, or have a later connection read the old WAL into the
+/// new file.
 #[derive(Debug, PartialEq, Eq)]
 struct LiveState {
     length: u64,
-    modified: std::time::SystemTime,
     inode: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+    wal_present: bool,
+    shm_present: bool,
 }
 
 fn live_state(file: &ModuleFile) -> Result<LiveState> {
     let metadata = fs::metadata(file.path())?;
     Ok(LiveState {
         length: metadata.len(),
-        modified: metadata.modified()?,
         inode: metadata.ino(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+        wal_present: file.wal_path().exists(),
+        shm_present: suffixed(&file.path(), "-shm").exists(),
     })
+}
+
+/// The state of the live file once the copy closed its own connection: no other connection may
+/// be open on it, which its WAL or shared-memory file would show ([`Error::CopyRaced`]).
+fn closed_live_state(file: &ModuleFile) -> Result<LiveState> {
+    let state = live_state(file)?;
+    if state.wal_present || state.shm_present {
+        return Err(Error::CopyRaced(file.path()));
+    }
+    Ok(state)
 }
 
 /// The working copy of a migration (AD-23, D84): a copy of the live file, made on the Core
@@ -290,7 +312,7 @@ pub fn copy_for_migration(
     fs::create_dir(&directory)?;
     file::sync_parent(&directory)?;
     let copy = ModuleFile::new(&directory, file.module().clone(), file.partition());
-    let copied = maintenance::copy_file(file, &copy.path()).and_then(|()| live_state(file));
+    let copied = maintenance::copy_file(file, &copy.path()).and_then(|()| closed_live_state(file));
     match copied {
         Ok(before) => Ok(MigrationCopy {
             live: file.clone(),
@@ -321,14 +343,19 @@ impl MigrationCopy {
 
     /// Swaps the migrated copy into place (AD-23): the caller has closed every handle of the
     /// copy, each with a TRUNCATE checkpoint. The copy's WAL must be empty
-    /// ([`Error::WalNotEmpty`]), the live file unchanged since it was copied
-    /// ([`Error::CopyRaced`]) and both sidecars at the epoch of the copy
-    /// ([`Error::EpochMismatch`]); then the copy is synced, the cold copy's sidecar written, the
-    /// original hard-linked as the cold copy `<file>.pre-<core>.<module>` of [`from`](Self::from),
-    /// the copy renamed over the file and the directory synced. `<file>` names the original until
-    /// the rename and the migrated file after it, never nothing; `<file>.epoch` is not touched,
-    /// since a migration keeps the key and its epoch. A failure before the rename leaves the
-    /// original as the file, without its cold copy, and the working copy to discard.
+    /// ([`Error::WalNotEmpty`]), both sidecars at the epoch of the copy
+    /// ([`Error::EpochMismatch`]), and the live file unchanged since it was copied, with no
+    /// connection open on it ([`Error::CopyRaced`]), checked last, right before the link; then the
+    /// copy is synced, the cold copy's sidecar written, the original hard-linked as the cold copy
+    /// `<file>.pre-<core>.<module>` of [`from`](Self::from), the copy renamed over the file and the
+    /// directory synced. `<file>` names the original until the rename and the migrated file after
+    /// it, never nothing; `<file>.epoch` is not touched, since a migration keeps the key and its
+    /// epoch. A failure before the rename leaves the original as the file, without its cold copy,
+    /// and the working copy to discard.
+    ///
+    /// The checks narrow the window in which a connection could open on the live file between
+    /// the copy and the rename, they do not close it: only the Core, which serializes every
+    /// connection to a file on its writer thread (AD-9), keeps one from opening there.
     pub fn swap_in(mut self) -> Result<ColdCopy> {
         let swapped = self.swap();
         if swapped.is_ok() {
@@ -343,9 +370,6 @@ impl MigrationCopy {
             return Err(Error::WalNotEmpty(copy_wal));
         }
         File::open(self.copy.path())?.sync_all()?;
-        if live_state(&self.live)? != self.before {
-            return Err(Error::CopyRaced(self.live.path()));
-        }
         for epoch in [file::read_epoch(&self.live)?, file::read_epoch(&self.copy)?] {
             if epoch != self.epoch {
                 return Err(Error::EpochMismatch {
@@ -362,8 +386,15 @@ impl MigrationCopy {
             return Err(Error::AlreadyExists(cold.path));
         }
         file::write_sidecar(&file::sidecar_of(&cold.path), self.epoch)?;
-        let linked = fs::hard_link(self.live.path(), &cold.path)
-            .map_err(Error::from)
+        let linked = closed_live_state(&self.live)
+            .and_then(|now| {
+                if now == self.before {
+                    Ok(())
+                } else {
+                    Err(Error::CopyRaced(self.live.path()))
+                }
+            })
+            .and_then(|()| fs::hard_link(self.live.path(), &cold.path).map_err(Error::from))
             .and_then(|()| file::sync_parent(&cold.path))
             .and_then(|()| fs::rename(self.copy.path(), self.live.path()).map_err(Error::from));
         if let Err(error) = linked {

@@ -5,8 +5,8 @@
 use super::{EPOCH, KEY, module_file, raw_connection, scratch_dir};
 use crate::error::Error;
 use crate::{
-    ColumnInfo, Inspect, Migration, MigrationTrack, ModuleFile, Read, TableKind, Write, create,
-    open,
+    ColumnInfo, ForeignKey, Inspect, Migration, MigrationTrack, ModuleFile, Read, TableKind, Write,
+    create, open,
 };
 
 /// A module file as `create` leaves it: `_meta` with the key epoch, nothing else.
@@ -164,6 +164,47 @@ fn a_malformed_schema_version_is_a_typed_error() {
         reader.schema_version(MigrationTrack::Module),
         Err(Error::MalformedSchemaVersion(MigrationTrack::Module))
     ));
+    reader.close().expect("close");
+
+    // `_meta` is STRICT, so only a file rewritten outside the storage layer holds a version that
+    // is not an integer; it is malformed, not read as 0 or as a number parsed from text.
+    raw_connection(&file.path())
+        .execute_batch(
+            "CREATE TABLE meta_copy AS SELECT * FROM _meta; DROP TABLE _meta;
+             CREATE TABLE _meta (key TEXT PRIMARY KEY NOT NULL, value NOT NULL);
+             INSERT INTO _meta SELECT * FROM meta_copy WHERE key <> 'module_schema_version';
+             INSERT INTO _meta VALUES ('module_schema_version', '2'); DROP TABLE meta_copy;",
+        )
+        .expect("rewrite _meta");
+    let reader = open::<Read>(&file, &KEY).expect("open");
+    assert!(matches!(
+        reader.schema_version(MigrationTrack::Module),
+        Err(Error::MalformedSchemaVersion(MigrationTrack::Module))
+    ));
+}
+
+/// The order check reads the version under the write lock (`BEGIN IMMEDIATE`): while another
+/// connection holds a write transaction, a migration fails as busy and changes nothing.
+#[test]
+fn a_migration_waits_for_no_concurrent_writer() {
+    let file = new_file("version-busy");
+    let writer = open::<Write>(&file, &KEY).expect("open writer");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("hold the write lock");
+    let outcome = migrate(
+        &file,
+        MigrationTrack::Module,
+        1,
+        "CREATE TABLE one (x INTEGER);",
+    );
+    assert!(
+        matches!(&outcome, Err(Error::Sqlite(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
+        "{outcome:?}"
+    );
+    writer.execute_batch("COMMIT").expect("release");
+    writer.close().expect("close");
+    assert_eq!(versions(&file), (0, 0));
 }
 
 const ITEMS: &str = "CREATE TABLE items (
@@ -173,7 +214,8 @@ const ITEMS: &str = "CREATE TABLE items (
     total INTEGER GENERATED ALWAYS AS (quantity * 2) VIRTUAL
 ) STRICT;
 CREATE INDEX items_label ON items (label);
-CREATE TABLE loose (x INTEGER PRIMARY KEY, y) WITHOUT ROWID;
+CREATE UNIQUE INDEX items_lower ON items (lower(label)) WHERE quantity > 0;
+CREATE TABLE loose (x INTEGER PRIMARY KEY, y REFERENCES items (id) ON DELETE CASCADE) WITHOUT ROWID;
 CREATE VIEW labels AS SELECT label FROM items;
 CREATE TRIGGER items_touch AFTER INSERT ON items BEGIN SELECT 1; END;";
 
@@ -223,6 +265,48 @@ fn check_schema<R: Inspect>(file: &ModuleFile) {
         .expect("loose");
     assert!(!loose.strict && loose.without_rowid);
     assert_eq!(loose.columns[1], column("y", "", false, 0, 0));
+    assert_eq!(
+        loose.foreign_keys,
+        [ForeignKey {
+            table: "items".to_owned(),
+            from: "y".to_owned()
+        }]
+    );
+    assert!(items.foreign_keys.is_empty());
+    let index = |name: &str| {
+        items
+            .indexes
+            .iter()
+            .find(|index| index.name == name)
+            .unwrap_or_else(|| panic!("index {name} in {:?}", items.indexes))
+    };
+    let plain = index("items_label");
+    assert_eq!(
+        (plain.unique, plain.origin.as_str(), plain.partial),
+        (false, "c", false)
+    );
+    let key_columns: Vec<(i64, Option<&str>, Option<&str>)> = plain
+        .columns
+        .iter()
+        .filter(|column| column.key)
+        .map(|column| {
+            (
+                column.cid,
+                column.name.as_deref(),
+                column.collation.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(key_columns, [(1, Some("label"), Some("BINARY"))]);
+    let expression = index("items_lower");
+    assert!(expression.unique && expression.partial);
+    assert_eq!(expression.columns[0].cid, -2, "an expression column");
+    let primary = items
+        .indexes
+        .iter()
+        .find(|index| index.origin == "pk")
+        .expect("the index of the BLOB primary key");
+    assert!(primary.unique);
     let view = schema
         .tables
         .iter()

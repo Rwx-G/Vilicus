@@ -686,20 +686,28 @@ fn write_meta(connection: &Connection, epoch: KeyEpoch) -> Result<()> {
 }
 
 impl Handle<Migration> {
-    /// Applies one migration atomically (AD-23, D126). The runner opens and ends the transaction
-    /// with the authorizer removed, and the migration SQL runs under the migration policy, which
-    /// refuses transaction control; on any error the transaction is rolled back and nothing is
-    /// written. On every exit the connection is left closed to every statement.
-    pub fn apply_migration(&mut self, sql: &str) -> Result<()> {
+    /// Applies one migration without a version, for the replay of the Story 1.7 hostile
+    /// statements, which test the runner itself. Product code has only
+    /// [`apply_versioned_migration`](Self::apply_versioned_migration), so every schema change
+    /// moves a track's version.
+    #[cfg(test)]
+    pub(crate) fn apply_migration(&mut self, sql: &str) -> Result<()> {
         self.run(sql, None)
     }
 
-    /// Applies migration `version` of `track` like [`apply_migration`](Self::apply_migration) and
-    /// records `version` as the track's schema version in `_meta`, in the same transaction, so the
-    /// schema and its version never disagree (AD-26). Forward only and in order: `version` must
-    /// follow the recorded one by exactly one, the first migration being 1, or the call fails with
-    /// [`Error::MigrationOutOfOrder`] before the SQL runs. The version is written under the Core
-    /// policy, never by the migration SQL, which cannot reach `_meta`.
+    /// Applies migration `version` of `track` atomically (AD-23, D126) and records `version` as the
+    /// track's schema version in `_meta`, in the same transaction, so the schema and its version
+    /// never disagree (AD-26).
+    ///
+    /// The runner opens the transaction with `BEGIN IMMEDIATE`, with the authorizer removed, so
+    /// the order check reads the version under the write lock and a concurrent writer makes the
+    /// call fail as busy rather than race it. Forward only and in order: `version` must follow
+    /// the recorded one by exactly one, the first migration being 1, or the call fails with
+    /// [`Error::MigrationOutOfOrder`] before the SQL runs. The migration SQL runs under the
+    /// migration policy, which refuses transaction control; the version is written under the Core
+    /// policy, never by the migration SQL, which cannot reach `_meta`. On any error the
+    /// transaction is rolled back and nothing is written; on every exit the connection is left
+    /// closed to every statement.
     pub fn apply_versioned_migration(
         &mut self,
         track: MigrationTrack,
@@ -731,9 +739,12 @@ fn read_schema_version(connection: &Connection, track: MigrationTrack) -> Result
     match connection.query_row(
         "SELECT value FROM _meta WHERE key = ?1",
         [track.meta_key()],
-        |row| row.get::<_, i64>(0),
+        |row| row.get::<_, rusqlite::types::Value>(0),
     ) {
-        Ok(stored) => u32::try_from(stored).map_err(|_| Error::MalformedSchemaVersion(track)),
+        Ok(rusqlite::types::Value::Integer(stored)) => {
+            u32::try_from(stored).map_err(|_| Error::MalformedSchemaVersion(track))
+        }
+        Ok(_) => Err(Error::MalformedSchemaVersion(track)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
         Err(error) => Err(error.into()),
     }
@@ -745,7 +756,8 @@ fn run_migration(
     version: Option<(MigrationTrack, u32)>,
 ) -> Result<()> {
     authorizer::remove(connection)?;
-    let transaction = connection.transaction()?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let applied = migrate_in_transaction(&transaction, sql, version);
     authorizer::remove(&transaction)?;
     match applied {

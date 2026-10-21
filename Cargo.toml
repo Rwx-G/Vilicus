@@ -56,7 +56,9 @@ libfuzzer-sys = "=0.4.13"
 # library that vilicus-storage's build script compiles from crates/vilicus-storage/sqlcipher/,
 # instead of the 4.14.0 amalgamation `bundled-sqlcipher` would compile (D143). `modern_sqlite`
 # takes the bindings and API surface `bundled-sqlcipher` implied, `hooks` the authorizer and
-# `backup` the online backup API of the maintenance connection; no feature brings a crate.
+# `backup` the online backup API of the maintenance connection; no feature brings a crate. The
+# registry tests of vilicus-core use it as a dev-dependency, to build real FTS5 tables in a test
+# file outside the authorizer (Story 3.2 review).
 rusqlite = { version = "=0.40.2", default-features = false, features = ["sqlcipher", "modern_sqlite", "hooks", "backup"] }
 # Key buffers wiped on drop (spine AD-4, Stack).
 zeroize = "=1.9.1"

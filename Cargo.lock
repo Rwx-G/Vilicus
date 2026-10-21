@@ -530,6 +530,7 @@ dependencies = [
 name = "vilicus-core"
 version = "0.0.0"
 dependencies = [
+ "rusqlite",
  "vilicus-crypto",
  "vilicus-module-api",
  "vilicus-proto",

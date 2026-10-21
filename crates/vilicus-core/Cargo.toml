@@ -24,3 +24,8 @@ vilicus-proto.workspace = true
 vilicus-module-api.workspace = true
 vilicus-crypto.workspace = true
 vilicus-storage.workspace = true
+
+# Test code only: the registry tests build real FTS5 tables in a module file without the
+# authorizer, as Story 3.7's migrations will, which no storage handle can before that story.
+[dev-dependencies]
+rusqlite.workspace = true

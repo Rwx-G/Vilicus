@@ -27,8 +27,11 @@ pub(crate) enum ParseError {
 
 /// Reads `sql`, the text SQLite keeps for a virtual table.
 pub(crate) fn parse(sql: &str) -> Result<VirtualTable, ParseError> {
-    let rest = strip_keywords(sql.trim_start(), &["CREATE", "VIRTUAL", "TABLE"])
-        .ok_or(ParseError::Header)?;
+    let rest = strip_keywords(
+        sql.trim_start_matches(is_space),
+        &["CREATE", "VIRTUAL", "TABLE"],
+    )
+    .ok_or(ParseError::Header)?;
     let (_, rest) = take_name(rest).ok_or(ParseError::Header)?;
     let rest = strip_keywords(rest, &["USING"]).ok_or(ParseError::Header)?;
     let module_len = rest
@@ -36,10 +39,10 @@ pub(crate) fn parse(sql: &str) -> Result<VirtualTable, ParseError> {
         .ok_or(ParseError::Header)?;
     let (module, rest) = rest.split_at(module_len);
     let arguments = rest
-        .trim_start()
+        .trim_start_matches(is_space)
         .strip_prefix('(')
         .ok_or(ParseError::Header)?
-        .trim_end()
+        .trim_end_matches(is_space)
         .strip_suffix(')')
         .ok_or(ParseError::Unbalanced)?;
     if module.is_empty() {
@@ -51,17 +54,18 @@ pub(crate) fn parse(sql: &str) -> Result<VirtualTable, ParseError> {
         options: Vec::new(),
     };
     for argument in split_top_level(arguments, ',')? {
-        let argument = argument.trim();
+        let argument = argument.trim_matches(is_space);
         match split_top_level(argument, '=')?.as_slice() {
             [column] => table.columns.push((*column).to_owned()),
             [key, value] => {
-                let key = key.trim();
+                let key = key.trim_matches(is_space);
                 if !is_bare(key) {
                     return Err(ParseError::Argument);
                 }
-                table
-                    .options
-                    .push((key.to_ascii_lowercase(), unquote(value.trim())?));
+                table.options.push((
+                    key.to_ascii_lowercase(),
+                    unquote(value.trim_matches(is_space))?,
+                ));
             }
             _ => return Err(ParseError::Argument),
         }
@@ -69,15 +73,21 @@ pub(crate) fn parse(sql: &str) -> Result<VirtualTable, ParseError> {
     Ok(table)
 }
 
+/// SQLite's white space, ASCII only: space, tab, line feed, form feed, carriage return. Rust's
+/// `char::is_whitespace` would also take a no-break space, which SQLite reads as part of a word.
+fn is_space(character: char) -> bool {
+    character.is_ascii_whitespace()
+}
+
 /// `text` after the keywords, each matched ignoring ASCII case and followed by white space.
 fn strip_keywords<'a>(mut text: &'a str, keywords: &[&str]) -> Option<&'a str> {
     for keyword in keywords {
         let head = text.get(..keyword.len())?;
         let rest = &text[keyword.len()..];
-        if !head.eq_ignore_ascii_case(keyword) || !rest.starts_with(char::is_whitespace) {
+        if !head.eq_ignore_ascii_case(keyword) || !rest.starts_with(is_space) {
             return None;
         }
-        text = rest.trim_start();
+        text = rest.trim_start_matches(is_space);
     }
     Some(text)
 }
@@ -87,11 +97,11 @@ fn take_name(text: &str) -> Option<(&str, &str)> {
     let end = match text.chars().next()? {
         quote @ ('"' | '`' | '\'') => text[1..].find(quote)? + 2,
         '[' => text.find(']')? + 1,
-        _ => text.find(char::is_whitespace)?,
+        _ => text.find(is_space)?,
     };
     let (name, rest) = text.split_at(end);
-    rest.starts_with(char::is_whitespace)
-        .then(|| (name, rest.trim_start()))
+    rest.starts_with(is_space)
+        .then(|| (name, rest.trim_start_matches(is_space)))
 }
 
 /// `text` split at each `separator` outside quotes and parentheses.
@@ -218,6 +228,15 @@ mod tests {
             table.options,
             options(&[("tokenize", "unicode61 remove_diacritics 2")])
         );
+    }
+
+    #[test]
+    fn only_ascii_white_space_separates_the_header() {
+        assert_eq!(
+            parse("CREATE VIRTUAL TABLE notes\u{a0}USING fts5(body)"),
+            Err(ParseError::Header)
+        );
+        assert!(parse("CREATE\x0cVIRTUAL TABLE notes USING fts5(body)").is_ok());
     }
 
     #[test]

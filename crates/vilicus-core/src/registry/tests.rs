@@ -10,7 +10,7 @@ use vilicus_module_api::{
     DataType, DeclarationError, ENVELOPE, Field, FieldKind, Fts5Content, Fts5Table, Fts5Tokenizer,
     Migration, ModuleDeclaration, Structured, Table,
 };
-use vilicus_storage::{ModuleFile, Partition, Read, SchemaObject, TableInfo, TableKind, Write};
+use vilicus_storage::{ModuleFile, Partition, Read, Write};
 use vilicus_types::ModuleName;
 
 use super::schema::{self, SchemaError, Snapshot};
@@ -174,13 +174,7 @@ fn registry_of(modules: Vec<ModuleDeclaration>) -> Registry {
 /// is not `STRICT`: the second migration adds a column to it, which SQLite checks on a `STRICT`
 /// table through `pragma_quick_check`, a pragma the migration authorizer refuses.
 fn sample_with_items_sql(columns: &str) -> ModuleDeclaration {
-    let mut module = sample();
-    let mut migrations = module.migrations.to_vec();
-    migrations[0] = Migration {
-        sql: leak_str(format!("CREATE TABLE items ({columns});")),
-    };
-    module.migrations = leak(migrations);
-    module
+    sample_with_items_definition(columns, "")
 }
 
 fn verify(module: ModuleDeclaration, label: &str) -> Result<(), FileError> {
@@ -613,6 +607,212 @@ fn a_file_of_another_version_or_module_is_refused_at_open() {
     );
 }
 
+/// M1 of the Story 3.2 review: clauses that write, delete, replace or convert rows on their own,
+/// and indexes or keys beyond a plain index, fail registration even though the column types,
+/// nullability and keys read back as declared. Each one, as a migration wrote it, passed the
+/// first comparison and acted on a write handle.
+#[test]
+fn clauses_with_behaviour_fail_registration() {
+    let base = items_columns_sql();
+    let definition = |found: &str| -> SchemaError {
+        SchemaError::Definition {
+            table: "items".to_owned(),
+            expected: String::new(),
+            found: found.to_owned(),
+        }
+    };
+    let cases: Vec<(String, &str, SchemaError)> = vec![
+        (
+            base.replacen(
+                "list_id BLOB",
+                "list_id BLOB REFERENCES notes (id) ON DELETE CASCADE",
+                1,
+            ),
+            "",
+            SchemaError::ForeignKey {
+                table: "items",
+                references: "notes".to_owned(),
+            },
+        ),
+        (
+            base.replacen(
+                "label TEXT NOT NULL",
+                "label TEXT NOT NULL REFERENCES _meta (key) ON UPDATE CASCADE",
+                1,
+            ),
+            "",
+            SchemaError::ForeignKey {
+                table: "items",
+                references: "_meta".to_owned(),
+            },
+        ),
+        (
+            base.replacen(
+                "label TEXT NOT NULL",
+                "label TEXT NOT NULL UNIQUE ON CONFLICT REPLACE",
+                1,
+            ),
+            "",
+            SchemaError::IndexNotAllowed {
+                table: "items",
+                index: "sqlite_autoindex_items_2".to_owned(),
+                reason: "an index made by a UNIQUE constraint",
+            },
+        ),
+        (
+            base.replacen(
+                "id BLOB NOT NULL PRIMARY KEY",
+                "id BLOB NOT NULL PRIMARY KEY ON CONFLICT REPLACE",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+        (
+            base.replacen(
+                "taint TEXT NOT NULL",
+                "taint TEXT NOT NULL ON CONFLICT REPLACE DEFAULT 'clean'",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+        (
+            base.replacen(
+                "taint TEXT NOT NULL",
+                "taint TEXT NOT NULL COLLATE NOCASE",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+        (
+            base.replacen(
+                "rev INTEGER NOT NULL",
+                "rev INTEGER NOT NULL CHECK (rev > 0)",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+        (
+            base.replacen(
+                "source TEXT NOT NULL",
+                "source TEXT NOT NULL DEFAULT 'system'",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+        (base.clone(), " WITHOUT ROWID", definition("")),
+        (
+            base.replacen(
+                "source TEXT NOT NULL, taint TEXT NOT NULL",
+                "taint TEXT NOT NULL, source TEXT NOT NULL",
+                1,
+            ),
+            "",
+            definition(""),
+        ),
+    ];
+    for (index, (columns, suffix, expected)) in cases.into_iter().enumerate() {
+        let error = schema_error(verify(
+            sample_with_items_definition(&columns, suffix),
+            &format!("behaviour-{index}"),
+        ));
+        match (&error, &expected) {
+            (SchemaError::Definition { table, found, .. }, SchemaError::Definition { .. }) => {
+                assert_eq!(table, "items", "{columns}{suffix}");
+                assert!(
+                    found.contains(&columns) && found.ends_with(suffix),
+                    "{found}"
+                );
+            }
+            _ => assert_eq!(error, expected, "{columns}{suffix}"),
+        }
+    }
+}
+
+/// M1 of the review, indexes: a plain index over declared columns passes; a `UNIQUE`, partial,
+/// expression or non-`BINARY` index does not.
+#[test]
+fn only_plain_indexes_pass_registration() {
+    let refused = [
+        (
+            "CREATE UNIQUE INDEX items_x ON items (lower(source)) WHERE taint = 'trusted';",
+            "a partial index",
+        ),
+        (
+            "CREATE UNIQUE INDEX items_x ON items (label);",
+            "a UNIQUE index",
+        ),
+        (
+            "CREATE INDEX items_x ON items (lower(label));",
+            "an index on an expression or the rowid",
+        ),
+        (
+            "CREATE INDEX items_x ON items (label COLLATE NOCASE);",
+            "a collation other than BINARY",
+        ),
+        (
+            "CREATE INDEX items_x ON items (label) WHERE quantity > 0;",
+            "a partial index",
+        ),
+    ];
+    for (index, (sql, reason)) in refused.into_iter().enumerate() {
+        let mut module = sample();
+        let mut migrations = module.migrations.to_vec();
+        migrations.push(Migration { sql });
+        module.migrations = leak(migrations);
+        let error = schema_error(verify(module, &format!("index-{index}")));
+        assert_eq!(
+            error,
+            SchemaError::IndexNotAllowed {
+                table: "items",
+                index: "items_x".to_owned(),
+                reason
+            },
+            "{sql}"
+        );
+    }
+    let mut module = sample();
+    let mut migrations = module.migrations.to_vec();
+    migrations.push(Migration {
+        sql: "CREATE INDEX items_x ON items (label DESC, list_id COLLATE BINARY);",
+    });
+    module.migrations = leak(migrations);
+    verify(module, "index-plain").expect("a plain index is allowed");
+}
+
+/// SQLite compares names ignoring ASCII case, and comments carry no behaviour: neither makes a
+/// conforming statement differ.
+#[test]
+fn case_and_comments_do_not_make_a_difference() {
+    let columns = items_columns_sql().replacen(
+        "id BLOB NOT NULL PRIMARY KEY",
+        "\"ID\" blob /* the record id */ not null PRIMARY key -- stamped by the Core\n",
+        1,
+    );
+    let mut module = sample();
+    let mut migrations = module.migrations.to_vec();
+    migrations[0] = Migration {
+        sql: leak_str(format!("CREATE TABLE ITEMS ({columns});")),
+    };
+    module.migrations = leak(migrations);
+    verify(module, "case-and-comments").expect("the same statement");
+}
+
+/// `items` created by `columns` and `suffix`, otherwise as `sample`.
+fn sample_with_items_definition(columns: &str, suffix: &str) -> ModuleDeclaration {
+    let mut module = sample();
+    let mut migrations = module.migrations.to_vec();
+    migrations[0] = Migration {
+        sql: leak_str(format!("CREATE TABLE items ({columns}){suffix};")),
+    };
+    module.migrations = leak(migrations);
+    module
+}
+
 const NOTES_SEARCH: Fts5Table = Fts5Table {
     name: "notes_search",
     columns: &["body"],
@@ -620,53 +820,56 @@ const NOTES_SEARCH: Fts5Table = Fts5Table {
     content: Fts5Content::Table("notes"),
 };
 
-/// `sample` declaring `fts5`, with a snapshot of its migrated file to which the FTS5 objects are
-/// added by hand: until Story 3.7 no migration can create one.
-fn fts5_case(fts5: Fts5Table) -> (ModuleDeclaration, Snapshot) {
-    let file = migrated_sample("fts5");
+const NOTES_SEARCH_SQL: &str =
+    "CREATE VIRTUAL TABLE notes_search USING fts5(body, content='notes', tokenize='porter');";
+
+const SECURE_DELETE_SQL: &str =
+    "INSERT INTO notes_search (notes_search, rank) VALUES ('secure-delete', 1);";
+
+fn sample_declaring(fts5: Fts5Table) -> ModuleDeclaration {
     let mut module = sample();
     module.fts5_tables = leak(vec![fts5]);
-    let reader = vilicus_storage::open::<Read>(&file, &KEY).expect("open");
-    let snapshot = Snapshot::read(&reader, &module).expect("snapshot");
-    reader.close().expect("close");
-    (module, snapshot)
+    module
 }
 
-fn add_fts5(snapshot: &mut Snapshot, name: &str, sql: &str, secure_delete: Option<i64>) {
-    snapshot.schema.tables.push(TableInfo {
-        name: name.to_owned(),
-        kind: TableKind::Virtual,
-        strict: false,
-        without_rowid: false,
-        columns: Vec::new(),
-    });
-    for suffix in ["data", "idx", "docsize", "config"] {
-        snapshot.schema.tables.push(TableInfo {
-            name: format!("{name}_{suffix}"),
-            kind: TableKind::Shadow,
-            strict: false,
-            without_rowid: suffix == "idx" || suffix == "config",
-            columns: Vec::new(),
-        });
-    }
-    snapshot.schema.objects.push(SchemaObject {
-        kind: "table".to_owned(),
-        name: name.to_owned(),
-        table: name.to_owned(),
-        sql: Some(sql.to_owned()),
-    });
-    snapshot
-        .secure_delete
-        .push((name.to_owned(), secure_delete));
+/// A connection to `file` keyed and nothing else: no setup, no authorizer. Test code only.
+fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
+    let connection =
+        rusqlite::Connection::open(file.path()).expect("open without the storage layer");
+    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    connection
+        .execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
+        .expect("key");
+    connection
 }
 
-/// AC7 (D127, D132): the declared FTS5 arguments, within the allowlist, and `secure-delete` at 1.
+/// The migrated `sample` file, to which `sql` adds FTS5 objects without the authorizer: real
+/// FTS5 tables, made by SQLite's FTS5 as Story 3.7's migrations will make them. No migration can
+/// before that story, which allows `CREATE VIRTUAL TABLE ... USING fts5` (D127).
+fn fts5_file(label: &str, sql: &str) -> ModuleFile {
+    let file = migrated_sample(label);
+    let connection = raw_connection(&file);
+    connection
+        .execute_batch(sql)
+        .expect("create the FTS5 objects");
+    connection.close().expect("close");
+    file
+}
+
+fn open_with(declaration: ModuleDeclaration, file: &ModuleFile) -> Result<(), FileError> {
+    registry_of(vec![declaration])
+        .open::<Read>(file, &KEY)
+        .map(|handle| handle.close().expect("close"))
+}
+
+/// AC7 (D127, D132) on real FTS5 tables: the declared arguments within the allowlist, the shadow
+/// tables FTS5 writes, as FTS5 writes them, and `secure-delete` at 1.
 #[test]
-fn fts5_tables_hold_their_declared_allowlisted_arguments() {
+fn real_fts5_tables_with_their_declared_arguments_pass() {
     let accepted = [
         (
             NOTES_SEARCH,
-            "CREATE VIRTUAL TABLE notes_search USING fts5(body, content='notes', tokenize='porter')",
+            format!("{NOTES_SEARCH_SQL}{SECURE_DELETE_SQL}"),
         ),
         (
             Fts5Table {
@@ -674,21 +877,130 @@ fn fts5_tables_hold_their_declared_allowlisted_arguments() {
                 content: Fts5Content::Contentless,
                 ..NOTES_SEARCH
             },
-            "CREATE VIRTUAL TABLE notes_search USING fts5(body, content='')",
+            format!(
+                "CREATE VIRTUAL TABLE notes_search USING fts5(body, content=''); {SECURE_DELETE_SQL}"
+            ),
         ),
         (
             Fts5Table {
                 tokenizer: Fts5Tokenizer::Trigram,
                 ..NOTES_SEARCH
             },
-            "CREATE VIRTUAL TABLE notes_search USING FTS5(body, tokenize = \"trigram\", content = notes)",
+            format!(
+                "CREATE VIRTUAL TABLE notes_search USING FTS5(body, tokenize = \"trigram\", content = notes); {SECURE_DELETE_SQL}"
+            ),
         ),
     ];
-    for (fts5, sql) in accepted {
-        let (module, mut snapshot) = fts5_case(fts5);
-        add_fts5(&mut snapshot, "notes_search", sql, Some(1));
-        assert_eq!(schema::compare(&module, &snapshot), Ok(()), "{sql}");
+    for (index, (fts5, sql)) in accepted.into_iter().enumerate() {
+        let file = fts5_file(&format!("fts5-real-{index}"), &sql);
+        open_with(sample_declaring(fts5), &file).unwrap_or_else(|error| panic!("{sql}: {error}"));
     }
+}
+
+#[test]
+fn a_real_fts5_table_without_secure_delete_is_refused() {
+    for (index, extra) in [
+        "",
+        "INSERT INTO notes_search (notes_search, rank) VALUES ('secure-delete', 0);",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let file = fts5_file(
+            &format!("fts5-secure-delete-{index}"),
+            &format!("{NOTES_SEARCH_SQL}{extra}"),
+        );
+        let outcome = open_with(sample_declaring(NOTES_SEARCH), &file);
+        assert!(
+            matches!(
+                outcome,
+                Err(FileError::Schema(SchemaError::Fts5SecureDeleteOff {
+                    table: "notes_search"
+                }))
+            ),
+            "{outcome:?}"
+        );
+    }
+}
+
+/// M2 of the review: SQLite marks a table as an FTS5 shadow table by its name alone, so a
+/// `_content` table beside a contentless FTS5 table read as a shadow table and passed, holding
+/// rows without an envelope. The shadow tables are exactly the ones FTS5 makes in the declared
+/// mode, each created by FTS5's own statement.
+#[test]
+fn shadow_tables_are_exactly_the_ones_fts5_makes() {
+    let contentless = Fts5Table {
+        tokenizer: Fts5Tokenizer::Unicode61,
+        content: Fts5Content::Contentless,
+        ..NOTES_SEARCH
+    };
+    let contentless_sql = format!(
+        "CREATE VIRTUAL TABLE notes_search USING fts5(body, content=''); {SECURE_DELETE_SQL}"
+    );
+
+    let file = fts5_file(
+        "fts5-fake-content",
+        &format!(
+            "CREATE TABLE notes_search_content (secret TEXT, anything BLOB);
+             INSERT INTO notes_search_content VALUES ('no envelope, no taint', x'00');
+             {contentless_sql}"
+        ),
+    );
+    let outcome = open_with(sample_declaring(contentless), &file);
+    assert!(
+        matches!(
+            &outcome,
+            Err(FileError::Schema(SchemaError::UndeclaredObject { kind, name }))
+                if kind == "shadow table" && name == "notes_search_content"
+        ),
+        "{outcome:?}"
+    );
+
+    let file = fts5_file(
+        "fts5-rebuilt-docsize",
+        &format!(
+            "{contentless_sql}
+             DROP TABLE notes_search_docsize;
+             CREATE TABLE notes_search_docsize (id INTEGER PRIMARY KEY, sz BLOB, secret TEXT);"
+        ),
+    );
+    let outcome = open_with(sample_declaring(contentless), &file);
+    assert!(
+        matches!(
+            &outcome,
+            Err(FileError::Schema(SchemaError::Definition { table, .. })) if table == "notes_search_docsize"
+        ),
+        "{outcome:?}"
+    );
+
+    let file = fts5_file(
+        "fts5-dropped-docsize",
+        &format!("{contentless_sql} DROP TABLE notes_search_docsize;"),
+    );
+    let outcome = open_with(sample_declaring(contentless), &file);
+    assert!(
+        matches!(
+            &outcome,
+            Err(FileError::Schema(SchemaError::Fts5ShadowMissing { table: "notes_search", shadow }))
+                if shadow == "notes_search_docsize"
+        ),
+        "{outcome:?}"
+    );
+}
+
+/// The arguments of a real FTS5 table, its text in `sqlite_master` replaced by each refused form;
+/// most of them FTS5 itself would accept.
+#[test]
+fn fts5_arguments_outside_the_declaration_or_the_allowlist_are_refused() {
+    let file = fts5_file(
+        "fts5-arguments",
+        &format!("{NOTES_SEARCH_SQL}{SECURE_DELETE_SQL}"),
+    );
+    let module = sample_declaring(NOTES_SEARCH);
+    let reader = vilicus_storage::open::<Read>(&file, &KEY).expect("open");
+    let snapshot = Snapshot::read(&reader, &module).expect("snapshot");
+    reader.close().expect("close");
+    assert_eq!(schema::compare(&module, &snapshot), Ok(()));
 
     let arguments = |reason: &str| SchemaError::Fts5Arguments {
         table: "notes_search",
@@ -747,72 +1059,57 @@ fn fts5_tables_hold_their_declared_allowlisted_arguments() {
         ),
     ];
     for (sql, expected) in refused {
-        let (module, mut snapshot) = fts5_case(NOTES_SEARCH);
-        add_fts5(&mut snapshot, "notes_search", sql, Some(1));
-        assert_eq!(schema::compare(&module, &snapshot), Err(expected), "{sql}");
-    }
-
-    for secure_delete in [None, Some(0), Some(2)] {
-        let (module, mut snapshot) = fts5_case(NOTES_SEARCH);
-        add_fts5(
-            &mut snapshot,
-            "notes_search",
-            "CREATE VIRTUAL TABLE notes_search USING fts5(body, content='notes', tokenize='porter')",
-            secure_delete,
-        );
-        assert_eq!(
-            schema::compare(&module, &snapshot),
-            Err(SchemaError::Fts5SecureDeleteOff {
-                table: "notes_search"
-            }),
-            "{secure_delete:?}"
-        );
+        let mut altered = snapshot.clone();
+        altered
+            .schema
+            .objects
+            .iter_mut()
+            .filter(|object| object.name == "notes_search")
+            .for_each(|object| object.sql = Some(sql.to_owned()));
+        assert_eq!(schema::compare(&module, &altered), Err(expected), "{sql}");
     }
 }
 
 #[test]
-fn fts5_tables_absent_or_undeclared_are_refused() {
-    let (module, snapshot) = fts5_case(NOTES_SEARCH);
-    assert_eq!(
-        schema::compare(&module, &snapshot),
-        Err(SchemaError::MissingTable {
-            table: "notes_search"
-        })
+fn fts5_tables_absent_undeclared_or_of_another_kind_are_refused() {
+    let file = migrated_sample("fts5-absent");
+    let outcome = open_with(sample_declaring(NOTES_SEARCH), &file);
+    assert!(
+        matches!(
+            outcome,
+            Err(FileError::Schema(SchemaError::MissingTable {
+                table: "notes_search"
+            }))
+        ),
+        "{outcome:?}"
     );
 
-    let (module, mut snapshot) = fts5_case(NOTES_SEARCH);
-    snapshot.schema.tables.push(TableInfo {
-        name: "notes_search".to_owned(),
-        kind: TableKind::Ordinary,
-        strict: true,
-        without_rowid: false,
-        columns: Vec::new(),
-    });
-    assert_eq!(
-        schema::compare(&module, &snapshot),
-        Err(SchemaError::NotFts5 {
-            table: "notes_search"
-        })
+    let file = fts5_file("fts5-ordinary", "CREATE TABLE notes_search (body TEXT);");
+    let outcome = open_with(sample_declaring(NOTES_SEARCH), &file);
+    assert!(
+        matches!(
+            outcome,
+            Err(FileError::Schema(SchemaError::NotFts5 {
+                table: "notes_search"
+            }))
+        ),
+        "{outcome:?}"
     );
 
-    let (module, mut snapshot) = fts5_case(NOTES_SEARCH);
-    add_fts5(
-        &mut snapshot,
-        "notes_search",
-        "CREATE VIRTUAL TABLE notes_search USING fts5(body, content='notes', tokenize='porter')",
-        Some(1),
+    let file = fts5_file(
+        "fts5-undeclared",
+        &format!(
+            "{NOTES_SEARCH_SQL}{SECURE_DELETE_SQL}
+             CREATE VIRTUAL TABLE hidden_search USING fts5(body, content='');"
+        ),
     );
-    add_fts5(
-        &mut snapshot,
-        "hidden_search",
-        "CREATE VIRTUAL TABLE hidden_search USING fts5(body, content='')",
-        Some(1),
-    );
-    assert_eq!(
-        schema::compare(&module, &snapshot),
-        Err(SchemaError::UndeclaredObject {
-            kind: "virtual table".to_owned(),
-            name: "hidden_search".to_owned()
-        })
+    let outcome = open_with(sample_declaring(NOTES_SEARCH), &file);
+    assert!(
+        matches!(
+            &outcome,
+            Err(FileError::Schema(SchemaError::UndeclaredObject { kind, name }))
+                if kind == "virtual table" && name == "hidden_search"
+        ),
+        "{outcome:?}"
     );
 }

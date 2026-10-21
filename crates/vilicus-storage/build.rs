@@ -14,8 +14,9 @@
 //! wherever this crate sits in the link order, and puts the archive on the search path, so that
 //! request resolves to the same archive instead of any system SQLCipher. `libcrypto` follows the
 //! archive in this crate's own link line, so `--as-needed` keeps it. A binary that links
-//! `rusqlite` without linking this crate gets no `-lcrypto` and fails to link; only this crate
-//! depends on `rusqlite`, and its tests are unit tests, which link it.
+//! `rusqlite` without linking this crate gets no `-lcrypto` and fails to link. Only this crate
+//! depends on `rusqlite`, besides the registry tests of `vilicus-core` (a dev-dependency), and
+//! both test binaries link this crate.
 
 use std::env;
 use std::ffi::OsString;

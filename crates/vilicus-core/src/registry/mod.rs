@@ -1,10 +1,12 @@
 //! The module registry (FR-22, AD-9): the modules compiled into the binary, with their schema,
 //! migrations and record kinds, and the checks that hold every module file to its declaration.
 //!
-//! A [`Registry`] is built once, from a `'static` list of [`ModuleDeclaration`]s that the binary
-//! names at build time, by a `const fn`, so a binary can build it in a `const` item and a
-//! declaration the registry refuses stops the build. It has no method that adds a module: there
-//! is no run-time registration path.
+//! A [`Registry`] is built from a `'static` list of [`ModuleDeclaration`]s by a `const fn`, so a
+//! binary builds it in a `const` item from the declarations it names at build time, and a
+//! declaration the registry refuses stops the build. It has no method that adds a module once it
+//! is built. Nothing stops code from calling the `const fn` at run time on a list it leaked, as
+//! the tests do: the guarantee is that the binary's registry is a `const` item, which a review of
+//! the binary sees, not a property of the type.
 //!
 //! ```
 //! use vilicus_core::registry::Registry;
@@ -23,18 +25,6 @@
 //! assert_eq!(REGISTRY.modules().len(), 1);
 //! ```
 //!
-//! A list built at run time is refused by the compiler:
-//!
-//! ```compile_fail,E0597
-//! use vilicus_core::registry::Registry;
-//! use vilicus_module_api::ModuleDeclaration;
-//!
-//! fn register(found: ModuleDeclaration) {
-//!     let modules = vec![&found];
-//!     let _ = Registry::new(&modules);
-//! }
-//! ```
-//!
 //! The declaration rules themselves are `vilicus-module-api`'s; the registry adds the
 //! comparison of each declaration with the schema its migrations produce in a file, in the
 //! build-time test ([`Registry::verify_migrations`]) and whenever the Core opens a file
@@ -42,6 +32,7 @@
 
 mod fts5;
 mod schema;
+mod sql;
 
 #[cfg(test)]
 mod tests;

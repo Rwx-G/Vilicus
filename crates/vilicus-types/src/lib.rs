@@ -81,6 +81,7 @@ macro_rules! closed_set {
     };
 }
 
+mod availability;
 mod call_id;
 mod data_type;
 mod digest;
@@ -101,6 +102,7 @@ mod time;
 #[cfg(test)]
 mod test_support;
 
+pub use availability::AvailabilityState;
 pub use call_id::{CallId, CallIdError};
 pub use data_type::DataType;
 pub use digest::{SHA256_LEN, sha256_hex};
@@ -115,8 +117,8 @@ pub use label::{
 pub use limits::{
     CAPABILITY_TOKEN_DEFAULT_BUDGET, CAPABILITY_TOKEN_LIFETIME, DEFAULT_AUDIT_SPOOL_ENTRIES,
     DEFAULT_BACKUP_INTERVAL, DEFAULT_CERTIFICATE_ALERT_LEAD_TIME, EVENT_DELIVERY_ATTEMPTS,
-    HOME_JOURNAL_RETENTION, OUTBOX_RETENTION, OperatorSetting, UNDO_JOURNAL_RETENTION,
-    UNLOCK_WINDOW_DEFAULT, UNLOCK_WINDOW_MAX,
+    HANDLER_TIME_BUDGET, HOME_JOURNAL_RETENTION, OUTBOX_RETENTION, OperatorSetting,
+    UNDO_JOURNAL_RETENTION, UNLOCK_WINDOW_DEFAULT, UNLOCK_WINDOW_MAX,
 };
 pub use name::NameError;
 pub use principal::Principal;

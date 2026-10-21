@@ -329,7 +329,7 @@ fn earlier_call(
     }))
 }
 
-/// The change a journal row of `module`'s file records. The row may name a table a migration
+/// The change a journal `row` records. The row may name a table a migration
 /// removed since the call (Story 3.7): its rows stay journaled until retention removes them, and
 /// a repeated call still gets the first call's changes, under the table's journaled name.
 fn journaled_change(row: JournalRow) -> Result<RecordChange, RecordError> {

@@ -187,7 +187,8 @@ impl fmt::Display for VerifyError {
 
 impl std::error::Error for VerifyError {}
 
-/// The key epoch of the scratch files [`Registry::verify_migrations`] builds.
+/// The key epoch of the scratch files [`Registry::verify_migrations`] and
+/// [`Registry::fuzz_write_paths`] build.
 const VERIFY_EPOCH: KeyEpoch = KeyEpoch {
     partition_root_version: 1,
     generation: 0,
@@ -292,6 +293,19 @@ fn verify_module(
     directory: &Path,
     key: &[u8; 32],
 ) -> Result<(), FileError> {
+    let file = create_migrated(module, directory, key)?;
+    registry.open::<Read>(&file, key)?.close()?;
+    Ok(())
+}
+
+/// Creates `module`'s file in the household partition under `directory` with `key`, and applies
+/// its migrations in order through the migration runner: the scratch file of the build-time
+/// test and of the write path fuzz test.
+pub(crate) fn create_migrated(
+    module: &'static ModuleDeclaration,
+    directory: &Path,
+    key: &[u8; 32],
+) -> Result<ModuleFile, FileError> {
     let file = ModuleFile::new(
         directory,
         ModuleName::from_static(module.name),
@@ -305,8 +319,7 @@ fn verify_module(
         migration.apply_versioned_migration(MigrationTrack::Module, version, step.sql)?;
     }
     migration.close()?;
-    registry.open::<Read>(&file, key)?.close()?;
-    Ok(())
+    Ok(file)
 }
 
 /// The checks of [`Registry::open`] on an open handle.

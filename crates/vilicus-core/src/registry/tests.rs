@@ -642,6 +642,25 @@ fn a_file_whose_core_track_differs_from_the_core_is_refused_at_open() {
     }
 }
 
+/// Story 3.6 review, M1: a file holding statistics, which only a writer outside the storage
+/// layer can plant, is refused at open.
+#[test]
+fn a_file_holding_statistics_is_refused_at_open() {
+    let file = migrated_sample("statistics");
+    raw_connection(&file)
+        .execute_batch("ANALYZE")
+        .expect("plant statistics without the authorizer");
+    let outcome = registry_of(vec![sample()]).open::<Read>(&file, &KEY);
+    assert!(
+        matches!(
+            &outcome,
+            Err(FileError::Schema(SchemaError::UndeclaredObject { name, .. }))
+                if name.starts_with("sqlite_stat")
+        ),
+        "{outcome:?}"
+    );
+}
+
 /// Story 3.6, AC1: a new module file holds every Core table, and the registry, which holds a
 /// file to exactly its declaration, accepts them and their indexes.
 #[test]

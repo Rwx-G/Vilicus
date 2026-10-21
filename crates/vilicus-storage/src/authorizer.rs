@@ -279,15 +279,21 @@ pub(crate) const INTERNAL_ALTER_FUNCTIONS: &[&str] = &[
 
 /// Internal tables SQLite writes from its own nested statements during DDL (the schema tables,
 /// the temporary one included, which `ALTER TABLE` rewrites; `sqlite_sequence` on
-/// `ALTER TABLE ... RENAME`) and `ANALYZE` (the statistics tables). The authorizer sees those
-/// writes like any other, so the migration policy allows them.
-pub(crate) const MIGRATION_INTERNAL_TABLES: &[&str] = &[
-    "sqlite_master",
-    "sqlite_temp_master",
-    "sqlite_sequence",
-    "sqlite_stat1",
-    "sqlite_stat4",
-];
+/// `ALTER TABLE ... RENAME`). The authorizer sees those writes like any other, so the migration
+/// policies allow them. The statistics tables are not among them: no policy runs `ANALYZE`.
+pub(crate) const MIGRATION_INTERNAL_TABLES: &[&str] =
+    &["sqlite_master", "sqlite_temp_master", "sqlite_sequence"];
+
+/// True for SQLite's statistics tables (`sqlite_stat1` to `sqlite_stat4`, ignoring ASCII case),
+/// which `ANALYZE` fills with sampled index keys: run over the whole file, it would copy the keys
+/// of the Core's private indexes (call ids, idempotency keys, wrapped record keys) into rows any
+/// role reads, and keep them past the deletion of their rows (Story 3.6 review, M1). No policy
+/// runs `ANALYZE`, creates, writes or reads them.
+fn is_statistics_table(table_name: &str) -> bool {
+    table_name
+        .get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sqlite_stat"))
+}
 
 pub(crate) fn listed(list: &[&str], name: &str) -> bool {
     list.iter().any(|entry| entry.eq_ignore_ascii_case(name))
@@ -318,22 +324,24 @@ fn row_write_allowed(policy: Policy, table_name: &str) -> bool {
 
 /// Schema changes: the migration policy, never on [`CORE_TABLES`] (dropping, altering, indexing
 /// or attaching a trigger to `_meta` would defeat the epoch cross-check of AD-5, to `_vocabulary`
-/// would let a module confirm its own labels, and to `_journal` would let it rewrite history);
-/// and the Core migration policy, on [`CORE_TABLES`] only. A change that names no table (a view,
-/// `ANALYZE`) is the migration policy's alone.
+/// would let a module confirm its own labels, and to `_journal` would let it rewrite history) nor
+/// on a statistics table; and the Core migration policy, on [`CORE_TABLES`] only. A view, which
+/// names no table, is the migration policy's alone.
 fn schema_change_allowed(policy: Policy, table_name: Option<&str>) -> bool {
     let core = table_name.is_some_and(|name| listed(CORE_TABLES, name));
+    let statistics = table_name.is_some_and(is_statistics_table);
     match policy {
-        Policy::Migration => !core,
+        Policy::Migration => !core && !statistics,
         Policy::CoreMigration => core,
         Policy::Write | Policy::Read | Policy::Core | Policy::Closed => false,
     }
 }
 
-/// Reads: never of a denied virtual table module, and of [`CORE_PRIVATE_TABLES`] only under the
-/// Core's own policies.
+/// Reads: never of a denied virtual table module nor of a statistics table, and of
+/// [`CORE_PRIVATE_TABLES`] only under the Core's own policies.
 fn read_allowed(policy: Policy, table_name: &str) -> bool {
     !listed(DENIED_MODULES, table_name)
+        && !is_statistics_table(table_name)
         && (matches!(policy, Policy::Core | Policy::CoreMigration)
             || !listed(CORE_PRIVATE_TABLES, table_name))
 }
@@ -370,9 +378,12 @@ pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorizat
             AuthAction::Reindex { .. } => {
                 matches!(policy, Policy::Migration | Policy::CoreMigration)
             }
-            AuthAction::CreateView { .. }
-            | AuthAction::DropView { .. }
-            | AuthAction::Analyze { .. } => schema_change_allowed(policy, None),
+            AuthAction::CreateView { .. } | AuthAction::DropView { .. } => {
+                schema_change_allowed(policy, None)
+            }
+            // `ANALYZE` samples index keys into the statistics tables, those of the Core's
+            // private indexes included, under every policy (Story 3.6 review, M1).
+            AuthAction::Analyze { .. } => false,
             // Everything else, including ATTACH, DETACH, temporary objects, virtual tables and
             // any action code this binding does not know, is refused.
             _ => false,
@@ -672,6 +683,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Story 3.6 review, M1: `ANALYZE`, of the file, of a table or of the schema, runs under no
+    /// policy, and no policy creates, writes or reads a statistics table, in any case spelling.
+    #[test]
+    fn no_policy_analyzes_or_reaches_the_statistics_tables() {
+        for policy in ALL_POLICIES {
+            for table_name in ["", "items", "_journal", "main"] {
+                assert_eq!(
+                    decide(policy, AuthAction::Analyze { table_name }),
+                    Authorization::Deny,
+                    "{policy:?} ANALYZE {table_name}"
+                );
+            }
+            for name in [
+                "sqlite_stat1",
+                "SQLITE_STAT4",
+                "sqlite_stat2",
+                "sqlite_Stat3",
+            ] {
+                let actions = [
+                    AuthAction::Read {
+                        table_name: name,
+                        column_name: "sample",
+                    },
+                    AuthAction::Insert { table_name: name },
+                    AuthAction::Update {
+                        table_name: name,
+                        column_name: "stat",
+                    },
+                    AuthAction::Delete { table_name: name },
+                    AuthAction::CreateTable { table_name: name },
+                    AuthAction::DropTable { table_name: name },
+                ];
+                for action in actions {
+                    let label = format!("{policy:?} {action:?}");
+                    assert_eq!(decide(policy, action), Authorization::Deny, "{label}");
+                }
+            }
+        }
+        assert_eq!(
+            decide(
+                Policy::Migration,
+                AuthAction::Insert {
+                    table_name: "sqlite_sequence"
+                }
+            ),
+            Authorization::Allow,
+            "the internal writes of DDL stay allowed"
+        );
     }
 
     /// Story 3.6: every Core table, the journal's included, is written under the Core policy

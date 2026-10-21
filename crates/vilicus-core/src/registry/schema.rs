@@ -7,8 +7,11 @@
 //!
 //! The file holds exactly:
 //! - the Core tables of `vilicus_storage::CORE_TABLES` with their indexes, which the Core
-//!   migration track alone creates, and SQLite's internal objects (`sqlite_` prefix, which no
-//!   migration can create);
+//!   migration track alone creates, and SQLite's internal objects (`sqlite_` prefix), which only
+//!   SQLite itself makes, as the sequence table of an `AUTOINCREMENT` table. A statistics table
+//!   (`sqlite_stat1` to `sqlite_stat4`) is refused: no policy runs `ANALYZE` or creates one, so
+//!   one can only have been planted, and it would hold sampled keys of the Core's private indexes
+//!   (Story 3.6 review, M1);
 //! - each declared table, created by the one statement its declaration implies, compared token
 //!   by token ([`canonical_table`]): the envelope columns, then the declared fields in their
 //!   order, each with its type, `NOT NULL` unless optional and `PRIMARY KEY` for `id` only, and
@@ -648,7 +651,7 @@ fn compare_fts5(fts5: &'static Fts5Table, snapshot: &Snapshot) -> Result<(), Sch
 /// [`FTS5_SHADOWS`] are.
 fn belongs_to(module: &ModuleDeclaration, info: &TableInfo) -> bool {
     let name = info.name.as_str();
-    is_internal(name)
+    (is_internal(name) && !is_statistics(name))
         || CORE_TABLES
             .iter()
             .any(|core| core.eq_ignore_ascii_case(name))
@@ -666,6 +669,12 @@ fn belongs_to(module: &ModuleDeclaration, info: &TableInfo) -> bool {
                     name.eq_ignore_ascii_case(&format!("{}_{suffix}", fts5.name))
                 })
             }))
+}
+
+/// SQLite's statistics tables, which `ANALYZE` makes and no policy lets it run.
+fn is_statistics(name: &str) -> bool {
+    name.get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sqlite_stat"))
 }
 
 /// SQLite's own objects: its schema and statistics tables and the indexes it makes for

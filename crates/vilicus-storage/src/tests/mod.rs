@@ -9,6 +9,7 @@ mod maintenance;
 mod replay;
 mod schema;
 mod setup;
+mod statistics;
 mod vocabulary;
 
 use std::fs;

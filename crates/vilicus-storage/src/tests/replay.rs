@@ -237,7 +237,8 @@ fn temporary_objects_and_virtual_tables_are_refused_in_a_migration() {
 }
 
 /// The statements an ordinary forward migration uses keep working under the authorizer, and their
-/// effect is committed.
+/// effect is committed. `ANALYZE`, in Story 1.7's list, is refused since the Story 3.6 review
+/// (M1; `tests::statistics`), so it is left out here.
 #[test]
 fn an_ordinary_migration_applies_under_the_authorizer() {
     let dir = scratch_dir("allowed-migration");
@@ -265,7 +266,6 @@ fn an_ordinary_migration_applies_under_the_authorizer() {
          PRAGMA TABLE_INFO(items);
          INSERT INTO counters (n) VALUES (2);
          PRAGMA foreign_key_check;
-         ANALYZE;
          SELECT count(*), upper(title), json_object('k', 1) FROM items;",
     );
     handle.close().expect("close migration connection");

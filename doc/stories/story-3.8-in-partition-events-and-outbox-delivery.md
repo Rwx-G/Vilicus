@@ -2,7 +2,7 @@
 title: 'In-partition events and outbox delivery'
 epic: 3
 story: 8
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-24, AD-10, AD-27, AD-29, D20, D107, DC-62]

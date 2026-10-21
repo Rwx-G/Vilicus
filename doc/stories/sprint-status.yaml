@@ -73,7 +73,7 @@ development_status:
   3-5-typed-record-writes-with-taint-and-data-type-stamping: done
   3-6-core-journal-tables-and-caller-idempotency: done
   3-7-forward-only-migrations-on-copies: done
-  3-8-in-partition-events-and-outbox-delivery: review
+  3-8-in-partition-events-and-outbox-delivery: done
   3-9-module-availability-states-and-fault-isolation: ready-for-dev
   3-10-reference-module-exercising-the-whole-contract: ready-for-dev
   epic-3-retrospective: optional

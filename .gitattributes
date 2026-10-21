@@ -13,3 +13,6 @@ vendor/** -text
 spikes/*/vectors/** -text
 # The E19 vectors moved into vilicus-proto (Story 2.5), under the same byte-for-byte rule
 crates/vilicus-proto/tests/data/** -text
+# The vendored SQLCipher amalgamation and its licences are checked against SHA256SUMS (D143)
+crates/vilicus-storage/sqlcipher/** -text
+crates/vilicus-storage/sqlcipher/*.sh text eol=lf

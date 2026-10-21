@@ -2,7 +2,7 @@
 title: 'Module availability states and fault isolation'
 epic: 3
 story: 9
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [AD-54, AD-9, FR-11, FR-23]

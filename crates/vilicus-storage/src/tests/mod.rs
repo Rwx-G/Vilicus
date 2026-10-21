@@ -4,6 +4,7 @@
 mod core_rows;
 mod core_tables;
 mod engine;
+mod fts5;
 mod hostile;
 mod maintenance;
 mod replay;

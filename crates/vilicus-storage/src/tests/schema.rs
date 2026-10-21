@@ -399,9 +399,10 @@ fn read_and_write_handles_read_the_schema() {
     check_schema::<Write>(&file);
 }
 
-/// FTS5 tables cannot be created by a migration before Story 3.7; the file here is set up
-/// without the authorizer, as that story's migrations will. The registry reads the virtual table,
-/// its shadow tables and its `secure-delete` option through a read handle.
+/// The registry reads an FTS5 table, its shadow tables and its `secure-delete` option through a
+/// read handle. The file is set up without the authorizer, since one table here writes its
+/// `_config` shadow table directly, which no module SQL can under defensive mode; `tests::fts5`
+/// makes FTS5 tables through the migration runner (Story 3.7).
 #[test]
 fn fts5_tables_and_their_options_are_read() {
     let file = new_file("schema-fts5");
@@ -456,11 +457,12 @@ fn fts5_tables_and_their_options_are_read() {
     );
 }
 
-/// A finding for Story 3.7: SQLite checks a column added to a `STRICT` table with
-/// `pragma_quick_check`, a pragma the migration authorizer refuses, so a migration cannot add a
-/// column to a `STRICT` table; it can to a table that is not `STRICT`.
+/// Story 3.2's finding, settled by Story 3.7: SQLite checks a column added to a `STRICT` table
+/// with `quick_check`, which the migration policies allow since that story, so a migration adds
+/// a column to a `STRICT` table as it does to any other; `quick_check` is still refused on read
+/// and write handles.
 #[test]
-fn a_column_cannot_be_added_to_a_strict_table_under_the_migration_authorizer() {
+fn a_column_is_added_to_a_strict_table_under_the_migration_authorizer() {
     let file = new_file("strict-add-column");
     migrate(
         &file,
@@ -469,14 +471,24 @@ fn a_column_cannot_be_added_to_a_strict_table_under_the_migration_authorizer() {
          CREATE TABLE loose_items (id BLOB NOT NULL PRIMARY KEY);",
     )
     .expect("create");
-    let outcome = migrate(&file, 2, "ALTER TABLE strict_items ADD COLUMN label TEXT;");
-    assert!(
-        outcome.as_ref().is_err_and(Error::is_refusal),
-        "{outcome:?}"
-    );
-    migrate(&file, 2, "ALTER TABLE loose_items ADD COLUMN label TEXT;")
-        .expect("a table that is not STRICT takes a new column");
-    raw_connection(&file.path())
-        .execute_batch("ALTER TABLE strict_items ADD COLUMN label TEXT;")
-        .expect("the same statement runs without the authorizer");
+    migrate(
+        &file,
+        2,
+        "ALTER TABLE strict_items ADD COLUMN label TEXT;
+         ALTER TABLE loose_items ADD COLUMN label TEXT;",
+    )
+    .expect("STRICT or not, a table takes a new column");
+    for role in ["read", "write"] {
+        let outcome = if role == "read" {
+            let handle = open::<Read>(&file, &KEY).expect("open");
+            handle.execute_batch("PRAGMA quick_check")
+        } else {
+            let handle = open::<Write>(&file, &KEY).expect("open");
+            handle.execute_batch("PRAGMA quick_check")
+        };
+        assert!(
+            outcome.as_ref().is_err_and(Error::is_refusal),
+            "{role}: {outcome:?}"
+        );
+    }
 }

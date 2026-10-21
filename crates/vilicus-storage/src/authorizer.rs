@@ -14,6 +14,11 @@
 //! Core track's own migrations run, changes their schema. Module SQL does not even read the
 //! Core tables of [`CORE_PRIVATE_TABLES`]: the journal, the outbox and the wrapped record keys
 //! hold earlier states of records, effect payloads and the keys that shred records.
+//!
+//! A module migration may create and drop FTS5 virtual tables in its own file, and no other
+//! virtual table (D127, Story 3.7): FTS5 writes its shadow tables from its own nested statements,
+//! which the migration policy allows like any table of the module, and every connection runs with
+//! `SQLITE_DBCONFIG_DEFENSIVE`, under which module SQL cannot write a shadow table directly.
 
 use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -74,11 +79,9 @@ pub const CORE_PRIVATE_TABLES: &[&str] = &[
     "_record_keys",
 ];
 
-/// Virtual table modules reviewed as usable by module SQL under some policy: `fts5`, whose tables
-/// a module migration may create once Story 3.7 applies D127. Today every `CREATE VIRTUAL TABLE`
-/// is refused. A test fails when the engine offers a module in neither this list nor
-/// [`DENIED_MODULES`].
-#[cfg(test)]
+/// Virtual table modules a module migration may create and drop, compared ignoring ASCII case:
+/// `fts5` alone (D127), in the file's own schema, under [`Policy::Migration`] only. A test fails
+/// when the engine offers a module in neither this list nor [`DENIED_MODULES`].
 pub(crate) const ALLOWED_MODULES: &[&str] = &["fts5"];
 
 /// Virtual table modules reviewed and refused: page-level statistics of the file (`dbstat`, an
@@ -103,7 +106,9 @@ pub(crate) const DENIED_MODULES: &[&str] = &[
 /// `temp_store` is not here, so temporary data stays in memory (D132). `table_list` names the
 /// tables of the connection's own schemas with their kind (ordinary, virtual, shadow, view) and
 /// their `STRICT` flag, which the module registry compares with its declarations (AD-9); it
-/// reads no file path, unlike `database_list`.
+/// reads no file path, unlike `database_list`. `data_version` returns a counter of the commits
+/// other connections made, and FTS5 reads it before it uses its index, so without it no FTS5
+/// table could be created, written or searched (D127, Story 3.2's open point).
 pub(crate) const INTROSPECTION_PRAGMAS: &[&str] = &[
     "table_list",
     "table_info",
@@ -113,7 +118,14 @@ pub(crate) const INTROSPECTION_PRAGMAS: &[&str] = &[
     "index_xinfo",
     "foreign_key_list",
     "foreign_key_check",
+    "data_version",
 ];
+
+/// Read-only pragmas that SQLite runs from inside a schema change, allowed under the two
+/// migration policies only: `quick_check`, which `ALTER TABLE ... ADD COLUMN` runs on a `STRICT`
+/// table to check the existing rows against the new column (Story 3.2's finding), and which
+/// reports a check, never a value or a path.
+pub(crate) const MIGRATION_PRAGMAS: &[&str] = &["quick_check"];
 
 /// Built-in SQL functions reviewed as safe for module SQL: pure computation on values, dates,
 /// JSON, window and aggregate functions, and the FTS5 ranking and highlighting helpers.
@@ -346,6 +358,29 @@ fn read_allowed(policy: Policy, table_name: &str) -> bool {
             || !listed(CORE_PRIVATE_TABLES, table_name))
 }
 
+/// Pragmas: the introspection allowlist under every policy, and the pragmas SQLite runs inside a
+/// schema change under the migration policies.
+fn pragma_allowed(policy: Policy, pragma_name: &str) -> bool {
+    listed(INTROSPECTION_PRAGMAS, pragma_name)
+        || (matches!(policy, Policy::Migration | Policy::CoreMigration)
+            && listed(MIGRATION_PRAGMAS, pragma_name))
+}
+
+/// `CREATE VIRTUAL TABLE` and `DROP VIRTUAL TABLE` (D127): under the migration policy only, for
+/// a module of [`ALLOWED_MODULES`] (`fts5`, ignoring ASCII case), in the connection's own schema
+/// (`main`, never `temp`), and never under a Core table's or a statistics table's name.
+fn virtual_table_allowed(
+    policy: Policy,
+    database_name: Option<&str>,
+    table_name: &str,
+    module_name: &str,
+) -> bool {
+    policy == Policy::Migration
+        && listed(ALLOWED_MODULES, module_name)
+        && database_name == Some("main")
+        && schema_change_allowed(policy, Some(table_name))
+}
+
 /// The authorizer decision for one action, as a pure function so the policy can be read and
 /// tested without a connection.
 pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorization {
@@ -354,7 +389,15 @@ pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorizat
             AuthAction::Select | AuthAction::Recursive => true,
             AuthAction::Read { table_name, .. } => read_allowed(policy, table_name),
             AuthAction::Function { function_name } => function_allowed(policy, function_name),
-            AuthAction::Pragma { pragma_name, .. } => listed(INTROSPECTION_PRAGMAS, pragma_name),
+            AuthAction::Pragma { pragma_name, .. } => pragma_allowed(policy, pragma_name),
+            AuthAction::CreateVtable {
+                table_name,
+                module_name,
+            }
+            | AuthAction::DropVtable {
+                table_name,
+                module_name,
+            } => virtual_table_allowed(policy, context.database_name, table_name, module_name),
             AuthAction::Insert { table_name }
             | AuthAction::Update { table_name, .. }
             | AuthAction::Delete { table_name } => row_write_allowed(policy, table_name),
@@ -384,8 +427,8 @@ pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorizat
             // `ANALYZE` samples index keys into the statistics tables, those of the Core's
             // private indexes included, under every policy (Story 3.6 review, M1).
             AuthAction::Analyze { .. } => false,
-            // Everything else, including ATTACH, DETACH, temporary objects, virtual tables and
-            // any action code this binding does not know, is refused.
+            // Everything else, including ATTACH, DETACH, temporary objects and any action code
+            // this binding does not know, is refused.
             _ => false,
         };
     if allowed {
@@ -435,7 +478,7 @@ mod tests {
     }
 
     /// Actions no policy may allow: an unknown action code, attaching and detaching, virtual
-    /// tables and temporary objects.
+    /// tables of any module but FTS5 and temporary objects.
     #[test]
     fn confinement_actions_are_denied_under_every_policy() {
         for policy in ALL_POLICIES {
@@ -453,11 +496,11 @@ mod tests {
                 },
                 AuthAction::CreateVtable {
                     table_name: "search",
-                    module_name: "fts5",
+                    module_name: "fts4",
                 },
                 AuthAction::DropVtable {
                     table_name: "search",
-                    module_name: "fts5",
+                    module_name: "rtree",
                 },
                 AuthAction::CreateTempTable {
                     table_name: "scratch",
@@ -476,6 +519,129 @@ mod tests {
                     decide(policy, action),
                     Authorization::Deny,
                     "{policy:?} {label}"
+                );
+            }
+        }
+    }
+
+    fn decide_in(policy: Policy, database_name: &str, action: AuthAction<'_>) -> Authorization {
+        authorize(
+            policy,
+            &AuthContext {
+                action,
+                database_name: Some(database_name),
+                accessor: None,
+            },
+        )
+    }
+
+    /// AC9 of Story 3.7 (D127): a virtual table is created or dropped under the migration policy
+    /// only, only for the `fts5` module in any case spelling and in the file's own schema, and
+    /// never under a Core table's or a statistics table's name; every other module of the
+    /// engine, reviewed or not, is refused under every policy.
+    #[test]
+    fn only_a_module_migration_creates_or_drops_an_fts5_table() {
+        let virtual_table = |create: bool, table_name, module_name| {
+            if create {
+                AuthAction::CreateVtable {
+                    table_name,
+                    module_name,
+                }
+            } else {
+                AuthAction::DropVtable {
+                    table_name,
+                    module_name,
+                }
+            }
+        };
+        for create in [true, false] {
+            for policy in ALL_POLICIES {
+                for spelling in ["fts5", "FTS5", "Fts5"] {
+                    assert_eq!(
+                        decide(policy, virtual_table(create, "notes_search", spelling)),
+                        if policy == Policy::Migration {
+                            Authorization::Allow
+                        } else {
+                            Authorization::Deny
+                        },
+                        "{policy:?} {spelling} create {create}"
+                    );
+                    for schema in ["temp", "other"] {
+                        assert_eq!(
+                            decide_in(
+                                policy,
+                                schema,
+                                virtual_table(create, "notes_search", spelling)
+                            ),
+                            Authorization::Deny,
+                            "{policy:?} {schema}.{spelling} create {create}"
+                        );
+                    }
+                }
+                for &module in DENIED_MODULES
+                    .iter()
+                    .chain(&["fts5x", "fts", "", "unknown"])
+                {
+                    assert_eq!(
+                        decide(policy, virtual_table(create, "notes_search", module)),
+                        Authorization::Deny,
+                        "{policy:?} {module} create {create}"
+                    );
+                }
+                for name in CORE_TABLES
+                    .iter()
+                    .copied()
+                    .chain(["sqlite_stat1", "SQLITE_STAT4"])
+                {
+                    assert_eq!(
+                        decide(policy, virtual_table(create, name, "fts5")),
+                        Authorization::Deny,
+                        "{policy:?} {name} create {create}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// AC9 of Story 3.7: FTS5 reads `data_version` before it uses its index, under every policy
+    /// that runs statements, and `ALTER TABLE ... ADD COLUMN` on a `STRICT` table runs
+    /// `quick_check`, under the migration policies only.
+    #[test]
+    fn the_pragmas_fts5_and_strict_tables_run_are_allowed_where_they_run() {
+        for policy in ALL_POLICIES {
+            let decision = |pragma_name, pragma_value| {
+                decide(
+                    policy,
+                    AuthAction::Pragma {
+                        pragma_name,
+                        pragma_value,
+                    },
+                )
+            };
+            let runs = policy != Policy::Closed;
+            let migrates = matches!(policy, Policy::Migration | Policy::CoreMigration);
+            assert_eq!(
+                decision("data_version", None) == Authorization::Allow,
+                runs,
+                "{policy:?} data_version"
+            );
+            for (name, value) in [("quick_check", Some("items")), ("QUICK_CHECK", None)] {
+                assert_eq!(
+                    decision(name, value) == Authorization::Allow,
+                    migrates,
+                    "{policy:?} {name}"
+                );
+            }
+            for name in [
+                "integrity_check",
+                "cell_size_check",
+                "schema_version",
+                "user_version",
+            ] {
+                assert_eq!(
+                    decision(name, None),
+                    Authorization::Deny,
+                    "{policy:?} {name}"
                 );
             }
         }

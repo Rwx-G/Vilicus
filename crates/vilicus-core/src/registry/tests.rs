@@ -172,9 +172,8 @@ fn registry_of(modules: Vec<ModuleDeclaration>) -> Registry {
     Registry::new(leak(modules)).expect("a valid registry")
 }
 
-/// `sample` with its first migration replaced by an `items` table of `columns`. The `items` table
-/// is not `STRICT`: the second migration adds a column to it, which SQLite checks on a `STRICT`
-/// table through `pragma_quick_check`, a pragma the migration authorizer refuses.
+/// `sample` with its first migration replaced by an `items` table of `columns`, which is not
+/// `STRICT`, unlike `notes`: the registry allows both (D144).
 fn sample_with_items_sql(columns: &str) -> ModuleDeclaration {
     sample_with_items_definition(columns, "")
 }
@@ -941,9 +940,21 @@ fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
     connection
 }
 
-/// The migrated `sample` file, to which `sql` adds FTS5 objects without the authorizer: real
-/// FTS5 tables, made by SQLite's FTS5 as Story 3.7's migrations will make them. No migration can
-/// before that story, which allows `CREATE VIRTUAL TABLE ... USING fts5` (D127).
+/// `sample` declaring `fts5`, with a third migration of `sql`, migrated through the runner and
+/// the migration authorizer (D127, Story 3.7) and checked as the build-time test checks it.
+fn verify_fts5_migration(fts5: Fts5Table, sql: &str, label: &str) -> Result<(), FileError> {
+    let mut module = sample_declaring(fts5);
+    let mut migrations = module.migrations.to_vec();
+    migrations.push(Migration {
+        sql: leak_str(sql.to_owned()),
+    });
+    module.migrations = leak(migrations);
+    verify(module, label)
+}
+
+/// The migrated `sample` file, to which `sql` adds objects without the authorizer and outside
+/// defensive mode: what no migration can make (a shadow table dropped, rebuilt or forged), for
+/// the checks that must refuse such a file at open.
 fn fts5_file(label: &str, sql: &str) -> ModuleFile {
     let file = migrated_sample(label);
     let connection = raw_connection(&file);
@@ -960,8 +971,9 @@ fn open_with(declaration: ModuleDeclaration, file: &ModuleFile) -> Result<(), Fi
         .map(|handle| handle.close().expect("close"))
 }
 
-/// AC7 (D127, D132) on real FTS5 tables: the declared arguments within the allowlist, the shadow
-/// tables FTS5 writes, as FTS5 writes them, and `secure-delete` at 1.
+/// AC7 (D127, D132) on real FTS5 tables, made by a module migration through the runner since
+/// Story 3.7 (AC9): the declared arguments within the allowlist, the shadow tables FTS5 writes, as
+/// FTS5 writes them, and `secure-delete` at 1, checked by the build-time test.
 #[test]
 fn real_fts5_tables_with_their_declared_arguments_pass() {
     let accepted = [
@@ -990,11 +1002,13 @@ fn real_fts5_tables_with_their_declared_arguments_pass() {
         ),
     ];
     for (index, (fts5, sql)) in accepted.into_iter().enumerate() {
-        let file = fts5_file(&format!("fts5-real-{index}"), &sql);
-        open_with(sample_declaring(fts5), &file).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        verify_fts5_migration(fts5, &sql, &format!("fts5-real-{index}"))
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
     }
 }
 
+/// A migration that makes its FTS5 table without `secure-delete`, or with it at 0, passes the
+/// runner and is refused by the registry (D132).
 #[test]
 fn a_real_fts5_table_without_secure_delete_is_refused() {
     for (index, extra) in [
@@ -1004,11 +1018,11 @@ fn a_real_fts5_table_without_secure_delete_is_refused() {
     .into_iter()
     .enumerate()
     {
-        let file = fts5_file(
-            &format!("fts5-secure-delete-{index}"),
+        let outcome = verify_fts5_migration(
+            NOTES_SEARCH,
             &format!("{NOTES_SEARCH_SQL}{extra}"),
+            &format!("fts5-secure-delete-{index}"),
         );
-        let outcome = open_with(sample_declaring(NOTES_SEARCH), &file);
         assert!(
             matches!(
                 outcome,
@@ -1194,14 +1208,14 @@ fn fts5_tables_absent_undeclared_or_of_another_kind_are_refused() {
         "{outcome:?}"
     );
 
-    let file = fts5_file(
-        "fts5-undeclared",
+    let outcome = verify_fts5_migration(
+        NOTES_SEARCH,
         &format!(
             "{NOTES_SEARCH_SQL}{SECURE_DELETE_SQL}
              CREATE VIRTUAL TABLE hidden_search USING fts5(body, content='');"
         ),
+        "fts5-undeclared",
     );
-    let outcome = open_with(sample_declaring(NOTES_SEARCH), &file);
     assert!(
         matches!(
             &outcome,
@@ -1210,4 +1224,19 @@ fn fts5_tables_absent_undeclared_or_of_another_kind_are_refused() {
         ),
         "{outcome:?}"
     );
+}
+
+/// What defensive mode leaves module SQL on a shadow table, an index (Story 3.7, AC9), is an
+/// object the declaration does not hold, and the registry refuses the file.
+#[test]
+fn an_index_a_migration_puts_on_a_shadow_table_is_refused() {
+    let outcome = verify_fts5_migration(
+        NOTES_SEARCH,
+        &format!(
+            "{NOTES_SEARCH_SQL}{SECURE_DELETE_SQL}
+             CREATE INDEX shadow_sizes ON notes_search_docsize (sz);"
+        ),
+        "fts5-shadow-index",
+    );
+    assert!(matches!(&outcome, Err(FileError::Schema(_))), "{outcome:?}");
 }

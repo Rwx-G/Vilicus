@@ -6,6 +6,10 @@
 //! `load_extension` statements fail as `no such function` with or without the authorizer, where
 //! the spike saw an authorizer refusal. The replay accepts that outcome for the extension loading
 //! class only.
+//!
+//! Every handle of the replay runs with `SQLITE_DBCONFIG_DEFENSIVE` on, as every connection of the
+//! storage layer does, and the replay checks it on each one: this is the E11 suite rerun with
+//! defensive mode on that D127 asks for (Story 3.7, AC9).
 
 use std::fs;
 use std::path::Path;
@@ -52,6 +56,10 @@ fn refused(statement: &HostileStatement, error: &Error) -> bool {
 /// authorizer goes on, so `DETACH other` and `sqlcipher_export('other')` have a target.
 fn open_with_other_attached<R: Role>(file: &ModuleFile) -> Handle<R> {
     let handle = open::<R>(file, &KEY).expect("open module file");
+    assert!(
+        handle.settings().defensive,
+        "the replay runs in defensive mode"
+    );
     without_authorizer(&handle, |raw| {
         raw.execute_batch("ATTACH DATABASE ':memory:' AS other")
             .expect("attach setup database")
@@ -206,28 +214,55 @@ fn transaction_control_inside_a_migration_is_refused() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// Temporary objects and virtual tables are outside the migration allowlist. D127 opens FTS5
-/// virtual tables to migrations; that is Story 3.7, AC9, with the registry's argument check.
+/// Temporary objects and virtual tables other than FTS5 tables of the file's own schema are
+/// outside the migration allowlist. D127 opens FTS5 virtual tables to module migrations (Story
+/// 3.7, AC9): every other module the engine offers is refused, `fts5vocab`, `fts3`, `fts4` and
+/// `rtree` included, and so is an FTS5 table in the temporary schema.
 #[test]
 fn temporary_objects_and_virtual_tables_are_refused_in_a_migration() {
-    let statements = [
-        ("temp_table", "CREATE TEMP TABLE scratch (x)"),
-        ("temp_view", "CREATE TEMP VIEW scratch AS SELECT 1"),
+    let mut statements = vec![
         (
-            "temp_trigger",
-            "CREATE TEMP TRIGGER scratch AFTER INSERT ON items BEGIN SELECT 1; END",
+            "temp_table".to_owned(),
+            "CREATE TEMP TABLE scratch (x)".to_owned(),
         ),
         (
-            "virtual_table",
-            "CREATE VIRTUAL TABLE scratch USING fts5(body)",
+            "temp_view".to_owned(),
+            "CREATE TEMP VIEW scratch AS SELECT 1".to_owned(),
+        ),
+        (
+            "temp_trigger".to_owned(),
+            "CREATE TEMP TRIGGER scratch AFTER INSERT ON items BEGIN SELECT 1; END".to_owned(),
+        ),
+        (
+            "temp_fts5".to_owned(),
+            "CREATE VIRTUAL TABLE temp.scratch USING fts5(body)".to_owned(),
+        ),
+        (
+            "fts5vocab".to_owned(),
+            "CREATE VIRTUAL TABLE scratch_search USING fts5(body);
+             CREATE VIRTUAL TABLE scratch USING fts5vocab(scratch_search, 'row')"
+                .to_owned(),
         ),
     ];
+    for (module, arguments) in [
+        ("fts3", "body"),
+        ("fts4", "body"),
+        ("FTS4", "body"),
+        ("rtree", "id, low, high"),
+        ("rtree_i32", "id, low, high"),
+        ("fts3tokenize", "simple"),
+    ] {
+        statements.push((
+            format!("virtual_table_{module}"),
+            format!("CREATE VIRTUAL TABLE scratch USING {module}({arguments})"),
+        ));
+    }
     let failures: Vec<String> = statements
         .iter()
         .filter_map(|(name, sql)| {
             hostile_migration_is_refused_without_writing(
                 &format!("migration.not_allowlisted.{name}"),
-                |_| (*sql).to_owned(),
+                |_| sql.clone(),
                 Error::is_refusal,
             )
             .err()

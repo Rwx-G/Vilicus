@@ -20,7 +20,8 @@ use super::{
     scratch_dir, without_authorizer,
 };
 use crate::authorizer::{
-    self, ALLOWED_FUNCTIONS, COMPILED_OUT_FUNCTIONS, DENIED_FUNCTIONS, Policy, listed,
+    self, ALLOWED_FUNCTIONS, ALLOWED_MODULES, COMPILED_OUT_FUNCTIONS, DENIED_FUNCTIONS,
+    DENIED_MODULES, Policy, listed,
 };
 use crate::error::Error;
 use crate::{Handle, Migration, ModuleFile, Read, Role, RoleKind, Write, open};
@@ -694,6 +695,64 @@ fn internal_table_writes_are_refused_outside_migrations() {
         "UPDATE sqlite_sequence SET seq = 0",
         "DELETE FROM sqlite_sequence",
     ] {
+        for outcome in [runs::<Write>(&file, sql), runs::<Read>(&file, sql)] {
+            assert!(
+                outcome.as_ref().is_err_and(Error::is_refusal),
+                "{sql}: {outcome:?}"
+            );
+        }
+    }
+}
+
+/// Review item 5: every virtual table module the engine offers is reviewed exactly once, like the
+/// functions of AC8, and every reviewed module is offered.
+#[test]
+fn every_engine_module_is_reviewed_exactly_once() {
+    let connection = raw_connection(&scratch_dir("modules").join("m.db"));
+    let engine: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_module_list ORDER BY name")
+        .expect("prepare module list")
+        .query_map([], |row| row.get(0))
+        .expect("query module list")
+        .collect::<Result<_, _>>()
+        .expect("read module list");
+    let offered = |name: &str| {
+        engine
+            .iter()
+            .any(|module| module.eq_ignore_ascii_case(name))
+    };
+    let unreviewed: Vec<&String> = engine
+        .iter()
+        .filter(|name| !listed(ALLOWED_MODULES, name) && !listed(DENIED_MODULES, name))
+        .collect();
+    let in_both: Vec<&&str> = ALLOWED_MODULES
+        .iter()
+        .filter(|name| listed(DENIED_MODULES, name))
+        .collect();
+    let stale: Vec<&&str> = ALLOWED_MODULES
+        .iter()
+        .chain(DENIED_MODULES)
+        .filter(|name| !offered(name))
+        .collect();
+    assert!(
+        unreviewed.is_empty() && in_both.is_empty() && stale.is_empty(),
+        "{engine:?}; unreviewed {unreviewed:?}; in both {in_both:?}; stale {stale:?}"
+    );
+}
+
+/// Review item 5: `dbstat`, an eponymous table any statement could read, is refused on every
+/// runtime role, while it runs without the authorizer.
+#[test]
+fn dbstat_is_refused() {
+    let dir = scratch_dir("dbstat");
+    let file = create_module_file(&dir);
+    for sql in [
+        "SELECT count(*) FROM dbstat",
+        "SELECT name, pgsize FROM dbstat",
+    ] {
+        raw_connection(&file.path())
+            .execute_batch(sql)
+            .unwrap_or_else(|error| panic!("control {sql}: {error}"));
         for outcome in [runs::<Write>(&file, sql), runs::<Read>(&file, sql)] {
             assert!(
                 outcome.as_ref().is_err_and(Error::is_refusal),

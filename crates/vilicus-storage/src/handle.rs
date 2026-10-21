@@ -16,6 +16,7 @@
 //! anyone from turning off.
 
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -249,11 +250,22 @@ pub(crate) fn connect(
     setup: Setup,
     create: bool,
 ) -> Result<(Connection, Settings)> {
+    connect_path(&file.path(), key, setup, create)
+}
+
+/// [`connect`] on any database path: a module file, the staging file of `create`, or the target
+/// of a backup. No `SQLITE_OPEN_URI`, so a path is never read as a URI.
+pub(crate) fn connect_path(
+    path: &Path,
+    key: &[u8; 32],
+    setup: Setup,
+    create: bool,
+) -> Result<(Connection, Settings)> {
     let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     if create {
         flags |= OpenFlags::SQLITE_OPEN_CREATE;
     }
-    let connection = Connection::open_with_flags(file.path(), flags)?;
+    let connection = Connection::open_with_flags(path, flags)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
     ffi::set_extension_loading_api(&connection, false)?;
     key_connection(&connection, key)?;
@@ -312,7 +324,11 @@ pub(crate) fn checked_epoch(file: &ModuleFile, connection: &Connection) -> Resul
 }
 
 fn wal_is_empty(file: &ModuleFile) -> Result<bool> {
-    match std::fs::metadata(file.wal_path()) {
+    wal_of_is_empty(&file.wal_path())
+}
+
+pub(crate) fn wal_of_is_empty(wal: &Path) -> Result<bool> {
+    match std::fs::metadata(wal) {
         Ok(metadata) => Ok(metadata.len() == 0),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(error.into()),
@@ -381,32 +397,90 @@ pub fn open<R: Role>(file: &ModuleFile, key: &[u8; 32]) -> Result<Handle<R>> {
     Handle::guarded(connection, file, epoch, settings)
 }
 
-/// Creates `file` with its raw `key` and key epoch: the `_meta` table holding the epoch, then the
-/// sidecar, written atomically. Returns the file's write handle.
+/// Creates `file` with its raw `key` and key epoch, and returns its write handle.
+///
+/// The file is built under [`ModuleFile::staging_path`] with its `_meta` table and closed, then
+/// its sidecar is written, then it is renamed into place, so the final name exists only once the
+/// file and its sidecar are durable. A crash leaves a staging file, alone or with a sidecar: that
+/// is an interrupted `create`, which never held module data, and the next `create` discards it.
+/// A sidecar with neither a file nor a staging file is not explained by `create`, and fails with
+/// [`Error::EpochSidecarWithoutFile`].
 pub fn create(file: &ModuleFile, key: &[u8; 32], epoch: KeyEpoch) -> Result<Handle<Write>> {
-    for path in [file.path(), file.epoch_path()] {
-        if path.exists() {
-            return Err(Error::AlreadyExists(path));
+    let path = file.path();
+    if path.exists() {
+        return Err(Error::AlreadyExists(path));
+    }
+    let staging = file.staging_path();
+    let sidecar = file.epoch_path();
+    let interrupted = staging.exists();
+    if sidecar.exists() && !interrupted {
+        return Err(Error::EpochSidecarWithoutFile(sidecar));
+    }
+    if interrupted {
+        for leftover in [
+            staging.clone(),
+            suffixed(&staging, "-wal"),
+            suffixed(&staging, "-shm"),
+            sidecar.clone(),
+        ] {
+            remove_if_present(&leftover)?;
         }
     }
-    let (connection, settings) = connect(file, key, Setup::Role(RoleKind::Write), true)?;
-    connection.execute_batch(
-        "BEGIN IMMEDIATE;
-         CREATE TABLE _meta (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;",
-    )?;
-    for (key, value) in [
-        (META_PARTITION_ROOT_VERSION, epoch.partition_root_version),
-        (META_GENERATION, epoch.generation),
-    ] {
-        connection.execute(
-            "INSERT INTO _meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key, value],
-        )?;
+    build_new_file(&staging, key, epoch)?;
+    file::write_sidecar(&sidecar, epoch)?;
+    std::fs::rename(&staging, &path)?;
+    file::sync_parent(&path)?;
+    open::<Write>(file, key)
+}
+
+/// The staging file of `create`: keyed, set up like a writer, holding `_meta`, closed after a
+/// TRUNCATE checkpoint so the database file alone holds it.
+fn build_new_file(staging: &Path, key: &[u8; 32], epoch: KeyEpoch) -> Result<()> {
+    let (connection, _) = connect_path(staging, key, Setup::Role(RoleKind::Write), true)?;
+    let built = connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE _meta (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;",
+        )
+        .and_then(|()| {
+            [
+                (META_PARTITION_ROOT_VERSION, epoch.partition_root_version),
+                (META_GENERATION, epoch.generation),
+            ]
+            .into_iter()
+            .try_for_each(|(key, value)| {
+                connection
+                    .execute(
+                        "INSERT INTO _meta (key, value) VALUES (?1, ?2)",
+                        rusqlite::params![key, value],
+                    )
+                    .map(drop)
+            })
+        })
+        .and_then(|()| connection.execute_batch("COMMIT"))
+        .map_err(Error::from);
+    let closed = checkpoint_and_close(connection);
+    built.and(closed)?;
+    let wal = suffixed(staging, "-wal");
+    if !wal_of_is_empty(&wal)? {
+        return Err(Error::WalNotEmpty(wal));
     }
-    connection.execute_batch("COMMIT")?;
-    file::write_epoch_sidecar(file, epoch)?;
-    let epoch = checked_epoch(file, &connection)?;
-    Handle::guarded(connection, file, epoch, settings)
+    std::fs::File::open(staging)?.sync_all()?;
+    Ok(())
+}
+
+fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+pub(crate) fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 impl<R: Role> Handle<R> {
@@ -475,14 +549,6 @@ impl<R: Role> Handle<R> {
         Ok(self.connection().query_row(sql, params, map)?)
     }
 
-    /// Checkpoints the WAL into the file with `sqlite3_wal_checkpoint_v2` in TRUNCATE mode, which
-    /// the authorizer does not see, retried until it reports not busy and the WAL is empty
-    /// (D132): the step after a deletion that must be real. `PRAGMA wal_checkpoint` is refused
-    /// on every handle.
-    pub fn checkpoint_truncate(&self) -> Result<()> {
-        checkpoint_until_empty(&self.file, self.connection())
-    }
-
     /// Closes the handle after a TRUNCATE checkpoint (AD-23). When other connections to the file
     /// are still open the checkpoint may be busy; the last connection to close then leaves no WAL
     /// content, since every handle checkpoints at close and SQLite removes the WAL at the last
@@ -508,40 +574,70 @@ impl<R: Role> Drop for Handle<R> {
 }
 
 impl Handle<Write> {
-    /// Writes a new key epoch: `_meta` in one transaction, then the sidecar atomically (AD-5). A
-    /// crash between the two leaves them disagreeing, and the next open fails with
-    /// [`Error::EpochMismatch`] instead of using either silently.
+    /// Checkpoints the WAL into the file with `sqlite3_wal_checkpoint_v2` in TRUNCATE mode, which
+    /// the authorizer does not see, retried until it reports not busy and the WAL is empty
+    /// (D132): the step after a deletion that must be real. `PRAGMA wal_checkpoint` is refused
+    /// on every handle. A reader that holds a snapshot keeps the deleted rows in the WAL until it
+    /// ends, so a deletion that must be real needs short-lived readers; while one is open this
+    /// returns [`Error::CheckpointIncomplete`] rather than claim the rows are gone.
+    pub fn checkpoint_truncate(&self) -> Result<()> {
+        checkpoint_until_empty(&self.file, self.connection())
+    }
+
+    /// Writes a new key epoch (AD-5), in three durable steps: the pending sidecar
+    /// `<file>.epoch.next`, then `_meta` in one transaction, then the pending sidecar renamed over
+    /// `<file>.epoch`. `_meta` is written under the Core-only epoch policy, which writes nothing
+    /// but the Core tables; module SQL never can. A failure before the rename removes the pending
+    /// sidecar again; a crash leaves it in place, and every later open fails with
+    /// [`Error::EpochTransitionPending`] until the Core resolves it (Story 3.1, Implementation
+    /// Notes, the recovery rule).
     pub fn write_epoch(&mut self, epoch: KeyEpoch) -> Result<()> {
-        let connection = self.connection();
-        connection.execute_batch("BEGIN IMMEDIATE")?;
-        let updated = [
-            (META_PARTITION_ROOT_VERSION, epoch.partition_root_version),
-            (META_GENERATION, epoch.generation),
-        ]
-        .into_iter()
-        .try_fold(0, |total, (key, value)| {
-            connection
-                .execute(
-                    "UPDATE _meta SET value = ?2 WHERE key = ?1",
-                    rusqlite::params![key, value],
-                )
-                .map(|changed| total + changed)
-        });
-        match updated {
-            Ok(2) => connection.execute_batch("COMMIT")?,
-            Ok(_) => {
-                connection.execute_batch("ROLLBACK")?;
-                return Err(Error::MissingEpoch);
-            }
-            Err(error) => {
-                connection.execute_batch("ROLLBACK")?;
-                return Err(error.into());
-            }
+        let pending = self.file.pending_epoch_path();
+        file::write_sidecar(&pending, epoch)?;
+        if let Err(error) = self.update_meta(epoch) {
+            return Err(remove_if_present(&pending).err().unwrap_or(error));
         }
-        file::write_epoch_sidecar(&self.file, epoch)?;
+        std::fs::rename(&pending, self.file.epoch_path())?;
+        file::sync_parent(&self.file.epoch_path())?;
         self.epoch = epoch;
         Ok(())
     }
+
+    fn update_meta(&self, epoch: KeyEpoch) -> Result<()> {
+        let connection = self.connection();
+        authorizer::install(connection, Policy::Epoch)?;
+        let outcome = write_meta(connection, epoch);
+        let restored = authorizer::install(connection, Policy::Write).map_err(Error::from);
+        outcome.and(restored)
+    }
+}
+
+/// The epoch rows of `_meta` in one transaction; on any failure the transaction is rolled back
+/// and the original error returned, even if the rollback fails too.
+fn write_meta(connection: &Connection, epoch: KeyEpoch) -> Result<()> {
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    let updated = [
+        (META_PARTITION_ROOT_VERSION, epoch.partition_root_version),
+        (META_GENERATION, epoch.generation),
+    ]
+    .into_iter()
+    .try_fold(0, |total, (key, value)| {
+        connection
+            .execute(
+                "UPDATE _meta SET value = ?2 WHERE key = ?1",
+                rusqlite::params![key, value],
+            )
+            .map(|changed| total + changed)
+    });
+    let failure = match updated {
+        Ok(2) => return connection.execute_batch("COMMIT").map_err(Error::from),
+        Ok(_) => Error::MissingEpoch,
+        Err(error) => Error::from(error),
+    };
+    // The rollback's own failure is not reported: the original error says why the epoch was not
+    // written, and SQLite ends the transaction with the connection either way.
+    let _ = connection.execute_batch("ROLLBACK");
+    Err(failure)
 }
 
 impl Handle<Migration> {

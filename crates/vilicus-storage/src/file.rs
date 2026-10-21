@@ -86,6 +86,26 @@ impl ModuleFile {
     pub fn wal_path(&self) -> PathBuf {
         self.directory.join(format!("{}-wal", self.file_name()))
     }
+
+    /// The path of the pending sidecar, `<file>.epoch.next`, present only while a change of key
+    /// epoch is in progress (see [`crate::Handle::write_epoch`]).
+    pub fn pending_epoch_path(&self) -> PathBuf {
+        self.directory
+            .join(format!("{}.epoch.next", self.file_name()))
+    }
+
+    /// The path `create` builds a new file under, `<file>.create`, renamed into place once the
+    /// file and its sidecar are durable.
+    pub fn staging_path(&self) -> PathBuf {
+        self.directory.join(format!("{}.create", self.file_name()))
+    }
+}
+
+/// The sidecar path of any database path: `<path>.epoch`, for module files, copies and backups.
+pub(crate) fn sidecar_of(database: &Path) -> PathBuf {
+    let mut name = database.as_os_str().to_owned();
+    name.push(".epoch");
+    PathBuf::from(name)
 }
 
 /// The key epoch of a module file: the version of the partition root its key derives from and
@@ -144,19 +164,38 @@ impl KeyEpoch {
 }
 
 /// Reads the key epoch from the sidecar of `file`, which the caller needs to derive the file key.
+/// A missing sidecar is [`Error::EpochSidecarMissing`]; a pending sidecar, left by an interrupted
+/// change of epoch, is [`Error::EpochTransitionPending`], so neither epoch is used silently.
 pub fn read_epoch(file: &ModuleFile) -> Result<KeyEpoch> {
-    let path = file.epoch_path();
-    let text = fs::read_to_string(&path)?;
-    KeyEpoch::from_sidecar(&text).ok_or(Error::MalformedEpoch(path))
+    let current = read_sidecar(&file.epoch_path())?;
+    match read_sidecar_if_present(&file.pending_epoch_path())? {
+        Some(pending) => Err(Error::EpochTransitionPending { current, pending }),
+        None => Ok(current),
+    }
 }
 
-/// Writes the sidecar atomically: a temporary file written and synced, renamed over the sidecar,
-/// then the directory synced, so a crash leaves the old sidecar or the new one, never a torn one.
-pub(crate) fn write_epoch_sidecar(file: &ModuleFile, epoch: KeyEpoch) -> Result<()> {
-    let path = file.epoch_path();
-    let staging = file
-        .directory
-        .join(format!("{}.epoch.tmp", file.file_name()));
+/// The epoch of the sidecar at `path`.
+pub(crate) fn read_sidecar(path: &Path) -> Result<KeyEpoch> {
+    read_sidecar_if_present(path)?.ok_or_else(|| Error::EpochSidecarMissing(path.to_path_buf()))
+}
+
+/// The epoch of the sidecar at `path`, or `None` when there is no file there.
+pub(crate) fn read_sidecar_if_present(path: &Path) -> Result<Option<KeyEpoch>> {
+    match fs::read_to_string(path) {
+        Ok(text) => KeyEpoch::from_sidecar(&text)
+            .map(Some)
+            .ok_or_else(|| Error::MalformedEpoch(path.to_path_buf())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Writes a sidecar atomically: a temporary file written and synced, renamed over `path`, then
+/// the directory synced, so a crash leaves the old sidecar or the new one, never a torn one.
+pub(crate) fn write_sidecar(path: &Path, epoch: KeyEpoch) -> Result<()> {
+    let mut staging = path.as_os_str().to_owned();
+    staging.push(".tmp");
+    let staging = PathBuf::from(staging);
     let mut out = OpenOptions::new()
         .write(true)
         .create(true)
@@ -165,8 +204,17 @@ pub(crate) fn write_epoch_sidecar(file: &ModuleFile, epoch: KeyEpoch) -> Result<
     out.write_all(epoch.to_sidecar().as_bytes())?;
     out.sync_all()?;
     drop(out);
-    fs::rename(&staging, &path)?;
-    File::open(&file.directory)?.sync_all()?;
+    fs::rename(&staging, path)?;
+    sync_parent(path)
+}
+
+/// Syncs the directory that holds `path`, so a rename or a removal in it is durable.
+pub(crate) fn sync_parent(path: &Path) -> Result<()> {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(directory)?.sync_all()?;
     Ok(())
 }
 

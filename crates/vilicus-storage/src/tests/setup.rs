@@ -290,9 +290,39 @@ fn write_epoch_updates_both_and_leaves_no_staging_file() {
         })
         .collect();
     assert!(
-        !names.iter().any(|name| name.ends_with(".tmp")),
+        !names
+            .iter()
+            .any(|name| name.ends_with(".tmp") || name.ends_with(".next")),
         "{names:?}"
     );
+}
+
+/// Review item 4: a read handle relies on `query_only`, which the authorizer keeps anyone from
+/// turning off: a pragma with a value is refused unless it is a table-argument introspection
+/// pragma.
+#[test]
+fn query_only_cannot_be_turned_off_on_a_read_handle() {
+    let dir = scratch_dir("item4-query-only");
+    let file = create_module_file(&dir);
+    let reader = open::<Read>(&file, &KEY).expect("open");
+    for sql in [
+        "PRAGMA query_only = 0",
+        "PRAGMA query_only = OFF",
+        "PRAGMA main.query_only = false",
+        "PRAGMA query_only",
+    ] {
+        let outcome = reader.execute_batch(sql);
+        assert!(
+            outcome.as_ref().is_err_and(Error::is_refusal),
+            "{sql}: {outcome:?}"
+        );
+    }
+    let still_on: i64 = super::without_authorizer(&reader, |raw| {
+        raw.pragma_query_value(None, "query_only", |row| row.get(0))
+            .expect("read query_only")
+    });
+    assert_eq!(still_on, 1);
+    assert!(reader.execute_batch("PRAGMA table_info(items)").is_ok());
 }
 
 #[test]
@@ -303,7 +333,7 @@ fn a_sidecar_that_disagrees_with_meta_fails_every_open() {
         partition_root_version: 1,
         generation: 1,
     };
-    crate::file::write_epoch_sidecar(&file, other).expect("rewrite sidecar");
+    crate::file::write_sidecar(&file.epoch_path(), other).expect("rewrite sidecar");
     let outcomes = [
         open::<Migration>(&file, &KEY).map(drop),
         open::<Write>(&file, &KEY).map(drop),
@@ -355,17 +385,30 @@ fn a_missing_or_malformed_epoch_fails_the_open() {
         Err(Error::MissingEpoch)
     ));
 
-    let dir = scratch_dir("ac5-missing-sidecar");
+    let dir = scratch_dir("ac5-empty-sidecar");
     let file = create_module_file(&dir);
     fs::write(file.epoch_path(), "").expect("truncate sidecar");
     assert!(matches!(
         open::<Read>(&file, &KEY),
         Err(Error::MalformedEpoch(_))
     ));
+
+    let dir = scratch_dir("ac5-missing-sidecar");
+    let file = create_module_file(&dir);
+    fs::remove_file(file.epoch_path()).expect("remove sidecar");
+    let outcome = open::<Read>(&file, &KEY);
+    assert!(
+        matches!(&outcome, Err(Error::EpochSidecarMissing(path)) if *path == file.epoch_path()),
+        "{outcome:?}"
+    );
+    assert!(matches!(
+        read_epoch(&file),
+        Err(Error::EpochSidecarMissing(_))
+    ));
 }
 
 #[test]
-fn create_refuses_an_existing_file_or_sidecar() {
+fn create_refuses_an_existing_file_or_an_unexplained_sidecar() {
     let dir = scratch_dir("ac5-exists");
     let file = create_module_file(&dir);
     assert!(matches!(
@@ -377,8 +420,80 @@ fn create_refuses_an_existing_file_or_sidecar() {
     fs::write(file.epoch_path(), "").expect("write sidecar");
     assert!(matches!(
         create(&file, &KEY, EPOCH),
-        Err(Error::AlreadyExists(_))
+        Err(Error::EpochSidecarWithoutFile(_))
     ));
+}
+
+/// Review item 2: a crash inside `create` leaves a staging file, with or without a sidecar,
+/// never a file under the final name; the next `create` discards the staging file and succeeds.
+#[test]
+fn an_interrupted_create_is_discarded_by_the_next_one() {
+    for with_sidecar in [false, true] {
+        let dir = scratch_dir("ac5-interrupted-create");
+        let file = module_file(&dir);
+        fs::write(file.staging_path(), b"half-built file").expect("leave a staging file");
+        if with_sidecar {
+            crate::file::write_sidecar(&file.epoch_path(), EPOCH).expect("leave a sidecar");
+        }
+        assert!(matches!(open::<Read>(&file, &KEY), Err(Error::Sqlite(_))));
+        let handle = create(&file, &KEY, EPOCH).expect("create after the interruption");
+        assert_eq!(handle.epoch(), EPOCH);
+        handle.close().expect("close");
+        assert!(!file.staging_path().exists());
+        assert_eq!(read_epoch(&file).expect("sidecar"), EPOCH);
+    }
+}
+
+/// Review item 2: a change of epoch interrupted after its pending sidecar, before or after
+/// `_meta`, fails every open with both epochs, rather than opening with either.
+#[test]
+fn an_interrupted_change_of_epoch_fails_closed_with_both_epochs() {
+    let next = KeyEpoch {
+        partition_root_version: 1,
+        generation: 1,
+    };
+    for meta_written in [false, true] {
+        let dir = scratch_dir("ac5-interrupted-epoch");
+        let file = create_module_file(&dir);
+        crate::file::write_sidecar(&file.pending_epoch_path(), next).expect("pending sidecar");
+        if meta_written {
+            raw_connection(&file.path())
+                .execute_batch("UPDATE _meta SET value = 1 WHERE key = 'generation'")
+                .expect("_meta at the new epoch");
+        }
+        for outcome in [
+            open::<Migration>(&file, &KEY).map(drop),
+            open::<Write>(&file, &KEY).map(drop),
+            open::<Read>(&file, &KEY).map(drop),
+        ] {
+            assert!(
+                matches!(outcome, Err(Error::EpochTransitionPending { current, pending }) if current == EPOCH && pending == next),
+                "{outcome:?}"
+            );
+        }
+    }
+}
+
+/// A failed change of epoch removes its pending sidecar and leaves the file openable at its
+/// previous epoch; the handle's own open transaction makes the `_meta` update fail.
+#[test]
+fn a_failed_change_of_epoch_leaves_the_previous_epoch() {
+    let dir = scratch_dir("ac5-failed-epoch");
+    let file = create_module_file(&dir);
+    let mut handle = open::<Write>(&file, &KEY).expect("open");
+    handle.execute_batch("BEGIN").expect("open a transaction");
+    let next = KeyEpoch {
+        partition_root_version: 4,
+        generation: 4,
+    };
+    assert!(handle.write_epoch(next).is_err());
+    handle
+        .execute_batch("ROLLBACK")
+        .expect("end the transaction");
+    assert_eq!(handle.epoch(), EPOCH);
+    handle.close().expect("close");
+    assert!(!file.pending_epoch_path().exists());
+    assert_eq!(open::<Write>(&file, &KEY).expect("reopen").epoch(), EPOCH);
 }
 
 // --- AC4 ---

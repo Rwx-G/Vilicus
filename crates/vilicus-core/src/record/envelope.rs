@@ -3,8 +3,8 @@
 //! declaration, so a migration's back-fill cannot store a forged `source`, a `taint` outside the
 //! stored set or a data type the record kind does not declare.
 //!
-//! The text forms are the ones the Core writes until the typed record API of Story 3.5 stamps the
-//! envelope; that story keeps this check and these forms in step:
+//! The typed record API stamps the envelope in these forms (D146), and the row writer holds every
+//! write to them, whoever computed its envelope:
 //! - `id`: a 16-byte UUIDv7; `author`: `NULL` or a 16-byte UUIDv7;
 //! - `source`: the text of [`Source`](vilicus_types::Source), such as `system` or
 //!   `member(<id>)`;
@@ -14,7 +14,7 @@
 //! - `created_at`, `updated_at`: UTC milliseconds within years 0000 to 9999; `rev`: 1 or more.
 
 use vilicus_module_api::{DataType, EnvelopeColumn, SqlType, Table, Value, ValueError};
-use vilicus_types::{Id, Source, Taint, UtcMillis};
+use vilicus_types::{Id, Rev, Source, Taint, UtcMillis};
 
 use super::RecordError;
 
@@ -80,13 +80,9 @@ pub(crate) fn check(
         (Some(EnvelopeRule::Instant), Value::Integer(millis)) => UtcMillis::from_millis(*millis)
             .map(drop)
             .map_err(|_| invalid(ValueError::OutOfRange)),
-        (Some(EnvelopeRule::Rev), Value::Integer(rev)) => {
-            if *rev >= 1 {
-                Ok(())
-            } else {
-                Err(invalid(ValueError::OutOfRange))
-            }
-        }
+        (Some(EnvelopeRule::Rev), Value::Integer(rev)) => Rev::new(*rev)
+            .map(drop)
+            .ok_or(invalid(ValueError::OutOfRange)),
         (Some(EnvelopeRule::Source), Value::Text(text)) if Source::parse(text).is_ok() => Ok(()),
         (Some(EnvelopeRule::Taint), Value::Text(text))
             if Taint::ALL.iter().any(|taint| taint.as_str() == text) =>

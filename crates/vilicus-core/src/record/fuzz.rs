@@ -474,12 +474,19 @@ impl TableFuzz<'_> {
             .filter(|_| self.rng.chance(1, 2))
             .collect();
         if !changes.is_empty() {
-            update(self.handle, self.module, self.table.name, id, &[], &changes).map_err(
-                |error| WriteFuzzError::ValidRefused {
-                    path: self.path(WriteKind::Update),
-                    error: Box::new(error),
-                },
-            )?;
+            update(
+                self.handle,
+                self.module,
+                self.table.name,
+                id,
+                &[],
+                &changes,
+                &[],
+            )
+            .map_err(|error| WriteFuzzError::ValidRefused {
+                path: self.path(WriteKind::Update),
+                error: Box::new(error),
+            })?;
             self.report.accepted += 1;
         }
         Ok(())
@@ -496,6 +503,7 @@ impl TableFuzz<'_> {
             self.table.name,
             &envelope,
             &fields,
+            &[],
         )
         .map_err(|error| WriteFuzzError::ValidRefused {
             path: self.path(WriteKind::Insert),
@@ -720,9 +728,14 @@ impl TableFuzz<'_> {
             envelope.push((case.column, case.value.clone().unwrap_or(Value::Null)));
         }
         let outcome = match kind {
-            WriteKind::Insert => {
-                insert(self.handle, self.module, self.table.name, &envelope, fields)
-            }
+            WriteKind::Insert => insert(
+                self.handle,
+                self.module,
+                self.table.name,
+                &envelope,
+                fields,
+                &[],
+            ),
             WriteKind::Update => update(
                 self.handle,
                 self.module,
@@ -730,6 +743,7 @@ impl TableFuzz<'_> {
                 id,
                 &envelope,
                 fields,
+                &[],
             ),
         };
         let case = Case::describe(cases);

@@ -7,7 +7,9 @@
 //! for the system calls D140 names, per block and with a `// SAFETY:` comment.
 //!
 //! [`registry`] holds the modules compiled into the binary and checks every module file against
-//! its declaration; [`record`] holds every field a write gives to its declaration (FR-58).
+//! its declaration; [`record`] runs a module's writes through the typed record API, stamping each
+//! record's envelope, taint and data types, and holds every field a write gives to its
+//! declaration (FR-18, FR-58, AD-6, AD-7).
 
 pub mod record;
 pub mod registry;

@@ -1,19 +1,24 @@
-//! Field validation on every write (FR-58, AD-6, D98, D104, I40): the Core's row writer holds
-//! each field a write gives to its declaration, and refuses the whole write with a typed
-//! [`RecordError`] when one value is outside it, so nothing of the write is stored.
+//! Record writes (FR-18, FR-58, AD-6, AD-7, AD-9): the typed record API a module writes through,
+//! the provenance the Core stamps on each write, and the row writer under both.
 //!
-//! A write runs in one `BEGIN IMMEDIATE` transaction on the file's write handle: every field is
-//! checked first, its storage class and its closed type or maximum length by
+//! [`run_call`] runs one call of a module in one `BEGIN IMMEDIATE` transaction on the module
+//! file's write handle, and gives the module's code the port of `vilicus-module-api`,
+//! [`Records`](vilicus_module_api::Records): insert, update by id with the expected revision,
+//! delete by id. For each write the Core stamps the envelope (id, `source`, `author`, times,
+//! `rev`) and computes `taint` and `data_types` from the [`Call`] (who makes it, on what
+//! authority) and from the records the write is derived from; the module gives field values and
+//! input ids only. A refused write rolls back the whole call.
+//!
+//! The row writer holds each field a write gives to its declaration (D98, D104, I40), and each
+//! envelope value to its stored form (`envelope`, D146), and refuses the whole write with a typed
+//! [`RecordError`] when one value is outside it: every field is checked first, its storage class
+//! and its closed type or maximum length by
 //! [`Field::check_value`](vilicus_module_api::Field::check_value), and a reviewed-vocabulary label
 //! against the labels confirmed in that file, read under the write lock; only then does the
 //! statement run. A value is never truncated or converted: it is stored as given, or the write
-//! is refused.
-//!
-//! The row writer takes the envelope columns (AD-6) from its caller and holds each to its stored
-//! form (`envelope`); stamping them (id, source, taint, data types, author, times and `rev`) is
-//! the typed record API's, which writes through this module (Story 3.5). The row writer, label
-//! confirmation and the check of stored rows are crate-private: no crate outside the Core can
-//! write a row, choose an envelope or confirm a label, which has no surface in V0.1 (FR-50).
+//! is refused. The row writer, label confirmation and the check of stored rows are crate-private,
+//! and [`run_call`] needs a write handle, which only the Core opens: no crate outside the Core
+//! can write a row, choose an envelope or confirm a label, which has no surface in V0.1 (FR-50).
 //!
 //! ```compile_fail,E0603
 //! let _ = vilicus_core::record::confirm_label;
@@ -27,34 +32,41 @@
 //! every write path of a registry's modules with values outside their declarations (AC4 of Story
 //! 3.4).
 
-// Until the typed record API of Story 3.5 calls the row writer, only the write path fuzz test and
-// the unit tests do, so a build without either has no caller of it yet.
+// The row writer's own transactions, label confirmation (no surface in V0.1, FR-50) and the check
+// of stored rows (the migration runner of Story 3.7) have no caller but the tests and the write
+// path fuzz test yet.
 #![cfg_attr(
     not(any(test, feature = "testing")),
     allow(
         dead_code,
-        reason = "the typed record API of Story 3.5 calls the row writer; until then only tests do"
+        reason = "label confirmation and the check of stored rows have no caller outside tests yet"
     )
 )]
 
+mod call;
 mod envelope;
 #[cfg(any(test, feature = "testing"))]
 mod fuzz;
+mod provenance;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_call;
 
 use core::fmt;
 
 use vilicus_module_api::{
-    ENVELOPE, Field, FieldKind, ModuleDeclaration, Structured, Table, Value, ValueError,
-    check_vocabulary_label,
+    DataType, ENVELOPE, Field, FieldKind, ModuleDeclaration, Structured, Table, Value, ValueError,
+    WriteError, check_vocabulary_label,
 };
 use vilicus_storage::{Handle, Inspect, SqlValue, Write};
 use vilicus_types::{Id, UtcMillis};
 
+pub use call::{Authority, Call, CallOutcome, RecordChange, Stamper, run_call};
 #[cfg(any(test, feature = "testing"))]
 pub use fuzz::{WriteFuzzError, WriteFuzzReport, WriteKind, WritePath};
+pub use provenance::{DRAFT_RUN_WORDS, RecordProvenance};
 
 /// Why the Core refuses a write, a label confirmation or a stored row. No variant carries a
 /// value or a name the caller chose, which may be record content (spine conventions, Logging):
@@ -134,11 +146,42 @@ pub enum RecordError {
         /// The rule the label breaks.
         error: ValueError,
     },
-    /// An update names a record the table does not hold.
+    /// An update or a delete names a record the table does not hold.
     RecordNotFound {
         /// The table.
         table: &'static str,
     },
+    /// An update expects another revision than the stored one (AD-9).
+    StaleRevision {
+        /// The table.
+        table: &'static str,
+    },
+    /// A derived write of a call no member made or approved declares no input (AD-7, I9).
+    MissingInputs {
+        /// The table.
+        table: &'static str,
+    },
+    /// An input is neither a record of this file nor one the call read.
+    UnknownInput {
+        /// The table written to.
+        table: &'static str,
+    },
+    /// The data types the record would hold are not all declared by its table (D103).
+    UndeclaredDataType {
+        /// The table.
+        table: &'static str,
+    },
+    /// A write's `data_types` does not hold every data type of its inputs (I43).
+    DataTypesBelowInputs {
+        /// The table.
+        table: &'static str,
+    },
+    /// The call's authority does not fit its principal: a member's own action from a principal
+    /// other than `Member` or `Cli`, an approval for a principal other than `AiTask` or
+    /// `Plugin`, or a `Member` or `Cli` call that is not the member's own action.
+    InconsistentCall,
+    /// The module's code ended the call with its own error; the call was rolled back.
+    Aborted(WriteError),
     /// The storage layer failed; the transaction was rolled back.
     Storage(vilicus_storage::Error),
 }
@@ -186,6 +229,28 @@ impl fmt::Display for RecordError {
                 write!(formatter, "vocabulary {vocabulary}: {error}")
             }
             Self::RecordNotFound { table } => write!(formatter, "{table}: no such record"),
+            Self::StaleRevision { table } => {
+                write!(formatter, "{table}: the record changed since it was read")
+            }
+            Self::MissingInputs { table } => {
+                write!(formatter, "{table}: a derived write declares no input")
+            }
+            Self::UnknownInput { table } => {
+                write!(formatter, "{table}: an input record the Core does not know")
+            }
+            Self::UndeclaredDataType { table } => {
+                write!(formatter, "{table}: a data type the table does not declare")
+            }
+            Self::DataTypesBelowInputs { table } => {
+                write!(
+                    formatter,
+                    "{table}: data types missing a data type of an input"
+                )
+            }
+            Self::InconsistentCall => {
+                formatter.write_str("the call's authority does not fit its principal")
+            }
+            Self::Aborted(error) => write!(formatter, "the module ended the call: {error}"),
             Self::Storage(error) => write!(formatter, "{error}"),
         }
     }
@@ -212,38 +277,29 @@ struct Checked<'a> {
     value: &'a Value,
 }
 
-/// Inserts a record into `table` of `module`'s file (AD-9): the envelope columns as given, every
-/// one of them, and the fields, each optional field left out being stored `NULL`. The write is
-/// refused, and nothing stored, unless every value meets its declaration.
+/// Inserts a record into `table` of `module`'s file (AD-9) in a transaction of its own: the
+/// envelope columns as given, every one of them, and the fields, each optional field left out
+/// being stored `NULL`. The write is refused, and nothing stored, unless every value meets its
+/// declaration and the envelope's `data_types` holds every type of `inputs_data_types`, the
+/// union of the data types of the records the write is derived from (I43).
 pub(crate) fn insert(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
     table: &str,
     envelope: &[(&str, Value)],
     fields: &[(&str, Value)],
+    inputs_data_types: &[DataType],
 ) -> Result<(), RecordError> {
     let table = declared_table(module, table)?;
     in_write_transaction(handle, || {
-        let mut columns = check_envelope(table, envelope, Completeness::Every)?;
-        columns.extend(check_fields(handle, table, fields, Completeness::Every)?);
-        let names: Vec<&str> = columns.iter().map(|checked| checked.column).collect();
-        let parameters: Vec<String> = (1..=columns.len())
-            .map(|index| format!("?{index}"))
-            .collect();
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            table.name,
-            names.join(", "),
-            parameters.join(", ")
-        );
-        handle.execute_values(&sql, &bound(&columns))?;
-        Ok(())
+        insert_row(handle, table, envelope, fields, inputs_data_types)
     })
 }
 
-/// Updates the record `id` of `table`: the envelope columns and fields given, and no other; the
-/// record's `id` never changes. The write is refused, and nothing stored, unless every value
-/// meets its declaration and the record exists.
+/// Updates the record `id` of `table` in a transaction of its own: the envelope columns and
+/// fields given, and no other; the record's `id` never changes. The write is refused, and nothing
+/// stored, unless every value meets its declaration, the record exists and, when
+/// `inputs_data_types` is not empty, the envelope gives a `data_types` holding each of them.
 pub(crate) fn update(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
@@ -251,32 +307,101 @@ pub(crate) fn update(
     id: Id,
     envelope: &[(&str, Value)],
     fields: &[(&str, Value)],
+    inputs_data_types: &[DataType],
 ) -> Result<(), RecordError> {
     let table = declared_table(module, table)?;
     in_write_transaction(handle, || {
-        let mut columns = check_envelope(table, envelope, Completeness::Some)?;
-        columns.extend(check_fields(handle, table, fields, Completeness::Some)?);
-        if columns.is_empty() {
-            return Err(RecordError::EmptyUpdate { table: table.name });
-        }
-        let assignments: Vec<String> = columns
-            .iter()
-            .enumerate()
-            .map(|(index, checked)| format!("{} = ?{}", checked.column, index + 1))
-            .collect();
-        let sql = format!(
-            "UPDATE {} SET {} WHERE id = ?{}",
-            table.name,
-            assignments.join(", "),
-            columns.len() + 1
-        );
-        let mut values = bound(&columns);
-        values.push(SqlValue::Blob(id.to_bytes().to_vec()));
-        match handle.execute_values(&sql, &values)? {
-            0 => Err(RecordError::RecordNotFound { table: table.name }),
-            _ => Ok(()),
-        }
+        update_row(handle, table, id, envelope, fields, inputs_data_types)
     })
+}
+
+/// The insert of [`insert`], inside a transaction its caller holds.
+fn insert_row(
+    handle: &Handle<Write>,
+    table: &'static Table,
+    envelope: &[(&str, Value)],
+    fields: &[(&str, Value)],
+    inputs_data_types: &[DataType],
+) -> Result<(), RecordError> {
+    let mut columns = check_envelope(table, envelope, Completeness::Every)?;
+    check_inputs_data_types(table, &columns, inputs_data_types)?;
+    columns.extend(check_fields(handle, table, fields, Completeness::Every)?);
+    let names: Vec<&str> = columns.iter().map(|checked| checked.column).collect();
+    let parameters: Vec<String> = (1..=columns.len())
+        .map(|index| format!("?{index}"))
+        .collect();
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({})",
+        table.name,
+        names.join(", "),
+        parameters.join(", ")
+    );
+    handle.execute_values(&sql, &bound(&columns))?;
+    Ok(())
+}
+
+/// The update of [`update`], inside a transaction its caller holds.
+fn update_row(
+    handle: &Handle<Write>,
+    table: &'static Table,
+    id: Id,
+    envelope: &[(&str, Value)],
+    fields: &[(&str, Value)],
+    inputs_data_types: &[DataType],
+) -> Result<(), RecordError> {
+    let mut columns = check_envelope(table, envelope, Completeness::Some)?;
+    check_inputs_data_types(table, &columns, inputs_data_types)?;
+    columns.extend(check_fields(handle, table, fields, Completeness::Some)?);
+    if columns.is_empty() {
+        return Err(RecordError::EmptyUpdate { table: table.name });
+    }
+    let assignments: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, checked)| format!("{} = ?{}", checked.column, index + 1))
+        .collect();
+    let sql = format!(
+        "UPDATE {} SET {} WHERE id = ?{}",
+        table.name,
+        assignments.join(", "),
+        columns.len() + 1
+    );
+    let mut values = bound(&columns);
+    values.push(SqlValue::Blob(id.to_bytes().to_vec()));
+    match handle.execute_values(&sql, &values)? {
+        0 => Err(RecordError::RecordNotFound { table: table.name }),
+        _ => Ok(()),
+    }
+}
+
+/// Refuses envelope columns whose `data_types` misses a data type of the write's inputs, or that
+/// leave `data_types` out although the write has inputs: a derived record holds at least the
+/// union of its inputs' sets (D103, I43), whoever computed its envelope.
+fn check_inputs_data_types(
+    table: &'static Table,
+    columns: &[Checked<'_>],
+    inputs_data_types: &[DataType],
+) -> Result<(), RecordError> {
+    if inputs_data_types.is_empty() {
+        return Ok(());
+    }
+    let given =
+        columns.iter().find_map(
+            |checked| match (envelope::rule(checked.column), checked.value) {
+                (Some(envelope::EnvelopeRule::DataTypes), Value::Text(text)) => Some(text),
+                _ => None,
+            },
+        );
+    let holds_inputs = given.is_some_and(|text| {
+        inputs_data_types
+            .iter()
+            .all(|data_type| text.split(',').any(|name| name == data_type.as_str()))
+    });
+    if holds_inputs {
+        Ok(())
+    } else {
+        Err(RecordError::DataTypesBelowInputs { table: table.name })
+    }
 }
 
 /// Records `label` as a confirmed label of `vocabulary` in `module`'s file, confirmed by the
@@ -359,12 +484,15 @@ fn declared_table(
 /// Runs `body` in a `BEGIN IMMEDIATE` transaction on `handle`, committed when it succeeds. When
 /// `body` or the `COMMIT` fails, the transaction is rolled back, so a refused write leaves the
 /// file as it was and the handle never stays inside the transaction.
-fn in_write_transaction(
+fn in_write_transaction<T>(
     handle: &Handle<Write>,
-    body: impl FnOnce() -> Result<(), RecordError>,
-) -> Result<(), RecordError> {
+    body: impl FnOnce() -> Result<T, RecordError>,
+) -> Result<T, RecordError> {
     handle.execute_batch("BEGIN IMMEDIATE")?;
-    let outcome = body().and_then(|()| Ok(handle.execute_batch("COMMIT")?));
+    let outcome = body().and_then(|value| {
+        handle.execute_batch("COMMIT")?;
+        Ok(value)
+    });
     if outcome.is_err() {
         // The rollback's own failure is not reported: the refusal says why nothing was written.
         // A COMMIT that failed on a deferred constraint leaves the transaction open, which this

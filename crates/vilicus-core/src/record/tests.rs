@@ -15,15 +15,38 @@ use vilicus_storage::{Handle, MigrationTrack, ModuleFile, SqlValue, TableKind, W
 use vilicus_types::{Id, Source, Taint, UtcMillis};
 
 use super::envelope::{EnvelopeRule, data_types_text, rule};
-use super::{RecordError, WriteKind, WritePath, check_stored_rows, confirm_label, insert, update};
+use super::{RecordError, WriteKind, WritePath, check_stored_rows, confirm_label};
 use crate::registry::{Registry, create_migrated};
 
+/// The row writer's insert of a record derived from no input.
+fn insert(
+    handle: &Handle<Write>,
+    module: &'static ModuleDeclaration,
+    table: &str,
+    envelope: &[(&str, Value)],
+    fields: &[(&str, Value)],
+) -> Result<(), RecordError> {
+    super::insert(handle, module, table, envelope, fields, &[])
+}
+
+/// The row writer's update of a record, derived from no input.
+fn update(
+    handle: &Handle<Write>,
+    module: &'static ModuleDeclaration,
+    table: &str,
+    id: Id,
+    envelope: &[(&str, Value)],
+    fields: &[(&str, Value)],
+) -> Result<(), RecordError> {
+    super::update(handle, module, table, id, envelope, fields, &[])
+}
+
 /// Test key only; the Core derives one key per file.
-const KEY: [u8; 32] = [0x4d; 32];
+pub(super) const KEY: [u8; 32] = [0x4d; 32];
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
-fn scratch_dir(label: &str) -> PathBuf {
+pub(super) fn scratch_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "vilicus-core-record-{}-{}-{label}",
         std::process::id(),
@@ -91,7 +114,7 @@ const PLACE_FIELDS: &[Field] = &[
 
 /// The `CREATE TABLE` statement a declaration implies, without `STRICT`: field validation is the
 /// only guard on these tables, as on a table a later migration adds a column to.
-fn create_sql(table: &Table) -> String {
+pub(super) fn create_sql(table: &Table) -> String {
     let columns: Vec<String> = ENVELOPE
         .iter()
         .map(|column| {
@@ -124,7 +147,7 @@ fn create_sql(table: &Table) -> String {
 
 /// A module of `tables`, created by its first migration; `back_fill`, when given, is a second
 /// migration.
-fn module(
+pub(super) fn module(
     name: &'static str,
     tables: Vec<Table>,
     back_fill: Option<String>,
@@ -166,12 +189,15 @@ fn probe() -> &'static ModuleDeclaration {
     )
 }
 
-fn registry_of(modules: Vec<&'static ModuleDeclaration>) -> Registry {
+pub(super) fn registry_of(modules: Vec<&'static ModuleDeclaration>) -> Registry {
     Registry::new(modules.leak()).expect("a valid registry")
 }
 
 /// A new migrated file of `module` and its write handle.
-fn open_new(module: &'static ModuleDeclaration, label: &str) -> (ModuleFile, Handle<Write>) {
+pub(super) fn open_new(
+    module: &'static ModuleDeclaration,
+    label: &str,
+) -> (ModuleFile, Handle<Write>) {
     let file = create_migrated(module, &scratch_dir(label), &KEY).expect("create and migrate");
     let handle = registry_of(vec![module])
         .open::<Write>(&file, &KEY)
@@ -179,17 +205,17 @@ fn open_new(module: &'static ModuleDeclaration, label: &str) -> (ModuleFile, Han
     (file, handle)
 }
 
-fn adult() -> Id {
+pub(super) fn adult() -> Id {
     "017f22e2-79b0-7cc3-98c4-dc0c0c07398f"
         .parse()
         .expect("test id")
 }
 
-fn noon() -> UtcMillis {
+pub(super) fn noon() -> UtcMillis {
     UtcMillis::parse_rfc3339("2026-10-21T12:00:00Z").expect("valid")
 }
 
-fn uuid(last: u8) -> Id {
+pub(super) fn uuid(last: u8) -> Id {
     let mut random = [0x5a; 10];
     random[9] = last;
     Id::new_v7(noon(), random).expect("after the epoch")
@@ -197,7 +223,7 @@ fn uuid(last: u8) -> Id {
 
 /// A valid envelope of a new record of a table declaring `data_types`, in the stored forms the
 /// row writer checks.
-fn envelope_of(data_types: &[DataType], id: Id) -> Vec<(&'static str, Value)> {
+pub(super) fn envelope_of(data_types: &[DataType], id: Id) -> Vec<(&'static str, Value)> {
     ENVELOPE
         .iter()
         .map(|column| {
@@ -233,7 +259,7 @@ fn with_envelope(
     envelope
 }
 
-fn text(value: &str) -> Value {
+pub(super) fn text(value: &str) -> Value {
     Value::Text(value.into())
 }
 
@@ -264,7 +290,7 @@ fn with(
 }
 
 /// Every row of every table of the file, the Core's and SQLite's own included.
-fn content(handle: &Handle<Write>) -> Vec<Vec<Vec<SqlValue>>> {
+pub(super) fn content(handle: &Handle<Write>) -> Vec<Vec<Vec<SqlValue>>> {
     handle
         .schema()
         .expect("schema")
@@ -279,7 +305,7 @@ fn content(handle: &Handle<Write>) -> Vec<Vec<Vec<SqlValue>>> {
         .collect()
 }
 
-fn rows(handle: &Handle<Write>, sql: &str) -> Vec<Vec<SqlValue>> {
+pub(super) fn rows(handle: &Handle<Write>, sql: &str) -> Vec<Vec<SqlValue>> {
     handle.query_values(sql, &[]).expect("read rows")
 }
 
@@ -316,7 +342,7 @@ fn invalid(error: &RecordError) -> Option<(&'static str, &'static str, ValueErro
     }
 }
 
-fn confirm(
+pub(super) fn confirm(
     handle: &Handle<Write>,
     module: &'static ModuleDeclaration,
     vocabulary: &str,

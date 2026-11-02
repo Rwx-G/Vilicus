@@ -144,12 +144,45 @@ fn names_a_key_object(text: &str) -> Option<&'static str> {
     })
 }
 
-/// What breaks the AC7 shape in the source of `aws_lc.rs`: outside `use` declarations and
-/// comments, an aws-lc-rs key object is named only inside the body of a function, every function
-/// is `#[inline(never)]`, and no signature names a key object or an `impl` type through which
-/// one could leave.
+/// Whether `line` uses the `static` keyword (a `'static` lifetime is not one).
+fn declares_a_static(line: &str) -> bool {
+    line.match_indices("static").any(|(index, _)| {
+        let before = line[..index].chars().next_back();
+        let after = line[index + "static".len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '\'')
+            && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// What breaks the AC7 shape in the source of `aws_lc.rs`, line by line:
+/// - aws-lc-rs is named only in top-level, private `use` declarations that rename nothing, so
+///   no item of it is re-exported or reached under another name;
+/// - nothing is re-exported, and no `static` or `thread_local!` appears anywhere, function
+///   bodies included, so no key object is kept between calls;
+/// - outside those `use` declarations and comments, an aws-lc-rs key object is named only inside
+///   the body of a function;
+/// - every function is `#[inline(never)]`, takes no type parameter, and its signature names no
+///   key object, `impl` type or `dyn` type through which one could leave.
+///
+/// It reads text, not the compiler's view of the code: a heuristic that refuses the ways out it
+/// knows, which review backs for the ones it does not.
 fn shape_violations(source: &str) -> Vec<String> {
     let mut violations = Vec::new();
+    for (number, line) in source.lines().enumerate() {
+        let number = number + 1;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if declares_a_static(trimmed) || trimmed.contains("thread_local!") {
+            violations.push(format!("line {number}: a static"));
+        }
+        if trimmed.starts_with("pub use")
+            || (trimmed.starts_with("pub(") && trimmed.contains(") use "))
+        {
+            violations.push(format!("line {number}: a re-export"));
+        }
+    }
     let mut attributes: Vec<&str> = Vec::new();
     let mut lines = source.lines().enumerate();
     while let Some((number, line)) = lines.next() {
@@ -163,9 +196,15 @@ fn shape_violations(source: &str) -> Vec<String> {
             continue;
         }
         if line.starts_with("use ") {
-            let mut statement = line;
+            let mut statement = line.to_string();
             while !statement.trim_end().ends_with(';') {
-                statement = lines.next().map(|(_, next)| next).unwrap_or(";");
+                match lines.next() {
+                    Some((_, next)) => statement.push_str(next),
+                    None => break,
+                }
+            }
+            if statement.contains("aws_lc_rs") && statement.contains(" as ") {
+                violations.push(format!("line {number}: an aws-lc-rs item renamed"));
             }
             attributes.clear();
             continue;
@@ -192,13 +231,32 @@ fn shape_violations(source: &str) -> Vec<String> {
             if signature.contains("impl ") {
                 violations.push(format!("line {number}: a signature names an impl type"));
             }
-            for (_, body) in lines.by_ref() {
+            if signature.contains("dyn ") {
+                violations.push(format!("line {number}: a signature names a dyn type"));
+            }
+            let after_fn = &signature[signature.find("fn ").unwrap_or(0)..];
+            let name_and_parameters = &after_fn[..after_fn.find('(').unwrap_or(after_fn.len())];
+            if name_and_parameters.contains('<') || signature.contains(" where ") {
+                violations.push(format!("line {number}: a generic function"));
+            }
+            for (body_number, body) in lines.by_ref() {
                 if body == "}" {
                     break;
+                }
+                if !body.trim_start().starts_with("//") && body.contains("aws_lc_rs") {
+                    violations.push(format!(
+                        "line {}: aws-lc-rs named outside a top-level use",
+                        body_number + 1
+                    ));
                 }
             }
             attributes.clear();
             continue;
+        }
+        if line.contains("aws_lc_rs") {
+            violations.push(format!(
+                "line {number}: aws-lc-rs named outside a top-level use"
+            ));
         }
         if let Some(name) = names_a_key_object(line) {
             violations.push(format!("line {number}: {name} outside a function body"));
@@ -283,6 +341,45 @@ fn the_key_object_check_refuses_each_way_out() {
             "static",
             format!("{base}\nstatic PRK: std::sync::OnceLock<Prk> = std::sync::OnceLock::new();\n"),
             "Prk outside a function body",
+        ),
+        // The probes of the review of Story 4.1 (finding 8), and their neighbours.
+        (
+            "renamed",
+            "use aws_lc_rs::aead::LessSafeKey as Kept;\n\n#[inline(never)]\npub(crate) fn make(key: &[u8; 32]) -> Kept {\n    todo!()\n}\n".to_string(),
+            "an aws-lc-rs item renamed",
+        ),
+        (
+            "dyn closure",
+            base.replace("-> u8 {", "-> Box<dyn Fn(&mut [u8])> {"),
+            "a dyn type",
+        ),
+        (
+            "function-local static",
+            base.replace(
+                "    0\n",
+                "    static KEPT: std::sync::OnceLock<LessSafeKey> = std::sync::OnceLock::new();\n    0\n",
+            ),
+            "a static",
+        ),
+        (
+            "thread-local",
+            base.replace("    0\n", "    thread_local! { static KEPT: () = (); }\n    0\n"),
+            "a static",
+        ),
+        (
+            "module re-export",
+            format!("{base}\npub(crate) use aws_lc_rs::aead;\n"),
+            "a re-export",
+        ),
+        (
+            "renamed in a body",
+            base.replace("    0\n", "    use aws_lc_rs::aead::LessSafeKey as Kept;\n    0\n"),
+            "aws-lc-rs named outside a top-level use",
+        ),
+        (
+            "generic",
+            base.replace("fn seal(key", "fn seal<T: From<u8>>(key"),
+            "a generic function",
         ),
     ];
     for (case, source, expected) in cases {

@@ -6,7 +6,9 @@
 //! the objects it needs, runs one operation and drops them before it returns, and is never
 //! inlined into its caller (D131). No signature names an aws-lc-rs key object, so none can
 //! outlive its operation; `key_objects_live_for_one_operation` in `tests.rs` holds this file to
-//! that shape, and no other source file of the crate names aws-lc-rs.
+//! that shape, and no other source file of the crate names aws-lc-rs. That test reads the text
+//! of the file: it refuses the ways out it knows (renames, re-exports, statics, `impl` and `dyn`
+//! signatures, generic functions), and review covers the others.
 
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use aws_lc_rs::error::Unspecified;

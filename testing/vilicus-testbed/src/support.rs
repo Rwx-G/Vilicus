@@ -217,7 +217,7 @@ impl House {
             .position(|(generation, _)| generation.partition() == partition)
             .expect("an unlocked partition");
         let (_, files) = self.partitions.remove(index);
-        files.close().expect("close the files");
+        files.close(&self.states).expect("close the files");
     }
 
     /// The generation `partition` was unlocked under, while it is up.
@@ -314,7 +314,7 @@ impl Drop for House {
     fn drop(&mut self) {
         for (_, files) in self.partitions.drain(..) {
             // The scratch directory goes next, whatever the closes report.
-            let _ = files.close();
+            let _ = files.close(&self.states);
         }
         let _ = std::fs::remove_dir_all(&self.directory);
     }

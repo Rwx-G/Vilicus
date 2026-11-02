@@ -250,6 +250,13 @@ pub enum StageRefused {
     /// The stage holds the writer, and a re-key or a migration, of this unlock or an earlier
     /// one, still holds it.
     WriterHeld,
+    /// The stage holds the writer, and the Core still holds connections of the file open, those
+    /// of an earlier bring-up it has not closed: a copy taken now would leave their WAL or
+    /// shared-memory file beside the live one, and the swap refuses it (D149).
+    ConnectionsOpen {
+        /// How many sets of connections, one per bring-up that opened the file.
+        connections: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -261,6 +268,8 @@ struct Entry {
     calls: Vec<(u64, Option<Duration>)>,
     /// The generation whose re-key or migration holds the file's writer.
     writer: Option<u64>,
+    /// The bring-ups whose write and read connections of the file are still open.
+    connections: usize,
 }
 
 impl Default for Entry {
@@ -271,6 +280,7 @@ impl Default for Entry {
             deactivated: false,
             calls: Vec::new(),
             writer: None,
+            connections: 0,
         }
     }
 }
@@ -492,12 +502,35 @@ impl ModuleStates {
                     calls: entry.calls.len(),
                 });
             }
+            if entry.connections > 0 {
+                return Err(StageRefused::ConnectionsOpen {
+                    connections: entry.connections,
+                });
+            }
             entry.writer = Some(generation.number);
         } else if holds && !stage.holds_the_writer() {
             entry.writer = None;
         }
         entry.stage = stage;
         Ok(())
+    }
+
+    /// A bring-up opened the write and read connections of `module`'s file in `partition`: until
+    /// [`connections_closed`](Self::connections_closed), the file is neither re-keyed nor
+    /// migrated ([`StageRefused::ConnectionsOpen`]).
+    pub(crate) fn connections_opened(&self, module: &ModuleName, partition: Partition) {
+        self.files()
+            .entries
+            .entry((module.clone(), partition))
+            .or_default()
+            .connections += 1;
+    }
+
+    /// The connections a bring-up opened of `module`'s file in `partition` are closed.
+    pub(crate) fn connections_closed(&self, module: &ModuleName, partition: Partition) {
+        if let Some(entry) = self.files().entries.get_mut(&(module.clone(), partition)) {
+            entry.connections = entry.connections.saturating_sub(1);
+        }
     }
 
     /// Starts a call of module code on `module`'s file in `partition`: refused with

@@ -98,9 +98,15 @@ impl PartitionFiles {
             .find(|handle| handle.file().module() == module)
     }
 
-    /// Closes every handle, the read handles first, each with a TRUNCATE checkpoint; the first
-    /// failure is returned once every handle was closed.
-    pub fn close(self) -> Result<(), vilicus_storage::Error> {
+    /// Closes every handle, the read handles first, each with a TRUNCATE checkpoint, then tells
+    /// `states`, which kept each file from being re-keyed or migrated while its connections were
+    /// open (D149); the first failure is returned once every handle was closed.
+    pub fn close(self, states: &ModuleStates) -> Result<(), vilicus_storage::Error> {
+        let files: Vec<ModuleFile> = self
+            .handles
+            .iter()
+            .map(|handle| handle.file().clone())
+            .collect();
         let mut first = Ok(());
         let closes = self
             .readers
@@ -111,6 +117,9 @@ impl PartitionFiles {
             if first.is_ok() {
                 first = closed;
             }
+        }
+        for file in files {
+            states.connections_closed(file.module(), file.partition());
         }
         first
     }
@@ -495,7 +504,11 @@ impl Mover<'_> {
             }
         });
         match opened {
-            Ok(handles) if self.put(file, Stage::Ready) => Ok(handles),
+            Ok(handles) if self.put(file, Stage::Ready) => {
+                self.states
+                    .connections_opened(file.module(), file.partition());
+                Ok(handles)
+            }
             Ok((handle, reader)) => {
                 // The partition was locked: the handles go, whatever their closes report.
                 let _ = reader.close();
@@ -523,7 +536,7 @@ impl Mover<'_> {
     fn stopped(&self, open: PartitionFiles, report: &mut BringUpReport) -> PartitionFiles {
         let partition = open.partition;
         // The partition was locked: its handles go, whatever their closes report.
-        let _ = open.close();
+        let _ = open.close(self.states);
         for (_, outcome) in &mut report.files {
             if matches!(outcome, FileOutcome::Ready) {
                 *outcome = FileOutcome::PartitionLocked;

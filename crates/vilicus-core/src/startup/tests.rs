@@ -420,7 +420,7 @@ fn a_partition_is_usable_at_once_and_its_files_are_re_keyed_migrated_then_delive
     for module in ["notes", "tasks"] {
         assert_eq!(state(&states, module), AvailabilityState::Ready);
     }
-    open.close().expect("close");
+    open.close(&states).expect("close");
 }
 
 /// A file whose migration fails stops `failed migration` with its alert, and the events due to
@@ -464,7 +464,7 @@ fn a_failed_migration_stops_its_file_and_is_held_after_a_restart() {
         }
     ));
     assert!(seen.borrow().is_empty(), "no consumer code ran");
-    open.close().expect("close");
+    open.close(&states).expect("close");
 
     let restarted = ModuleStates::new();
     restarted.unlock_partition(&partitioned.registry, Partition::Household);
@@ -490,7 +490,7 @@ fn a_failed_migration_stops_its_file_and_is_held_after_a_restart() {
         AvailabilityState::FailedMigration
     );
     assert_eq!(module_version(&partitioned.files[1]), 1);
-    open.close().expect("close");
+    open.close(&states).expect("close");
 }
 
 /// A re-key that fails leaves its file `locked`, not served until the next unlock, with an alert,
@@ -531,7 +531,7 @@ fn a_failed_re_key_leaves_its_file_locked() {
             .iter()
             .all(|(module, _)| module.as_str() == "tasks")
     );
-    open.close().expect("close");
+    open.close(&states).expect("close");
 }
 
 /// A file newer than the code stops `newer than code` with its alert.
@@ -573,7 +573,7 @@ fn a_file_newer_than_the_code_stops_newer_than_code() {
         }]
     ));
     assert_eq!(state(&states, "tasks"), AvailabilityState::NewerThanCode);
-    open.close().expect("close");
+    open.close(&states).expect("close");
 }
 
 /// Consumer code that is never called.
@@ -632,7 +632,7 @@ fn a_file_without_the_space_to_migrate_is_not_served_and_not_held() {
         None,
         "the host's state is not held"
     );
-    open.close().expect("close");
+    open.close(&states).expect("close");
 }
 
 /// A call of module code still running on a file (one that began before the partition was
@@ -688,7 +688,7 @@ fn a_file_with_a_call_still_running_is_not_migrated() {
     );
     assert_eq!(module_version(&partitioned.files[1]), 1);
     states.end_call(ticket);
-    open.close().expect("close");
+    open.close(&states).expect("close");
 }
 
 /// A bring-up takes the files of its partition and of registered modules only, or touches none.
@@ -763,7 +763,7 @@ fn the_ready_files_are_held_and_closed() {
     assert!(open.handle(&ModuleName::from_static("tasks")).is_some());
     assert_eq!(report.deliveries.len(), 2);
     assert!(format!("{open:?}").contains("tasks.household.db"));
-    open.close().expect("close");
+    open.close(&states).expect("close");
     for file in &partitioned.files {
         assert!(!file.wal_path().exists(), "{}", file.file_name());
     }
@@ -894,7 +894,7 @@ fn a_bring_up_whose_partition_is_locked_stops_and_opens_nothing() {
         1,
         "nothing migrated for a locked partition"
     );
-    open.close().expect("close");
+    open.close(&states).expect("close");
 }
 
 /// Review item 7: a registered module whose file is not given is reported and `locked`, with an
@@ -926,7 +926,7 @@ fn a_module_without_a_file_is_reported_and_two_files_of_one_module_are_refused()
         partition: Partition::Household,
         file_name: "tasks.household.db".into(),
     }));
-    open.close().expect("close");
+    open.close(&states).expect("close");
 
     let twice = [partitioned.files[0].clone(), partitioned.files[0].clone()];
     let doubled = targets(&twice);
@@ -952,4 +952,51 @@ fn a_module_without_a_file_is_reported_and_two_files_of_one_module_are_refused()
         AvailabilityState::Opening,
         "nothing touched"
     );
+}
+
+/// Story 3.10 review (D149, D151): a file whose connections an earlier bring-up still holds open
+/// is neither re-keyed nor migrated: a copy would leave their WAL or shared-memory file beside it.
+/// The next bring-up reports it busy and leaves it `locked`; once the earlier connections are
+/// closed, a bring-up re-keys it.
+#[test]
+fn a_file_whose_connections_are_still_open_is_not_re_keyed() {
+    let mut partitioned = partitioned("connections", "UPDATE tasks SET title = title;");
+    let states = ModuleStates::new();
+    states.unlock_partition(&partitioned.registry, Partition::Household);
+    let seen = RefCell::new(Vec::new());
+    let quiet = Probe {
+        states: &states,
+        tasks_file: partitioned.files[1].clone(),
+        rekey_notes: false,
+        fail_rekey: false,
+        seen: &seen,
+    };
+    let (earlier, report) = run(&mut partitioned, &states, &quiet);
+    assert!(matches!(outcome(&report, "notes"), FileOutcome::Ready));
+
+    states.lock_partition(Partition::Household);
+    states.unlock_partition(&partitioned.registry, Partition::Household);
+    let rekeying = Probe {
+        rekey_notes: true,
+        ..quiet
+    };
+    let (open, report) = run(&mut partitioned, &states, &rekeying);
+    assert!(
+        matches!(
+            outcome(&report, "notes"),
+            FileOutcome::WriterBusy(StageRefused::ConnectionsOpen { connections: 1 })
+        ),
+        "{report:?}"
+    );
+    assert_eq!(state(&states, "notes"), AvailabilityState::Locked);
+    assert!(seen.borrow().iter().all(|seen| seen.step != "re-key"));
+    open.close(&states).expect("close");
+    earlier.close(&states).expect("close");
+
+    states.lock_partition(Partition::Household);
+    states.unlock_partition(&partitioned.registry, Partition::Household);
+    let (open, report) = run(&mut partitioned, &states, &rekeying);
+    assert!(matches!(outcome(&report, "notes"), FileOutcome::Ready));
+    assert!(seen.borrow().iter().any(|seen| seen.step == "re-key"));
+    open.close(&states).expect("close");
 }

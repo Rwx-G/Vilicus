@@ -20,7 +20,11 @@ use crate::key::{Slot, SymmetricKey};
 /// ```
 ///
 /// ```compile_fail,E0080
-/// const UNVERSIONED: vilicus_crypto::Label = vilicus_crypto::Label::new("vilicus/db/");
+/// const UNVERSIONED: vilicus_crypto::Label = vilicus_crypto::Label::new("vilicus/db/files/");
+/// ```
+///
+/// ```compile_fail,E0080
+/// const PREFIX_ONLY: vilicus_crypto::Label = vilicus_crypto::Label::new("vilicus/v1/");
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Label(&'static str);

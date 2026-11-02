@@ -2,7 +2,7 @@
 title: 'Reference module exercising the whole contract'
 epic: 3
 story: 10
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-22, FR-109, D102, I8, I36, I6, AD-5]

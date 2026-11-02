@@ -12,7 +12,8 @@
 //! - **Key wrapping**: AES-256-GCM from aws-lc-rs, with a 96-bit nonce drawn from the CSPRNG of
 //!   aws-lc-rs for each wrap ([`Wrapper::wrap_key`]).
 //! - **Key derivation**: HKDF-SHA-256 from aws-lc-rs, with no salt, a 32-byte output and an
-//!   `info` that starts with a versioned [`Label`] ([`derive_key`]).
+//!   `info` made of a versioned [`Label`] and its end byte, then each context part preceded by
+//!   its length ([`derive_key`]), so that no two derivations share an `info`.
 //! - **Hashing**: SHA-256 from aws-lc-rs ([`sha256`]).
 //!
 //! The rest of the suite is not in this crate yet. Argon2id, for the passphrase and backup
@@ -99,7 +100,7 @@ mod wrapper;
 
 use vilicus_types::SHA256_LEN;
 
-pub use derive::{Label, derive_key};
+pub use derive::{Label, LabelError, derive_key};
 pub use error::{CryptoError, WrapperError};
 pub use key::{KEY_LEN, SymmetricKey};
 pub use wrapper::{
@@ -120,6 +121,9 @@ pub use wrapper::{
 pub fn sha256(data: &[u8]) -> [u8; SHA256_LEN] {
     aws_lc::sha256(data)
 }
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod tests {

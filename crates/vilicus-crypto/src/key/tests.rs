@@ -6,7 +6,7 @@ use vilicus_types::{Id, UtcMillis};
 use super::*;
 use crate::{Kdf, KekDerivation, Label, WrapParams, Wrapper, derive_key};
 
-const LABEL: Label = Label::new("vilicus/v1/test/");
+const LABEL: Label = crate::label!("vilicus/v1/test/");
 
 fn params() -> WrapParams {
     WrapParams {

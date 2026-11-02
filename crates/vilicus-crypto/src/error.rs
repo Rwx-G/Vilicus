@@ -15,6 +15,12 @@ pub enum CryptoError {
     Open,
     /// HKDF-SHA-256 refused to derive.
     Derive,
+    /// A part of a derivation's context is longer than `u16::MAX` bytes, the most its length
+    /// prefix holds.
+    ContextPartTooLong {
+        /// Its length in bytes.
+        len: usize,
+    },
     /// The salt or credential reference given to a new wrapper is longer than
     /// [`MAX_KEK_REFERENCE_LEN`](crate::MAX_KEK_REFERENCE_LEN).
     KekReferenceTooLong {
@@ -30,6 +36,12 @@ impl fmt::Display for CryptoError {
             Self::Seal => formatter.write_str("the wrap could not be sealed"),
             Self::Open => formatter.write_str("the wrapper did not open"),
             Self::Derive => formatter.write_str("the key could not be derived"),
+            Self::ContextPartTooLong { len } => {
+                write!(
+                    formatter,
+                    "derivation context part of {len} bytes is too long"
+                )
+            }
             Self::KekReferenceTooLong { len } => {
                 write!(
                     formatter,

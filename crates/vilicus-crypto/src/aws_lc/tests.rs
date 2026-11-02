@@ -8,13 +8,7 @@ use aws_lc_rs::aead::AES_256_GCM;
 use aws_lc_rs::hkdf::{HKDF_SHA256, KeyType};
 
 use super::*;
-
-pub(crate) fn hex(text: &str) -> Vec<u8> {
-    (0..text.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).expect("hexadecimal"))
-        .collect()
-}
+use crate::test_support::hex;
 
 fn sequence<const N: usize>(start: u8) -> [u8; N] {
     core::array::from_fn(|index| start + u8::try_from(index).expect("short sequence"))

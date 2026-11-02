@@ -1155,50 +1155,69 @@ def spine_flowchart() -> tuple[dict[str, str], set[tuple[str, str, bool]]]:
     return labels, edges
 
 
-class KeyMaterialTest(WorkspaceTestCase):
-    """Story 4.1, AC3: key types are defined in vilicus-crypto, so only the crates of
-    [key_material] depend on the package that wipes them."""
+class RestrictedDependencyTest(WorkspaceTestCase):
+    """Story 4.1, AC3 and its review (finding 5): key types are defined in vilicus-crypto and key
+    operations run there, so only the crates [restricted.*] names declare `zeroize` or a primitive
+    source, by the kind of dependency it allows them."""
 
     REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
-    PACKAGE = CONFIG["key_material"]["package"]
-    ALLOWED = CONFIG["key_material"]["crates"]
+    RESTRICTED = CONFIG["restricted"]
 
-    def depend_on_package(self, source: str, kind: str) -> None:
+    def depend_on_package(self, source: str, package: str, kind: str) -> None:
         self.workspace.declare(
-            source, {"name": self.PACKAGE, "kind": None if kind == "normal" else kind, "source": self.REGISTRY}
+            source, {"name": package, "kind": None if kind == "normal" else kind, "source": self.REGISTRY}
         )
-        self.workspace.resolve_outside(source, self.PACKAGE, f"{self.REGISTRY}#{self.PACKAGE}@1.0.0")
+        self.workspace.resolve_outside(source, package, f"{self.REGISTRY}#{package}@1.0.0")
 
-    def test_the_named_crates_may_depend_on_it(self) -> None:
+    def test_the_named_crates_may_depend_on_each_package_by_the_kind_they_are_named_for(self) -> None:
         self.full_graph()
-        for name in self.ALLOWED:
-            self.depend_on_package(name, "normal")
+        for package, tables in self.RESTRICTED.items():
+            for table, crates in tables.items():
+                for name in crates:
+                    self.depend_on_package(name, package, "normal" if table == "linked" else "dev")
         self.assertEqual(self.workspace.check(), [])
 
-    def test_any_other_crate_depending_on_it_fails_for_every_kind(self) -> None:
-        for node in GRAPH.nodes.values():
-            for kind in ("normal", "build", "dev"):
-                with self.subTest(node=node.id, kind=kind):
-                    self.setUp()
-                    names = self.full_graph()
-                    if names[node.id] in self.ALLOWED:
-                        continue
-                    self.depend_on_package(names[node.id], kind)
-                    self.assert_single(
-                        self.beside_the_reference_rule(self.workspace.check()),
-                        f"key material: {names[node.id]} -> {self.PACKAGE} ({kind} dependency)",
-                    )
+    def test_any_other_crate_or_kind_fails(self) -> None:
+        for package, tables in self.RESTRICTED.items():
+            for node in GRAPH.nodes.values():
+                for kind in ("normal", "build", "dev"):
+                    table = "dev" if kind == "dev" else "linked"
+                    with self.subTest(package=package, node=node.id, kind=kind):
+                        self.setUp()
+                        names = self.full_graph()
+                        if names[node.id] in tables.get(table, {}):
+                            continue
+                        self.depend_on_package(names[node.id], package, kind)
+                        self.assert_single(
+                            self.beside_the_reference_rule(self.workspace.check()),
+                            f"restricted: {names[node.id]} -> {package} ({kind} dependency)",
+                        )
+
+    def test_a_dev_user_may_not_link_it(self) -> None:
+        dev_users = [(package, name) for package, tables in self.RESTRICTED.items() for name in tables.get("dev", {})]
+        self.assertTrue(dev_users)
+        for package, name in dev_users:
+            if name in self.RESTRICTED[package].get("linked", {}):
+                continue
+            with self.subTest(package=package, crate=name):
+                self.setUp()
+                self.full_graph()
+                self.depend_on_package(name, package, "normal")
+                self.assert_single(self.workspace.check(), f"restricted: {name} -> {package} (normal dependency)")
 
     def test_a_named_crate_without_a_reason_fails(self) -> None:
         config = copy.deepcopy(CONFIG)
-        config["key_material"]["crates"]["vilicus-crypto"] = " "
+        config["restricted"]["zeroize"]["linked"]["vilicus-crypto"] = " "
         self.full_graph()
-        self.assert_single(self.workspace.check(config), "entry vilicus-crypto gives no reason")
+        self.assert_single(self.workspace.check(config), "[restricted.zeroize.linked] entry vilicus-crypto gives no reason")
 
-    def test_the_repository_keeps_the_wiping_crate_to_the_key_crate_and_storage(self) -> None:
-        # Written out on purpose: the crates Story 4.1 lets hold zeroized key material.
-        self.assertEqual(self.PACKAGE, "zeroize")
-        self.assertEqual(set(self.ALLOWED), {"vilicus-crypto", "vilicus-storage"})
+    def test_the_repository_restricts_zeroize_and_the_primitive_sources(self) -> None:
+        # Written out on purpose: the rules of Story 4.1 and of finding 5 of its review.
+        linked = {package: set(tables.get("linked", {})) for package, tables in self.RESTRICTED.items()}
+        self.assertEqual(linked["zeroize"], {"vilicus-crypto", "vilicus-storage"})
+        for package in ("aws-lc-rs", "hpke", "argon2", "opaque-ke", "zxcvbn"):
+            self.assertEqual(linked[package], {"vilicus-crypto"}, package)
+        self.assertEqual(set(self.RESTRICTED["aws-lc-rs"]["dev"]), {"vilicus-proto", "vilicus-core"})
 
 
 class DecisionAgreementTest(unittest.TestCase):

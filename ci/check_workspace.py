@@ -12,9 +12,11 @@
   its table's nodes reach. The table's `exclusive_dependencies` (the fuzzing crates) are reached
   by its crates alone: any other workspace crate that depends on one, directly by any kind of
   dependency or through registry crates, fails.
-- Key material (AD-4, FR-13, Story 4.1): only the workspace crates `[key_material]` of
-  ci/crate_graph.toml names, each with a reason, declare a dependency of any kind on its package
-  (`zeroize`), so no crate but vilicus-crypto can define a key type wiped on drop.
+- Restricted dependencies (AD-4, AD-18, FR-13, Story 4.1): a package of `[restricted.*]` in
+  ci/crate_graph.toml is declared as a normal or build dependency only by the workspace crates
+  its `linked` table names, and as a dev-dependency only by those its `dev` table names, each
+  with a reason: `zeroize`, so no crate but vilicus-crypto defines a key type wiped on drop, and
+  the primitive sources, so no crate but vilicus-crypto runs a key operation.
 - Shipped sources (FR-109, D102): no crate in the normal or build closure of a shipped crate
   compiles a file outside its package directory, through a target's source path, a `#[path]`
   module, an `include!`, `include_str!` or `include_bytes!` (a computed path fails too) or a
@@ -705,27 +707,29 @@ def check_exclusive_dependencies(graph: Graph, metadata: dict) -> list[str]:
     return violations
 
 
-def check_key_material(config: dict, metadata: dict) -> list[str]:
-    """A workspace crate that `[key_material]` does not name declares no dependency on its
-    package, of any kind; each crate it names gives a reason."""
-    table = config.get("key_material")
-    if table is None:
-        return []
-    package_name, allowed = table["package"], table["crates"]
+def check_restricted_dependencies(config: dict, metadata: dict) -> list[str]:
+    """Each package of `[restricted.*]` is declared only by the crates its `linked` table (normal
+    and build dependencies) or `dev` table (dev-dependencies) names, each with a reason."""
+    restricted = config.get("restricted", {})
     violations = [
-        f"key material: [key_material.crates] entry {name} gives no reason"
-        for name, reason in sorted(allowed.items())
+        f"restricted: [restricted.{package}.{table}] entry {name} gives no reason"
+        for package, tables in sorted(restricted.items())
+        for table, crates in sorted(tables.items())
+        for name, reason in sorted(crates.items())
         if not isinstance(reason, str) or not reason.strip()
     ]
     for package in _members(metadata):
-        if package["name"] in allowed:
-            continue
         for dep in package["dependencies"]:
-            if dep["name"] == package_name:
+            if dep["name"] not in restricted:
+                continue
+            kind = dep["kind"] or "normal"
+            table = "linked" if kind in LINKED_KINDS else "dev"
+            allowed = restricted[dep["name"]].get(table, {})
+            if package["name"] not in allowed:
                 violations.append(
-                    f"key material: {package['name']} -> {package_name} ({dep['kind'] or 'normal'} dependency); "
-                    f"key types are defined in vilicus-crypto (AD-4), and only {', '.join(sorted(allowed))} "
-                    "depend on it"
+                    f"restricted: {package['name']} -> {dep['name']} ({kind} dependency); only "
+                    f"{', '.join(sorted(allowed)) or 'no crate'} may take it as a {table} dependency "
+                    f"([restricted.{dep['name']}] of ci/crate_graph.toml)"
                 )
     return violations
 
@@ -746,7 +750,7 @@ def run_checks(
         *check_reference_module(metadata),
         *check_shipped_sources(Graph.from_config(config), crates),
         *check_exclusive_dependencies(Graph.from_config(config), metadata),
-        *check_key_material(config, metadata),
+        *check_restricted_dependencies(config, metadata),
         *check_manifests(crates, workspace_root, toolchain_channel, files),
         *check_unsafe(config, root_manifest, crates),
         *check_cargo_config(workspace_root),

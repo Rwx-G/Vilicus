@@ -171,6 +171,133 @@ class DuplicateExceptionTest(unittest.TestCase):
         self.assertIn("skip-tree", violations[0])
 
 
+class PrimitiveSourceTest(unittest.TestCase):
+    """Story 4.1, AC1 and AC6: the primitive sources of D28 and their recorded exceptions."""
+
+    EXCEPTIONS = {"D61", "D123"}
+
+    def setUp(self) -> None:
+        self.tree = Tree()
+        self.member = self.tree.add("member", "0.0.0")
+        self.features: dict[str, list[str]] = {}
+        self.config = {
+            "source": {
+                "audited": {"record": "an audited library"},
+                "kem": {"version": "1.0.0", "exception": ["D61", "D99"], "brings_primitives": True, "record": "x"},
+                "stretch": {"version": "2.0.0", "exception": ["D123"], "forbidden_features": ["parallel"], "record": "y"},
+            },
+            "not_primitive": {"wiper": {"reason": "wipes memory"}},
+        }
+        self.wiper = self.cryptographic("wiper", "1.0.0")
+        self.tree.depend(self.member, self.wiper)
+
+    def cryptographic(self, name: str, version: str, *, keyword: bool = False) -> str:
+        package_id = self.tree.add(name, version)
+        if keyword:
+            self.tree.packages[package_id]["keywords"] = ["Crypto"]
+        else:
+            self.tree.packages[package_id]["categories"] = ["cryptography::cryptocurrencies"]
+        return package_id
+
+    def check(self) -> tuple[list[str], list[str]]:
+        metadata = self.tree.metadata()
+        for node in metadata["resolve"]["nodes"]:
+            node["features"] = self.features.get(node["id"], [])
+        return sc.check_primitive_sources(metadata, self.config, self.EXCEPTIONS)
+
+    def assert_single(self, *fragments: str) -> None:
+        violations, _ = self.check()
+        self.assertEqual(len(violations), 1, violations)
+        for fragment in fragments:
+            self.assertIn(fragment, violations[0])
+
+    def test_listed_sources_and_a_classified_package_reached_through_one_that_brings_its_own_pass(self) -> None:
+        for name, version in (("audited", "3.1.0"), ("stretch", "2.0.0")):
+            self.tree.depend(self.member, self.cryptographic(name, version))
+        kem = self.cryptographic("kem", "1.0.0")
+        inner = self.cryptographic("curve", "4.0.0", keyword=True)
+        self.tree.depend(self.member, kem)
+        self.tree.depend(kem, inner)
+        violations, listing = self.check()
+        self.assertEqual(violations, [])
+        self.assertIn(
+            "primitive source: kem 1.0.0 (exception to D28: D61, D99; in the tree at 1.0.0; "
+            "with the primitive crates it depends on: curve): x",
+            listing,
+        )
+
+    def test_a_classified_package_off_the_list_fails_by_category_or_keyword(self) -> None:
+        for keyword in (False, True):
+            with self.subTest(keyword=keyword):
+                self.setUp()
+                self.tree.depend(self.member, self.cryptographic("homemade", "0.1.0", keyword=keyword))
+                self.assert_single("homemade 0.1.0 is classified as cryptographic and is not a primitive source")
+
+    def test_a_classified_package_beside_a_source_that_brings_its_own_is_not_covered_by_it(self) -> None:
+        kem = self.cryptographic("kem", "1.0.0")
+        self.tree.depend(self.member, kem)
+        self.tree.depend(self.member, self.cryptographic("curve", "4.0.0"))
+        self.assert_single("curve 4.0.0 is classified as cryptographic")
+
+    def test_a_source_at_another_version_than_its_record_fails(self) -> None:
+        self.tree.depend(self.member, self.cryptographic("kem", "1.0.1"))
+        self.assert_single("kem 1.0.1 is in the tree, and its record is for 1.0.0")
+
+    def test_a_forbidden_feature_fails(self) -> None:
+        stretch = self.cryptographic("stretch", "2.0.0")
+        self.tree.depend(self.member, stretch)
+        self.features[stretch] = ["alloc", "parallel"]
+        self.assert_single("stretch 2.0.0 has the feature `parallel`, which its record forbids")
+
+    def test_exceptions_must_agree_with_d28(self) -> None:
+        self.config["source"]["kem"]["exception"] = ["D99"]
+        violations, _ = self.check()
+        self.assertEqual(len(violations), 2, violations)
+        self.assertIn("kem names exception D99, which D28's row of doc/decisions.md does not list", violations[0])
+        self.assertIn("D28's exception D61 has no source", violations[1])
+
+    def test_entries_without_a_record_or_a_reason_and_stale_entries_fail(self) -> None:
+        self.config["source"]["audited"]["record"] = " "
+        self.assert_single("audited gives no record")
+        self.setUp()
+        self.config["not_primitive"]["wiper"] = {"reason": ""}
+        self.assert_single("not_primitive entry wiper gives no reason")
+        self.setUp()
+        self.config["not_primitive"]["gone"] = {"reason": "was here"}
+        self.assert_single("not_primitive entry gone matches no package classified as cryptographic")
+
+    def test_d28_exceptions_are_read_from_its_status(self) -> None:
+        text = "| D27 | Transport | Accepted |\n| D28 | Supply chain | Accepted, exceptions in D61, D123 and D129 |\n"
+        self.assertEqual(sc.d28_exceptions(text), {"D61", "D123", "D129"})
+
+    def test_the_repository_list_agrees_with_d28_and_names_the_sources_of_its_records(self) -> None:
+        config = tomllib.loads(sc.PRIMITIVE_SOURCES_FILE.read_text(encoding="utf-8"))
+        exceptions = sc.d28_exceptions(sc.DECISIONS_FILE.read_text(encoding="utf-8"))
+        violations, listing = sc.check_primitive_sources(Tree().metadata(), config, exceptions)
+        # The not_primitive entries are stale on an empty tree; nothing else may fail.
+        self.assertEqual(
+            [violation for violation in violations if "not_primitive entry" not in violation], []
+        )
+        self.assertEqual(len(listing), len(config["source"]))
+        # Written out on purpose: the sources and pins of AC6 of Story 4.1 (D28, D120, D123, D129).
+        for name, pin, exception in (
+            ("aws-lc-rs", "", "no exception"),
+            ("hpke", " 0.13.0", "exception to D28: D61, D120"),
+            ("argon2", " 0.6.0", "exception to D28: D129"),
+            ("blake2", "", "exception to D28: D129"),
+            ("opaque-ke", " 4.0.1", "exception to D28: D123"),
+        ):
+            with self.subTest(source=name):
+                self.assertTrue(
+                    any(line.startswith(f"primitive source: {name}{pin} ({exception};") for line in listing),
+                    listing,
+                )
+        hpke = next(line for line in listing if line.startswith("primitive source: hpke "))
+        self.assertIn("with the primitive crates it depends on", hpke)
+        argon2 = next(line for line in listing if line.startswith("primitive source: argon2 "))
+        self.assertIn("without `parallel`", argon2)
+
+
 class VendorTest(unittest.TestCase):
     def setUp(self) -> None:
         temp = tempfile.TemporaryDirectory()

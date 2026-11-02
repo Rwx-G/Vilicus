@@ -9,6 +9,12 @@
   as its reason, `forced by <name>@<version>: <why>`, where that package is in the tree and
   depends on the skipped version, which has another version beside it; `skip-tree` stays empty,
   since it would hide a whole subtree.
+- Primitive sources (D28, spine AD-18): the run prints the sources of cryptographic primitives
+  of ci/primitive_sources.toml, each with its record and whether the tree holds it, and fails on
+  a package its publisher classifies as cryptographic that is not one of them nor reached
+  through one that brings its own primitive crates, on a source at another version than it pins
+  or with a feature it forbids, and on exceptions that disagree with those D28's row of
+  doc/decisions.md lists.
 - Vendored sources (`--vendor`): vendor/ holds exactly what `cargo vendor --locked
   --versioned-dirs` writes from Cargo.lock, byte for byte.
 
@@ -28,12 +34,19 @@ import re
 import subprocess
 import tempfile
 import tomllib
+from collections import deque
 from pathlib import Path
 
 CI_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CI_DIR.parent
 ALLOWLIST_FILE = CI_DIR / "build_time_code.toml"
 DENY_FILE = REPO_ROOT / "deny.toml"
+PRIMITIVE_SOURCES_FILE = CI_DIR / "primitive_sources.toml"
+DECISIONS_FILE = REPO_ROOT / "doc" / "decisions.md"
+# How a publisher marks a package as cryptographic on crates.io: a category, or a keyword.
+CRYPTOGRAPHY_CATEGORY = "cryptography"
+CRYPTOGRAPHY_KEYWORDS = frozenset({"crypto", "cryptography"})
+DECISION_ID = re.compile(r"\bD\d+\b")
 VENDOR_DIRECTORY = "vendor"
 # The `--config` file that makes cargo read vendor/ (see ci/check_workspace.py).
 VENDORED_CONFIG_FILE = "ci/cargo-vendored.toml"
@@ -117,6 +130,110 @@ def check_duplicate_exceptions(metadata: dict, deny_config: dict) -> list[str]:
     return violations
 
 
+def d28_exceptions(decisions_text: str) -> set[str]:
+    """The decisions D28's row of the decision table names in its status: its exceptions."""
+    row = re.search(r"^\| D28 \|[^|\n]*\|([^|\n]*)\|", decisions_text, re.MULTILINE)
+    if row is None:
+        raise ValueError("doc/decisions.md has no table row for D28")
+    return set(DECISION_ID.findall(row.group(1)))
+
+
+def is_cryptographic(package: dict) -> bool:
+    """Whether the package's publisher classifies it as cryptographic on crates.io."""
+    categories = package.get("categories") or []
+    keywords = package.get("keywords") or []
+    return any(
+        category == CRYPTOGRAPHY_CATEGORY or category.startswith(f"{CRYPTOGRAPHY_CATEGORY}::")
+        for category in categories
+    ) or any(keyword.lower() in CRYPTOGRAPHY_KEYWORDS for keyword in keywords)
+
+
+def _brought_by(package_ids: list[str], resolved: dict[str, list[str]]) -> set[str]:
+    """Every package the packages `package_ids` depend on, transitively, themselves excluded."""
+    seen: set[str] = set()
+    queue = deque(dep for package_id in package_ids for dep in resolved.get(package_id, []))
+    while queue:
+        current = queue.popleft()
+        if current not in seen:
+            seen.add(current)
+            queue.extend(resolved.get(current, []))
+    return seen - set(package_ids)
+
+
+def check_primitive_sources(metadata: dict, config: dict, exceptions_of_d28: set[str]) -> tuple[list[str], list[str]]:
+    """Checks the tree against the primitive sources of `config` and returns the violations and
+    the listing the run prints, one line per source."""
+    violations: list[str] = []
+    sources: dict = config.get("source", {})
+    not_primitive: dict = config.get("not_primitive", {})
+    packages = _packages(metadata)
+    nodes = {node["id"]: node for node in (metadata.get("resolve") or {}).get("nodes", [])}
+    resolved = {package_id: [dep["pkg"] for dep in node["deps"]] for package_id, node in nodes.items()}
+    in_tree: dict[str, list[str]] = {}
+    for package_id, package in packages.items():
+        in_tree.setdefault(package["name"], []).append(package_id)
+
+    named: set[str] = set()
+    for name, source in sorted(sources.items()):
+        if not isinstance(source.get("record"), str) or not source["record"].strip():
+            violations.append(f"primitive sources: {name} gives no record")
+        exception = source.get("exception", [])
+        named.update(exception)
+        if exception and not set(exception) & exceptions_of_d28:
+            violations.append(
+                f"primitive sources: {name} names exception {', '.join(exception)}, which D28's row of "
+                f"doc/decisions.md does not list ({', '.join(sorted(exceptions_of_d28))})"
+            )
+        for package_id in in_tree.get(name, []):
+            version = packages[package_id]["version"]
+            if "version" in source and version != source["version"]:
+                violations.append(
+                    f"primitive sources: {name} {version} is in the tree, and its record is for {source['version']}"
+                )
+            enabled = set(nodes.get(package_id, {}).get("features", []))
+            for feature in sorted(enabled & set(source.get("forbidden_features", []))):
+                violations.append(f"primitive sources: {name} {version} has the feature `{feature}`, which its record forbids")
+    for decision in sorted(exceptions_of_d28 - named):
+        violations.append(f"primitive sources: D28's exception {decision} has no source in ci/{PRIMITIVE_SOURCES_FILE.name}")
+
+    covered: dict[str, str] = {}
+    for name, source in sources.items():
+        if source.get("brings_primitives") and name in in_tree:
+            for package_id in _brought_by(in_tree[name], resolved):
+                if is_cryptographic(packages[package_id]):
+                    covered.setdefault(packages[package_id]["name"], name)
+    for name, reason in sorted(not_primitive.items()):
+        if not isinstance(reason, dict) or not str(reason.get("reason", "")).strip():
+            violations.append(f"primitive sources: not_primitive entry {name} gives no reason")
+        if not any(is_cryptographic(packages[package_id]) for package_id in in_tree.get(name, [])):
+            violations.append(
+                f"primitive sources: not_primitive entry {name} matches no package classified as "
+                "cryptographic in the tree; remove it"
+            )
+    for package in sorted(packages.values(), key=lambda p: (p["name"], p["version"])):
+        name = package["name"]
+        if is_cryptographic(package) and name not in sources and name not in covered and name not in not_primitive:
+            violations.append(
+                f"primitive sources: {name} {package['version']} is classified as cryptographic and is not a "
+                f"primitive source of ci/{PRIMITIVE_SOURCES_FILE.name}"
+            )
+
+    listing = []
+    for name, source in sorted(sources.items()):
+        pinned = f" {source['version']}" if "version" in source else ""
+        versions = sorted({packages[package_id]["version"] for package_id in in_tree.get(name, [])})
+        presence = f"in the tree at {', '.join(versions)}" if versions else "not in the tree"
+        basis = f"exception to D28: {', '.join(source['exception'])}" if source.get("exception") else "no exception"
+        brought = sorted(dep for dep, owner in covered.items() if owner == name)
+        details = [basis, presence]
+        if source.get("brings_primitives"):
+            details.append(f"with the primitive crates it depends on: {', '.join(brought) if brought else 'none in the tree'}")
+        if source.get("forbidden_features"):
+            details.append(f"without {', '.join(f'`{feature}`' for feature in source['forbidden_features'])}")
+        listing.append(f"primitive source: {name}{pinned} ({'; '.join(details)}): {source.get('record', '')}")
+    return violations, listing
+
+
 def run_checks(metadata: dict, allowlist: dict[str, str], deny_config: dict) -> list[str]:
     return [*check_build_time_code(metadata, allowlist), *check_duplicate_exceptions(metadata, deny_config)]
 
@@ -179,7 +296,14 @@ def main(argv: list[str] | None = None) -> int:
         metadata = json.loads(args.metadata.read_text(encoding="utf-8")) if args.metadata else cargo_metadata(REPO_ROOT)
         allowlist = tomllib.loads(ALLOWLIST_FILE.read_text(encoding="utf-8"))["allowed"]
         deny_config = tomllib.loads(DENY_FILE.read_text(encoding="utf-8"))
-        violations = run_checks(metadata, allowlist, deny_config)
+        primitive_violations, listing = check_primitive_sources(
+            metadata,
+            tomllib.loads(PRIMITIVE_SOURCES_FILE.read_text(encoding="utf-8")),
+            d28_exceptions(DECISIONS_FILE.read_text(encoding="utf-8")),
+        )
+        for line in listing:
+            print(line)
+        violations = [*run_checks(metadata, allowlist, deny_config), *primitive_violations]
         passed = f"supply-chain checks passed: {len(metadata['packages'])} packages"
     for violation in violations:
         print(violation)

@@ -1,0 +1,46 @@
+# The sources of cryptographic primitives the Vilicus dependency tree may hold (D28: no
+# home-made cryptography; audited libraries, or a recorded exception to D28). Read by
+# ci/check_supply_chain.py, which prints this list with each entry's record and fails when:
+# - a package of the tree that its publisher classifies as cryptographic (crates.io category
+#   `cryptography`, or keyword `crypto` or `cryptography`) is neither a source here, nor a
+#   dependency of a present source that brings its own primitive crates (`brings_primitives`),
+#   nor a `[not_primitive]` entry;
+# - a source is in the tree at another version than its `version`, or with a feature of its
+#   `forbidden_features`;
+# - an `exception` names no decision that D28's row of doc/decisions.md lists as one of its
+#   exceptions, or one of those exceptions has no source here.
+# A source may be absent from the tree: the list also records the sources approved for code to
+# come. The classification is the publishers'; a primitive crate that declares neither is caught
+# by review (the pull request checklist), not by this check.
+#
+# Every source has a `record`: what it is used for, and the decisions that allow it.
+
+[source.aws-lc-rs]
+record = "D28 and spine AD-18: AES-256-GCM, HKDF-SHA-256 and SHA-256 of vilicus-crypto"
+
+[source.aws-lc-sys]
+record = "D28 and spine AD-18: the AWS-LC library aws-lc-rs is built on, its only backend"
+
+[source.hpke]
+version = "0.13.0"
+exception = ["D61", "D120"]
+brings_primitives = true
+record = "HPKE of the household key wraps and sealed inbox rows, under the usage rules of spikes/hpke-review/REVIEW.md; inside HPKE, its own primitive crates"
+
+[source.argon2]
+version = "0.6.0"
+exception = ["D129"]
+forbidden_features = ["parallel"]
+record = "Argon2id of the passphrase, backup secret and admin recovery code KEKs, without its parallel feature"
+
+[source.blake2]
+exception = ["D129"]
+record = "BLAKE2b inside Argon2id, the dependency of argon2 that D129 covers"
+
+[source.opaque-ke]
+version = "4.0.1"
+exception = ["D123"]
+record = "OPAQUE of pairing codes on the Core's side"
+
+[not_primitive.zeroize]
+reason = "wipes memory with volatile writes (spine AD-4); implements no cryptographic primitive"

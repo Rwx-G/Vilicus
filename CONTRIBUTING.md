@@ -61,6 +61,7 @@ They cover the crate graph and `unsafe` rules, the supply-chain and vendor check
 - New behaviour has tests, and a test must be able to fail: removing or inverting the guard it covers makes it fail, and reviews check this
 - Public items have doc comments (`///`)
 - No new dependency without prior agreement in an issue: every package added to `Cargo.lock` is vendored, vetted and audited
+- No cryptographic primitive is implemented in Vilicus code: every primitive comes from a source listed in `ci/primitive_sources.toml` with its record (D28), and reviews check this, since the supply-chain check sees only the crates their publishers classify as cryptographic
 
 ### Documentation
 

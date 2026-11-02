@@ -17,14 +17,21 @@ fn created_at() -> UtcMillis {
     UtcMillis::from_millis(1_793_577_600_123).expect("instant")
 }
 
+const PURPOSE: Label = crate::label!("vilicus/v1/wrap/test");
+
+fn id() -> Id {
+    Id::new_v7(created_at(), [0x3c; 10]).expect("id")
+}
+
 fn params(kdf: Kdf, kek_reference: &[u8]) -> WrapParams {
-    WrapParams {
+    WrapParams::new(
         kdf,
-        kek_derivation: KekDerivation::HkdfSha256,
-        kek_reference: kek_reference.to_vec(),
-        created_at: created_at(),
-        id: Id::new_v7(created_at(), [0x3c; 10]).expect("id"),
-    }
+        KekDerivation::HkdfSha256,
+        kek_reference.to_vec(),
+        created_at(),
+        id(),
+    )
+    .expect("params")
 }
 
 fn passphrase_params() -> WrapParams {
@@ -70,11 +77,12 @@ fn documented_layout() -> Vec<(String, Option<usize>)> {
 fn the_encoding_is_the_documented_layout() {
     let (kek, key) = keys();
     let nonce = [0xa5; NONCE_LEN];
-    let wrapper = Wrapper::wrap_key_with_nonce(&kek, &key, passphrase_params(), nonce, b"context")
-        .expect("wrap");
+    let wrapper =
+        Wrapper::wrap_key_with_nonce(&kek, &key, PURPOSE, passphrase_params(), nonce, b"context")
+            .expect("wrap");
     let encoded = wrapper.to_bytes();
 
-    let id = params(Kdf::None, &[]).id.to_bytes();
+    let id = id().to_bytes();
     let header: Vec<Vec<u8>> = vec![
         FORMAT_VERSION.to_be_bytes().to_vec(),
         KDF_ARGON2ID.to_be_bytes().to_vec(),
@@ -96,6 +104,8 @@ fn the_encoding_is_the_documented_layout() {
     // The ciphertext and tag the additional data of the documentation gives: the header, then
     // the context.
     let mut additional_data = header.concat();
+    additional_data.extend_from_slice(PURPOSE.as_str().as_bytes());
+    additional_data.push(0x00);
     additional_data.extend_from_slice(b"context");
     let mut ciphertext = [0; KEY_LEN];
     key.slot()
@@ -114,7 +124,8 @@ fn the_encoding_is_the_documented_layout() {
     assert_eq!(encoded, fields.concat());
 
     // Without Argon2id, its four rows are absent.
-    let plain = Wrapper::wrap_key(&kek, &key, params(Kdf::None, &[]), b"").expect("wrap");
+    let plain =
+        Wrapper::wrap_key(&kek, &key, PURPOSE, params(Kdf::None, &[]), b"member").expect("wrap");
     let argon2_rows = layout
         .iter()
         .filter(|(name, _)| name.starts_with("Argon2"))
@@ -131,21 +142,23 @@ fn the_encoding_is_the_documented_layout() {
 #[test]
 fn a_wrapper_carries_every_field_and_reads_back_as_written() {
     let (kek, key) = keys();
-    let wrapper = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"member").expect("wrap");
+    let wrapper =
+        Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member").expect("wrap");
     assert_eq!(wrapper.version(), FORMAT_VERSION);
     assert_eq!(wrapper.kdf(), Kdf::Argon2id(COSTS));
     assert_eq!(wrapper.kek_derivation(), KekDerivation::HkdfSha256);
     assert_eq!(wrapper.aead(), Aead::Aes256Gcm);
     assert_eq!(wrapper.kek_reference(), SALT);
     assert_eq!(wrapper.created_at(), created_at());
-    assert_eq!(wrapper.id(), passphrase_params().id);
+    assert_eq!(wrapper.id(), id());
 
     let read = Wrapper::from_bytes(&wrapper.to_bytes()).expect("read");
     assert_eq!(read, wrapper);
-    let opened = read.unwrap_key(&kek, b"member").expect("open");
+    let opened = read.unwrap_key(&kek, PURPOSE, b"member").expect("open");
     assert!(same_key(&opened, &key));
 
-    let plain = Wrapper::wrap_key(&kek, &key, params(Kdf::None, &[]), b"").expect("wrap");
+    let plain =
+        Wrapper::wrap_key(&kek, &key, PURPOSE, params(Kdf::None, &[]), b"member").expect("wrap");
     assert_eq!(Wrapper::from_bytes(&plain.to_bytes()).expect("read"), plain);
 }
 
@@ -154,35 +167,96 @@ fn a_wrapper_carries_every_field_and_reads_back_as_written() {
 #[test]
 fn each_wrap_draws_a_fresh_nonce() {
     let (kek, key) = keys();
-    let first = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"member").expect("wrap");
-    let second = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"member").expect("wrap");
+    let first =
+        Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member").expect("wrap");
+    let second =
+        Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member").expect("wrap");
     assert_ne!(first.nonce, second.nonce);
     assert_ne!(first.ciphertext, second.ciphertext);
     for wrapper in [first, second] {
         assert!(same_key(
-            &wrapper.unwrap_key(&kek, b"member").expect("open"),
+            &wrapper.unwrap_key(&kek, PURPOSE, b"member").expect("open"),
             &key
         ));
     }
 }
 
 #[test]
-fn a_wrapper_opens_only_with_its_kek_and_its_context() {
+fn a_wrapper_opens_only_with_its_kek_its_purpose_and_its_context() {
     let (kek, key) = keys();
-    let wrapper = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"member 1").expect("wrap");
+    let wrapper =
+        Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member 1").expect("wrap");
     assert!(matches!(
-        wrapper.unwrap_key(&key, b"member 1"),
+        wrapper.unwrap_key(&key, PURPOSE, b"member 1"),
         Err(CryptoError::Open)
     ));
     assert!(matches!(
-        wrapper.unwrap_key(&kek, b"member 2"),
+        wrapper.unwrap_key(&kek, PURPOSE, b"member 2"),
         Err(CryptoError::Open)
     ));
     assert!(matches!(
-        wrapper.unwrap_key(&kek, b""),
+        wrapper.unwrap_key(&kek, crate::label!("vilicus/v1/wrap/test2"), b"member 1"),
         Err(CryptoError::Open)
     ));
-    assert!(wrapper.unwrap_key(&kek, b"member 1").is_ok());
+    assert!(wrapper.unwrap_key(&kek, PURPOSE, b"member 1").is_ok());
+}
+
+/// The review's probe: the member DEK wraps both the member private key and the personal inbox
+/// private key, for the same member. Stored in each other's place, neither opens for the other's
+/// purpose.
+#[test]
+fn two_keys_wrapped_for_one_record_do_not_open_in_each_others_place() {
+    const MEMBER_PRIVATE_KEY: Label = crate::label!("vilicus/v1/wrap/member-private-key");
+    const INBOX_PRIVATE_KEY: Label = crate::label!("vilicus/v1/wrap/inbox-private-key");
+    let (dek, member_private) = keys();
+    let inbox_private = SymmetricKey::generate().expect("generate");
+    let member_wrapper = Wrapper::wrap_key(
+        &dek,
+        &member_private,
+        MEMBER_PRIVATE_KEY,
+        params(Kdf::None, &[]),
+        b"member 1",
+    )
+    .expect("wrap");
+    let inbox_wrapper = Wrapper::wrap_key(
+        &dek,
+        &inbox_private,
+        INBOX_PRIVATE_KEY,
+        params(Kdf::None, &[]),
+        b"member 1",
+    )
+    .expect("wrap");
+    for (stored, purpose) in [
+        (&inbox_wrapper, MEMBER_PRIVATE_KEY),
+        (&member_wrapper, INBOX_PRIVATE_KEY),
+    ] {
+        let swapped = Wrapper::from_bytes(&stored.to_bytes()).expect("read");
+        assert!(matches!(
+            swapped.unwrap_key(&dek, purpose, b"member 1"),
+            Err(CryptoError::Open)
+        ));
+    }
+    let opened = member_wrapper
+        .unwrap_key(&dek, MEMBER_PRIVATE_KEY, b"member 1")
+        .expect("open");
+    assert!(same_key(&opened, &member_private));
+}
+
+/// An empty context would let two wrappers of one purpose under one KEK open in each other's
+/// place, so it is refused on both sides.
+#[test]
+fn an_empty_context_is_refused() {
+    let (kek, key) = keys();
+    assert!(matches!(
+        Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b""),
+        Err(CryptoError::EmptyContext)
+    ));
+    let wrapper =
+        Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member").expect("wrap");
+    assert!(matches!(
+        wrapper.unwrap_key(&kek, PURPOSE, b""),
+        Err(CryptoError::EmptyContext)
+    ));
 }
 
 /// Every field is authenticated: an edit of any byte that still reads as a valid wrapper does
@@ -190,7 +264,7 @@ fn a_wrapper_opens_only_with_its_kek_and_its_context() {
 #[test]
 fn an_edited_wrapper_does_not_open() {
     let (kek, key) = keys();
-    let encoded = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"member")
+    let encoded = Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member")
         .expect("wrap")
         .to_bytes();
     let mut read_back = Vec::new();
@@ -201,7 +275,10 @@ fn an_edited_wrapper_does_not_open() {
         if let Ok(wrapper) = Wrapper::from_bytes(&edited) {
             read_back.push(index);
             assert!(
-                matches!(wrapper.unwrap_key(&kek, b"member"), Err(CryptoError::Open)),
+                matches!(
+                    wrapper.unwrap_key(&kek, PURPOSE, b"member"),
+                    Err(CryptoError::Open)
+                ),
                 "byte {index} edited and still opened"
             );
         }
@@ -222,7 +299,7 @@ fn an_edited_wrapper_does_not_open() {
 #[test]
 fn an_unknown_version_or_identifier_is_refused() {
     let (kek, key) = keys();
-    let encoded = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"")
+    let encoded = Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member")
         .expect("wrap")
         .to_bytes();
     let with = |offset: usize, value: &[u8]| {
@@ -270,7 +347,7 @@ fn an_unknown_version_or_identifier_is_refused() {
 #[test]
 fn a_version_older_than_accepted_is_refused_not_downgraded() {
     let (kek, key) = keys();
-    let mut encoded = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"")
+    let mut encoded = Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member")
         .expect("wrap")
         .to_bytes();
     for version in 0..OLDEST_ACCEPTED_FORMAT_VERSION {
@@ -285,7 +362,7 @@ fn a_version_older_than_accepted_is_refused_not_downgraded() {
 #[test]
 fn a_malformed_encoding_is_refused() {
     let (kek, key) = keys();
-    let encoded = Wrapper::wrap_key(&kek, &key, passphrase_params(), b"")
+    let encoded = Wrapper::wrap_key(&kek, &key, PURPOSE, passphrase_params(), b"member")
         .expect("wrap")
         .to_bytes();
     for len in 0..encoded.len() {
@@ -328,10 +405,11 @@ fn a_malformed_encoding_is_refused() {
 }
 
 #[test]
-fn a_kek_reference_over_the_maximum_is_refused_when_wrapping() {
+fn a_kek_reference_over_the_maximum_is_refused_in_the_parameters() {
     let (kek, key) = keys();
     let longest = vec![7; MAX_KEK_REFERENCE_LEN];
-    let wrapper = Wrapper::wrap_key(&kek, &key, params(Kdf::None, &longest), b"").expect("wrap");
+    let wrapper = Wrapper::wrap_key(&kek, &key, PURPOSE, params(Kdf::None, &longest), b"member")
+        .expect("wrap");
     assert_eq!(
         Wrapper::from_bytes(&wrapper.to_bytes())
             .expect("read")
@@ -340,7 +418,7 @@ fn a_kek_reference_over_the_maximum_is_refused_when_wrapping() {
     );
     let longer = vec![7; MAX_KEK_REFERENCE_LEN + 1];
     assert!(matches!(
-        Wrapper::wrap_key(&kek, &key, params(Kdf::None, &longer), b""),
+        WrapParams::new(Kdf::None, KekDerivation::Direct, longer, created_at(), id()),
         Err(CryptoError::KekReferenceTooLong { len }) if len == MAX_KEK_REFERENCE_LEN + 1
     ));
 }

@@ -77,9 +77,10 @@
 //! | ciphertext of the key | 32 |
 //! | tag | 16 |
 //!
-//! The additional data of the seal is every field before the ciphertext, followed by a context
-//! the caller gives, so a wrapper whose header is edited, or that is opened for another record
-//! than the one its context names, does not open.
+//! The additional data of the seal is every field before the ciphertext, then the purpose of the
+//! wrap, a [`Label`] followed by its end byte, then a context the caller gives, which may not be
+//! empty. A wrapper whose header is edited, or that is opened for another purpose or another
+//! record than the ones it was made for, does not open.
 //!
 //! # Key types
 //!

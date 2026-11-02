@@ -5,6 +5,7 @@ use core::fmt;
 /// A key operation that did not complete. No variant carries key material or says more than
 /// which step failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CryptoError {
     /// The CSPRNG of aws-lc-rs failed to fill a key or a nonce.
     Random,
@@ -21,6 +22,9 @@ pub enum CryptoError {
         /// Its length in bytes.
         len: usize,
     },
+    /// A wrapper was made or opened with an empty context, which would let two wrappers of one
+    /// purpose under one KEK open in each other's place.
+    EmptyContext,
     /// The salt or credential reference given to a new wrapper is longer than
     /// [`MAX_KEK_REFERENCE_LEN`](crate::MAX_KEK_REFERENCE_LEN).
     KekReferenceTooLong {
@@ -42,6 +46,7 @@ impl fmt::Display for CryptoError {
                     "derivation context part of {len} bytes is too long"
                 )
             }
+            Self::EmptyContext => formatter.write_str("a wrapper's context is empty"),
             Self::KekReferenceTooLong { len } => {
                 write!(
                     formatter,
@@ -57,6 +62,7 @@ impl std::error::Error for CryptoError {}
 /// A refused wrapper encoding. A refused wrapper is never repaired, read under another version or
 /// opened with other algorithms than it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WrapperError {
     /// The bytes end before the wrapper does.
     Truncated,

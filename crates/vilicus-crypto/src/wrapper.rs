@@ -8,6 +8,7 @@
 use vilicus_types::{Id, UtcMillis};
 
 use crate::aws_lc::{self, NONCE_LEN, TAG_LEN};
+use crate::derive::Label;
 use crate::error::{CryptoError, WrapperError};
 use crate::key::{KEY_LEN, Slot, SymmetricKey};
 
@@ -32,6 +33,7 @@ const AEAD_AES_256_GCM: u16 = 0x0001;
 
 /// How the secret behind the KEK was stretched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Kdf {
     /// No stretching: the KEK comes from a key, not from a secret a person types.
     None,
@@ -64,6 +66,7 @@ pub struct Argon2idParams {
 
 /// How the KEK was obtained from the KDF output, or from the key it derives from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KekDerivation {
     /// The KDF output, or the key, is the KEK.
     Direct,
@@ -84,6 +87,7 @@ impl KekDerivation {
 
 /// The AEAD that seals the key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Aead {
     /// AES-256-GCM with a random 96-bit nonce and a 128-bit tag.
     Aes256Gcm,
@@ -102,44 +106,65 @@ impl Aead {
 /// credential reference needed to obtain it again, its creation time and its id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WrapParams {
-    /// How the secret behind the KEK was stretched.
-    pub kdf: Kdf,
-    /// How the KEK was obtained from the KDF output or its parent key.
-    pub kek_derivation: KekDerivation,
-    /// The salt of the KDF, or the reference of the credential the KEK is recomputed from;
-    /// empty when there is neither. At most [`MAX_KEK_REFERENCE_LEN`] bytes.
-    pub kek_reference: Vec<u8>,
-    /// When the wrapper was made.
-    pub created_at: UtcMillis,
-    /// The wrapper's id.
-    pub id: Id,
+    kdf: Kdf,
+    kek_derivation: KekDerivation,
+    kek_reference: Vec<u8>,
+    created_at: UtcMillis,
+    id: Id,
+}
+
+impl WrapParams {
+    /// The parameters of a new wrapper: how the secret behind its KEK was stretched (`kdf`), how
+    /// the KEK was obtained from that output or its parent key (`kek_derivation`), the salt of
+    /// the KDF or the reference of the credential the KEK is recomputed from, empty when there is
+    /// neither (`kek_reference`, at most [`MAX_KEK_REFERENCE_LEN`] bytes), when the wrapper is
+    /// made and its id.
+    pub fn new(
+        kdf: Kdf,
+        kek_derivation: KekDerivation,
+        kek_reference: Vec<u8>,
+        created_at: UtcMillis,
+        id: Id,
+    ) -> Result<Self, CryptoError> {
+        let len = kek_reference.len();
+        if len > MAX_KEK_REFERENCE_LEN {
+            return Err(CryptoError::KekReferenceTooLong { len });
+        }
+        Ok(Self {
+            kdf,
+            kek_derivation,
+            kek_reference,
+            created_at,
+            id,
+        })
+    }
 }
 
 /// A key wrapped under a KEK, with its format version and algorithm identifiers.
 ///
 /// Made by [`wrap_key`](Self::wrap_key), read back by [`from_bytes`](Self::from_bytes), opened by
-/// [`unwrap_key`](Self::unwrap_key). The additional data binds the whole header and a context
-/// the caller chooses, such as the member and the purpose of the wrap:
+/// [`unwrap_key`](Self::unwrap_key). The additional data binds the whole header, the purpose of
+/// the wrap, a [`Label`], and a context the caller chooses, such as the member it belongs to: a
+/// wrapper opens only for the purpose and the record it was made for.
 ///
 /// ```
-/// use vilicus_crypto::{Kdf, KekDerivation, SymmetricKey, WrapParams, Wrapper};
+/// use vilicus_crypto::{Kdf, KekDerivation, Label, SymmetricKey, WrapParams, Wrapper, label};
 /// use vilicus_types::{Id, UtcMillis};
 ///
+/// const MEMBER_PRIVATE_KEY: Label = label!("vilicus/v1/wrap/member-private-key");
+/// const INBOX_PRIVATE_KEY: Label = label!("vilicus/v1/wrap/inbox-private-key");
 /// let kek = SymmetricKey::generate()?;
-/// let dek = SymmetricKey::generate()?;
+/// let private_key = SymmetricKey::generate()?;
 /// let created_at = UtcMillis::from_millis(1_793_577_600_000)?;
-/// let params = WrapParams {
-///     kdf: Kdf::None,
-///     kek_derivation: KekDerivation::Direct,
-///     kek_reference: Vec::new(),
-///     created_at,
-///     id: Id::new_v7(created_at, [7; 10])?,
-/// };
-/// let stored = Wrapper::wrap_key(&kek, &dek, params, b"member 1")?.to_bytes();
+/// let id = Id::new_v7(created_at, [7; 10])?;
+/// let params = WrapParams::new(Kdf::None, KekDerivation::Direct, Vec::new(), created_at, id)?;
+/// let stored =
+///     Wrapper::wrap_key(&kek, &private_key, MEMBER_PRIVATE_KEY, params, b"member 1")?.to_bytes();
 ///
 /// let wrapper = Wrapper::from_bytes(&stored)?;
-/// let opened = wrapper.unwrap_key(&kek, b"member 1")?;
-/// assert!(wrapper.unwrap_key(&kek, b"member 2").is_err());
+/// let opened = wrapper.unwrap_key(&kek, MEMBER_PRIVATE_KEY, b"member 1")?;
+/// assert!(wrapper.unwrap_key(&kek, MEMBER_PRIVATE_KEY, b"member 2").is_err());
+/// assert!(wrapper.unwrap_key(&kek, INBOX_PRIVATE_KEY, b"member 1").is_err());
 /// # drop(opened);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -159,31 +184,31 @@ pub struct Wrapper {
 
 impl Wrapper {
     /// Wraps `key` under `kek` with AES-256-GCM and a nonce drawn from the CSPRNG of aws-lc-rs,
-    /// in the current format version; `context` joins the additional data and must be given
-    /// again to open the wrapper.
+    /// in the current format version. `purpose` names what the key is for and `context` the
+    /// record it belongs to; both join the additional data and must be given again to open the
+    /// wrapper. An empty context is refused ([`CryptoError::EmptyContext`]): two wrappers of one
+    /// purpose under one KEK would otherwise open in each other's place.
     pub fn wrap_key(
         kek: &SymmetricKey,
         key: &SymmetricKey,
+        purpose: Label,
         params: WrapParams,
         context: &[u8],
     ) -> Result<Self, CryptoError> {
         let mut nonce = [0; NONCE_LEN];
         aws_lc::fill_random(&mut nonce).map_err(|_| CryptoError::Random)?;
-        Self::wrap_key_with_nonce(kek, key, params, nonce, context)
+        Self::wrap_key_with_nonce(kek, key, purpose, params, nonce, context)
     }
 
     /// [`wrap_key`](Self::wrap_key) with a given nonce, for the tests that pin the encoding.
     pub(crate) fn wrap_key_with_nonce(
         kek: &SymmetricKey,
         key: &SymmetricKey,
+        purpose: Label,
         params: WrapParams,
         nonce: [u8; NONCE_LEN],
         context: &[u8],
     ) -> Result<Self, CryptoError> {
-        let len = params.kek_reference.len();
-        if len > MAX_KEK_REFERENCE_LEN {
-            return Err(CryptoError::KekReferenceTooLong { len });
-        }
         let mut wrapper = Self {
             version: FORMAT_VERSION,
             kdf: params.kdf,
@@ -196,7 +221,7 @@ impl Wrapper {
             ciphertext: [0; KEY_LEN],
             tag: [0; TAG_LEN],
         };
-        let additional_data = wrapper.additional_data(context);
+        let additional_data = wrapper.additional_data(purpose, context)?;
         // The key is copied into a buffer the crate wipes and sealed there, so a failed seal
         // leaves no plaintext copy behind.
         let mut sealed = Slot::zeroed();
@@ -214,15 +239,16 @@ impl Wrapper {
         Ok(wrapper)
     }
 
-    /// Opens the wrapper with `kek` and the `context` it was wrapped with, into a new key. A wrong
-    /// KEK, another context or an edited wrapper is [`CryptoError::Open`], and the buffer the
-    /// open wrote into is wiped.
+    /// Opens the wrapper with `kek` and the `purpose` and `context` it was wrapped with, into a
+    /// new key. A wrong KEK, another purpose or context, or an edited wrapper is
+    /// [`CryptoError::Open`], and the buffer the open wrote into is wiped.
     pub fn unwrap_key(
         &self,
         kek: &SymmetricKey,
+        purpose: Label,
         context: &[u8],
     ) -> Result<SymmetricKey, CryptoError> {
-        let additional_data = self.additional_data(context);
+        let additional_data = self.additional_data(purpose, context)?;
         let mut opened = Slot::zeroed();
         kek.slot()
             .with_bytes(|kek| {
@@ -371,7 +397,7 @@ impl Wrapper {
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
         }
-        // At most MAX_KEK_REFERENCE_LEN, below u16::MAX: both ways of making a wrapper check it.
+        // At most MAX_KEK_REFERENCE_LEN, below u16::MAX: WrapParams::new and from_bytes check it.
         bytes.extend_from_slice(&(self.kek_reference.len() as u16).to_be_bytes());
         bytes.extend_from_slice(&self.kek_reference);
         bytes.extend_from_slice(&self.created_at.as_millis().to_be_bytes());
@@ -380,10 +406,18 @@ impl Wrapper {
         bytes
     }
 
-    fn additional_data(&self, context: &[u8]) -> Vec<u8> {
+    /// The header, the purpose's label and its end byte, then the context, which must not be
+    /// empty.
+    fn additional_data(&self, purpose: Label, context: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if context.is_empty() {
+            return Err(CryptoError::EmptyContext);
+        }
         let mut additional_data = self.header();
+        for part in purpose.encoded() {
+            additional_data.extend_from_slice(part);
+        }
         additional_data.extend_from_slice(context);
-        additional_data
+        Ok(additional_data)
     }
 }
 

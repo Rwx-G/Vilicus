@@ -7,15 +7,17 @@ use super::*;
 use crate::{Kdf, KekDerivation, Label, WrapParams, Wrapper, derive_key};
 
 const LABEL: Label = crate::label!("vilicus/v1/test/");
+const PURPOSE: Label = crate::label!("vilicus/v1/wrap/test");
 
 fn params() -> WrapParams {
-    WrapParams {
-        kdf: Kdf::None,
-        kek_derivation: KekDerivation::Direct,
-        kek_reference: Vec::new(),
-        created_at: UtcMillis::UNIX_EPOCH,
-        id: Id::new_v7(UtcMillis::UNIX_EPOCH, [1; 10]).expect("id"),
-    }
+    WrapParams::new(
+        Kdf::None,
+        KekDerivation::Direct,
+        Vec::new(),
+        UtcMillis::UNIX_EPOCH,
+        Id::new_v7(UtcMillis::UNIX_EPOCH, [1; 10]).expect("id"),
+    )
+    .expect("params")
 }
 
 /// Drops `key` and returns what the hook saw of its buffer: its address before the drop, and
@@ -35,8 +37,10 @@ fn every_key_wipes_its_buffer_when_dropped() {
     let generated = SymmetricKey::generate().expect("generate");
     let derived = derive_key(&generated, LABEL, &[b"context"]).expect("derive");
     let kek = SymmetricKey::generate().expect("generate");
-    let wrapper = Wrapper::wrap_key(&kek, &derived, params(), b"context").expect("wrap");
-    let unwrapped = wrapper.unwrap_key(&kek, b"context").expect("unwrap");
+    let wrapper = Wrapper::wrap_key(&kek, &derived, PURPOSE, params(), b"context").expect("wrap");
+    let unwrapped = wrapper
+        .unwrap_key(&kek, PURPOSE, b"context")
+        .expect("unwrap");
     for (made_by, key) in [
         ("generate", generated),
         ("derive_key", derived),
@@ -52,7 +56,7 @@ fn the_buffers_of_a_wrap_and_of_a_failed_open_are_wiped() {
     let kek = SymmetricKey::generate().expect("generate");
     let key = SymmetricKey::generate().expect("generate");
     wiped::take();
-    let wrapper = Wrapper::wrap_key(&kek, &key, params(), b"context").expect("wrap");
+    let wrapper = Wrapper::wrap_key(&kek, &key, PURPOSE, params(), b"context").expect("wrap");
     let seen = wiped::take();
     assert_eq!(seen.len(), 1, "the seal's working buffer");
     assert_eq!(seen[0].1, [0; KEY_LEN]);
@@ -60,7 +64,7 @@ fn the_buffers_of_a_wrap_and_of_a_failed_open_are_wiped() {
     let other = SymmetricKey::generate().expect("generate");
     wiped::take();
     assert!(matches!(
-        wrapper.unwrap_key(&other, b"context"),
+        wrapper.unwrap_key(&other, PURPOSE, b"context"),
         Err(CryptoError::Open)
     ));
     let seen = wiped::take();

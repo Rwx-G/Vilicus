@@ -4,8 +4,11 @@
 </p>
 
 <p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
   <img src="https://img.shields.io/badge/status-early%20development-orange.svg" alt="Status">
+  <a href="https://github.com/Rwx-G/Vilicus/actions/workflows/ci.yml"><img src="https://github.com/Rwx-G/Vilicus/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <img src="https://img.shields.io/badge/Rust-2024-orange.svg" alt="Rust">
+  <img src="https://img.shields.io/badge/Platform-Linux-0078D6.svg" alt="Platform">
   <img src="https://img.shields.io/badge/storage-SQLite%20%2B%20SQLCipher-003B57.svg" alt="Storage">
   <img src="https://img.shields.io/badge/deploy-single%20binary-brightgreen.svg" alt="Single binary">
 </p>
@@ -18,7 +21,7 @@ It is not a collaboration suite and not a product for companies. It is the missi
 
 *Vilicus* was the steward of a Roman estate (the *villa*): the manager who ran the work, the stores and the accounts on behalf of the owner. Same job, for a modern household.
 
-> **Status: early development, nothing usable yet.** The Cargo workspace ([`crates/`](crates/), [`testing/`](testing/)) has its merge gates in CI (crate graph, lint, tests, `cargo deny`, `cargo vet`, `cargo audit`, a Debian 13 VM smoke test), the shared vocabulary (`vilicus-types`) and the wire framing and canonical encoding (`vilicus-proto`); the Core, the Gateway and the modules are not written yet. This repository also holds the vision, the architecture and security documents, the [product requirements](doc/prd.md), the [architecture spine](doc/architecture-spine.md), the [V0.1 stories](doc/backlog.md), and the V0.1 spikes ([`spikes/`](spikes/)) that tested the riskiest parts of the design before the product code, with a replayable test harness ([`e2e/`](e2e/README.md)) and its [report](doc/qa/epic-1-report.md). Everything listed below is a goal, not a shipped feature. See the [Roadmap](#roadmap). Design notes live in [`doc/`](doc/README.md).
+> **Status: early development, nothing usable yet.** The Cargo workspace ([`crates/`](crates/), [`testing/`](testing/)) has its merge gates in CI (crate graph and `unsafe` rules, lint, tests, `cargo deny`, `cargo vet`, `cargo audit`, coverage-guided fuzzing, a Debian 13 VM smoke test), the shared vocabulary (`vilicus-types`) and the wire framing and canonical encoding (`vilicus-proto`). The Core's storage and module platform are written: module files encrypted with a self-built SQLCipher, forward-only migrations run on copies, typed record writes that stamp provenance and taint and journal every change, events and an outbox within a partition, typed reads between modules, availability states and fault isolation per module, and a reference module that exercises the whole contract in a testbed. Keys and unlock, the action pipeline, the audit log, the Gateway, the assistant and the clients are not written yet. This repository also holds the vision, the architecture and security documents, the [product requirements](doc/prd.md), the [architecture spine](doc/architecture-spine.md), the [V0.1 stories](doc/backlog.md), and the V0.1 spikes ([`spikes/`](spikes/)) that tested the riskiest parts of the design before the product code, with a replayable test harness ([`e2e/`](e2e/README.md)) and its [report](doc/qa/epic-1-report.md). Everything listed below is a goal, not a shipped feature. See the [Roadmap](#roadmap). Design notes live in [`doc/`](doc/README.md).
 
 ## Key Features (planned)
 
@@ -126,7 +129,7 @@ The order follows the [product requirements](doc/prd.md), section 6. The split a
 | Milestone | Scope | Status |
 |-----------|-------|--------|
 | Design | Vision, architecture, threat model, key management, AI safety, capability matrix, decisions, research notes, product requirements, architecture spine | Done, kept up to date |
-| V0.1 | The Core: Debian package, members and keys, recovery, device pairing, partitions and taint, module platform, action pipeline, audit log, plumbing for plugins, AI processes and channels proven by test doubles | In progress: spikes run in containers and a Debian 13 VM (runs on the reference host and real devices pending); workspace, merge gates, shared types and wire protocol done |
+| V0.1 | The Core: Debian package, members and keys, recovery, device pairing, partitions and taint, module platform, action pipeline, audit log, plumbing for plugins, AI processes and channels proven by test doubles | In progress: spikes run in containers and a Debian 13 VM (runs on the reference host and real devices pending); workspace, merge gates, shared types and wire protocol done; encrypted storage and the module platform done; keys and cryptography next |
 | Next | Home automation module, at parity with an existing home automation setup | Planned |
 | Next | Meals and groceries, first model connectors, read-only conversation, scheduled tasks with opt-in delegation | Planned |
 | Next | Store connector (a prepared cart you validate on the store's site) | Planned |
@@ -162,6 +165,10 @@ Store connectors will rely on unofficial interfaces. Retailers' terms of use gen
 ## Documentation
 
 Design documents live in [`doc/`](doc/README.md), with an index, a reading order and a glossary: [architecture](doc/architecture.md), [threat model](doc/threat-model.md), [key management](doc/key-management.md), [AI safety](doc/ai-safety.md), [capability matrix](doc/capability-matrix.md), [decisions](doc/decisions.md) and [research notes](doc/research-notes.md). Planning: [product requirements](doc/prd.md), [architecture spine](doc/architecture-spine.md), [backlog](doc/backlog.md) with its [stories](doc/stories/), and the [QA report](doc/qa/epic-1-report.md) of the spikes.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, the gates and the commit convention, and the [Code of Conduct](CODE_OF_CONDUCT.md). Report a vulnerability privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
 
 ## License
 

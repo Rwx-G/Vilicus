@@ -1155,6 +1155,52 @@ def spine_flowchart() -> tuple[dict[str, str], set[tuple[str, str, bool]]]:
     return labels, edges
 
 
+class KeyMaterialTest(WorkspaceTestCase):
+    """Story 4.1, AC3: key types are defined in vilicus-crypto, so only the crates of
+    [key_material] depend on the package that wipes them."""
+
+    REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
+    PACKAGE = CONFIG["key_material"]["package"]
+    ALLOWED = CONFIG["key_material"]["crates"]
+
+    def depend_on_package(self, source: str, kind: str) -> None:
+        self.workspace.declare(
+            source, {"name": self.PACKAGE, "kind": None if kind == "normal" else kind, "source": self.REGISTRY}
+        )
+        self.workspace.resolve_outside(source, self.PACKAGE, f"{self.REGISTRY}#{self.PACKAGE}@1.0.0")
+
+    def test_the_named_crates_may_depend_on_it(self) -> None:
+        self.full_graph()
+        for name in self.ALLOWED:
+            self.depend_on_package(name, "normal")
+        self.assertEqual(self.workspace.check(), [])
+
+    def test_any_other_crate_depending_on_it_fails_for_every_kind(self) -> None:
+        for node in GRAPH.nodes.values():
+            for kind in ("normal", "build", "dev"):
+                with self.subTest(node=node.id, kind=kind):
+                    self.setUp()
+                    names = self.full_graph()
+                    if names[node.id] in self.ALLOWED:
+                        continue
+                    self.depend_on_package(names[node.id], kind)
+                    self.assert_single(
+                        self.beside_the_reference_rule(self.workspace.check()),
+                        f"key material: {names[node.id]} -> {self.PACKAGE} ({kind} dependency)",
+                    )
+
+    def test_a_named_crate_without_a_reason_fails(self) -> None:
+        config = copy.deepcopy(CONFIG)
+        config["key_material"]["crates"]["vilicus-crypto"] = " "
+        self.full_graph()
+        self.assert_single(self.workspace.check(config), "entry vilicus-crypto gives no reason")
+
+    def test_the_repository_keeps_the_wiping_crate_to_the_key_crate_and_storage(self) -> None:
+        # Written out on purpose: the crates Story 4.1 lets hold zeroized key material.
+        self.assertEqual(self.PACKAGE, "zeroize")
+        self.assertEqual(set(self.ALLOWED), {"vilicus-crypto", "vilicus-storage"})
+
+
 class DecisionAgreementTest(unittest.TestCase):
     """The unsafe-allowed list of ci/crate_graph.toml is the list D140 states."""
 

@@ -114,6 +114,18 @@ depends_on = ["proto"]
 # The fuzzing runtime and its dependency (owner approval, Story 2.7), never in a shipped crate.
 exclusive_dependencies = ["libfuzzer-sys", "arbitrary"]
 
+# Spine AD-4 and FR-13: every key type is defined in vilicus-crypto and wipes its buffer when
+# dropped, with `package`, the one dependency of the Stack that wipes memory reliably where
+# unsafe code is forbidden. Only the workspace crates of `crates` declare a dependency on it, of
+# any kind, each for the reason given; a crate that would define a key type elsewhere fails the
+# check instead (Story 4.1, AC3). Reaching it through a registry crate is not a declaration.
+[key_material]
+package = "zeroize"
+
+[key_material.crates]
+vilicus-crypto = "defines every key type, each wiped on drop"
+vilicus-storage = "the SQLCipher key text it builds from a file key the Core lends it, wiped once the file is keyed (D143); a buffer, not a key type"
+
 # D140 and the spine's Consistency Conventions, Unsafe code. The crates in `allowed` are the
 # only ones where unsafe code may appear: each denies unsafe_code at crate level and denies
 # clippy's undocumented_unsafe_blocks, instead of inheriting [workspace.lints]. Every other

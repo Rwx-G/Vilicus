@@ -16,3 +16,5 @@ crates/vilicus-proto/tests/data/** -text
 # The vendored SQLCipher amalgamation and its licences are checked against SHA256SUMS (D143)
 crates/vilicus-storage/sqlcipher/** -text
 crates/vilicus-storage/sqlcipher/*.sh text eol=lf
+# Third-party C kept out of GitHub's language statistics; Linguist already skips vendor/ by name
+crates/vilicus-storage/sqlcipher/sqlite3.c linguist-vendored

@@ -3,15 +3,18 @@
 # ci/check_supply_chain.py, which prints this list with each entry's record and fails when:
 # - a package of the tree that its publisher classifies as cryptographic (crates.io category
 #   `cryptography`, or keyword `crypto` or `cryptography`) is neither a source here, nor a
-#   dependency of a present source that brings its own primitive crates (`brings_primitives`),
-#   nor a `[not_primitive]` entry;
+#   `[not_primitive]` entry, nor reached only through a present source that brings its own
+#   primitive crates (`brings_primitives`): every path from a workspace member to that package,
+#   by package id, goes through the source;
 # - a source is in the tree at another version than its `version`, or with a feature of its
 #   `forbidden_features`;
-# - an `exception` names no decision that D28's row of doc/decisions.md lists as one of its
-#   exceptions, or one of those exceptions has no source here.
-# A source may be absent from the tree: the list also records the sources approved for code to
-# come. The classification is the publishers'; a primitive crate that declares neither is caught
-# by review (the pull request checklist), not by this check.
+# - a source other than aws-lc-rs and aws-lc-sys, the audited sources of D28 and spine AD-18,
+#   names no `exception`; an `exception` names a decision that is neither one of the exceptions
+#   D28's row of doc/decisions.md lists nor recorded in the table as amending one; or one of
+#   D28's exceptions has no source here.
+# A source or a `[not_primitive]` entry may be absent from the tree: the list also records what
+# is approved for code to come. The classification is the publishers'; a primitive crate that
+# declares neither is caught by review (the pull request checklist), not by this check.
 #
 # Every source has a `record`: what it is used for, and the decisions that allow it.
 
@@ -27,15 +30,15 @@ exception = ["D61", "D120"]
 brings_primitives = true
 record = "HPKE of the household key wraps and sealed inbox rows, under the usage rules of spikes/hpke-review/REVIEW.md; inside HPKE, its own primitive crates"
 
+# D129 covers argon2 and the blake2 crate it depends on; the RustCrypto crates blake2 brings
+# (digest, block-buffer, crypto-common and their helpers) are covered only where argon2 alone
+# reaches them, the scope the D153 draft of Story 4.1 records as an amendment of D129.
 [source.argon2]
 version = "0.6.0"
 exception = ["D129"]
+brings_primitives = true
 forbidden_features = ["parallel"]
-record = "Argon2id of the passphrase, backup secret and admin recovery code KEKs, without its parallel feature"
-
-[source.blake2]
-exception = ["D129"]
-record = "BLAKE2b inside Argon2id, the dependency of argon2 that D129 covers"
+record = "Argon2id of the passphrase, backup secret and admin recovery code KEKs, without its parallel feature; inside Argon2id, BLAKE2b from blake2 and the crates it brings"
 
 [source.opaque-ke]
 version = "4.0.1"
@@ -44,3 +47,6 @@ record = "OPAQUE of pairing codes on the Core's side"
 
 [not_primitive.zeroize]
 reason = "wipes memory with volatile writes (spine AD-4); implements no cryptographic primitive"
+
+[not_primitive.base64ct]
+reason = "constant-time Base64, an encoding that argon2 uses for PHC strings; implements no cryptographic primitive"

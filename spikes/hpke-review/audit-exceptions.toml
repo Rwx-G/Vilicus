@@ -10,10 +10,7 @@
 # Advisory id = reason.
 [advisories]
 RUSTSEC-2026-0173 = "proc-macro-error2 2.0.1 is unmaintained. It runs at build time only, as a dependency of the hax-lib-macros procedural macro under libcrux-intrinsics, in the hpke-rs 0.8.0 chain that is a dev-dependency of the cross-test; nothing of it is linked into hpke or the Core (Story 1.2, Result)."
-RUSTSEC-2026-0387 = "crypto-bigint 0.7.5 has timing variability in operations meant to be constant-time. It is reached only through elliptic-curve 0.14.1 and primefield 0.14.0 of hpke-rs-rust-crypto 0.8.0, the RustCrypto provider of the dev-only cross-test oracle, which runs on test keys; hpke 0.13.0 does not depend on it, and the Core's Cargo.lock holds no crypto-bigint."
-RUSTSEC-2026-0385 = "ctutils 0.4.3 generates masks and compares u128 values in non-constant time. It is reached only through aes-gcm 0.11.1, crypto-bigint 0.7.5, digest 0.11.3, sec1 0.8.1 and universal-hash 0.6.1, all in the hpke-rs 0.8.0 chain of the dev-only cross-test oracle; hpke 0.13.0 uses aes-gcm 0.10.3 and digest 0.10.7, and the Core's Cargo.lock holds no ctutils."
 
 # "<crate>@<version>" = reason.
 [yanked]
 "inout@0.2.3" = "Yanked after Story 1.2 pinned the tree. It is reached only through aead 0.6.1 and aes-gcm 0.11.1 of hpke-rs-rust-crypto 0.8.0, the RustCrypto provider of the dev-only cross-test oracle; hpke 0.13.0 uses aes-gcm 0.10.3 and inout 0.1.4."
-"crypto-bigint@0.7.5" = "Yanked after Story 1.2 pinned the tree, with RUSTSEC-2026-0387. It is reached only through elliptic-curve 0.14.1 and primefield 0.14.0 of hpke-rs-rust-crypto 0.8.0, the dev-only cross-test oracle; hpke 0.13.0 does not depend on it."

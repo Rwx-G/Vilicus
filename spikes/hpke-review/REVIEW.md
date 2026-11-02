@@ -152,6 +152,8 @@ Normal dependencies of `hpke` 0.13.0 as resolved here (`cargo tree -e normal`): 
 
 `cargo audit` (RustSec database of 2026-10-16, 1 329 advisories): no vulnerability in the tree. One warning, RUSTSEC-2026-0173 (`proc-macro-error2` unmaintained), comes from the lock entries of the dev-only `hpke-rs` chain and does not reach `hpke`. Past advisories of crates in the tree are all patched in the resolved versions: RUSTSEC-2023-0096 (`aes-gcm` >= 0.10.3), RUSTSEC-2024-0344 (`curve25519-dalek` >= 4.1.3), RUSTSEC-2020-0146 (`generic-array`), RUSTSEC-2021-0023 (`rand_core`), RUSTSEC-2021-0100 (`sha2`). No advisory has ever been filed against `hpke`. Audit statements of the primitive crates are in F4. The crate's README reports a security review of version 0.8 by Cloudflare; that review covered another version and is not an audit of 0.13.0.
 
+Update of 2026-11-02: RUSTSEC-2026-0387 (`crypto-bigint`, timing variability in constant-time operations) and RUSTSEC-2026-0385 (`ctutils`, non-constant-time masks and `u128` comparisons), filed on 2026-10-23, hit `crypto-bigint` 0.7.5 and `ctutils` 0.4.3, which only the dev-only `hpke-rs` chain of the cross-test reaches. `Cargo.lock` now resolves them to `crypto-bigint` 0.7.10 and `ctutils` 0.4.8 and changes nothing else; the normal tree of `hpke` above is unchanged, and `run.sh` passes every check with the updated lockfile, the 10 000-case cross-test against both providers included.
+
 ## 7. Usage rules Vilicus must follow
 
 These rules are the conditions under which the findings above are closed or accepted. The Core's key code follows them; `src/lib.rs` of this spike is the reference shape.

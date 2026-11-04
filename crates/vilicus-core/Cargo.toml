@@ -46,3 +46,8 @@ unicode-normalization.workspace = true
 [dev-dependencies]
 rusqlite.workspace = true
 aws-lc-rs.workspace = true
+# The Core's tests of what derives from the household key hold one through vilicus-crypto's
+# `testing` stand-in, which story 4.6 replaces with the key's own creation: the same edge as the
+# normal dependency, with that feature in test builds only, so `cargo test -p vilicus-core` runs
+# them too (story 4.3 review, L2).
+vilicus-crypto = { workspace = true, features = ["testing"] }

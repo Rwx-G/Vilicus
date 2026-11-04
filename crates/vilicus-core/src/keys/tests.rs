@@ -186,9 +186,8 @@ fn the_instance_key_keys_no_personal_or_household_file() {
 }
 
 /// The tests below hold a household key, whose creation is story 4.6's: `vilicus_crypto::testing`
-/// stands in for it, which the workspace's test build compiles through the testbed's `testing`
-/// feature.
-#[cfg(feature = "testing")]
+/// stands in for it, which the Core's dev-dependency on `vilicus-crypto` compiles in its test
+/// builds.
 mod with_the_household_key {
     use rusqlite::Connection;
     use vilicus_crypto::testing;

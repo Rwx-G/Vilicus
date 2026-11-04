@@ -85,9 +85,14 @@ pub(crate) fn raw_key_pragma(text: &[u8]) -> String {
 
 /// A connection keyed with [`KEY`] and nothing else: no setup, no authorizer.
 pub(crate) fn raw_connection(path: &Path) -> Connection {
+    raw_connection_keyed(path, &KEY)
+}
+
+/// A connection keyed with the key text `text` and nothing else: no setup, no authorizer.
+pub(crate) fn raw_connection_keyed(path: &Path, text: &[u8]) -> Connection {
     let connection = Connection::open(path).expect("open without the storage layer");
     connection
-        .execute_batch(&raw_key_pragma(&KEY))
+        .execute_batch(&raw_key_pragma(text))
         .expect("key");
     connection
 }

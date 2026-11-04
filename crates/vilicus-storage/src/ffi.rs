@@ -1,8 +1,8 @@
 //! The SQLite and SQLCipher C calls that `rusqlite` does not wrap safely (D140): the extension
-//! loading switch (D126), keying from a buffer the caller wipes (AD-4) and the TRUNCATE checkpoint
-//! that the authorizer does not see (D132); and the one system call of the maintenance path, the
-//! free space of a file system (`statvfs`, AD-23). Every `unsafe` block of the crate is here, each
-//! with the invariant it relies on; the functions are safe to call.
+//! loading switch (D126), keying and re-keying from a key text the caller lends (AD-4) and the
+//! TRUNCATE checkpoint that the authorizer does not see (D132); and the one system call of the
+//! maintenance path, the free space of a file system (`statvfs`, AD-23). Every `unsafe` block of
+//! the crate is here, each with the invariant it relies on; the functions are safe to call.
 
 use std::ffi::c_int;
 
@@ -79,6 +79,31 @@ pub(crate) fn key(connection: &Connection, key_text: &[u8]) -> rusqlite::Result<
         )
     };
     check(code, "key the database")
+}
+
+/// Re-encrypts every page of the main database under `key_text` with `sqlite3_rekey_v2`, which
+/// `PRAGMA rekey` calls too, in one write transaction of its own: on failure the database is
+/// rolled back and stays under its key. No SQL text holds the key.
+#[allow(unsafe_code)] // One FFI call; rusqlite re-keys only through SQL text (AD-4).
+pub(crate) fn rekey(connection: &Connection, key_text: &[u8]) -> rusqlite::Result<()> {
+    let length = c_int::try_from(key_text.len()).map_err(|_| {
+        rusqlite::Error::SqliteFailure(
+            ffi::Error::new(ffi::SQLITE_MISUSE),
+            Some("key too long".to_owned()),
+        )
+    })?;
+    // SAFETY: the handle is live and used by one thread; the database name is a NUL-terminated
+    // literal; SQLCipher reads exactly `length` bytes from `key_text`, which outlives the call, and
+    // copies them into its own context, so the caller may wipe the buffer afterwards.
+    let code = unsafe {
+        ffi::sqlite3_rekey_v2(
+            connection.handle(),
+            c"main".as_ptr(),
+            key_text.as_ptr().cast(),
+            length,
+        )
+    };
+    check(code, "re-key the database")
 }
 
 /// The outcome of one `sqlite3_wal_checkpoint_v2` call in TRUNCATE mode.

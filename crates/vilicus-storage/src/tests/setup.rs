@@ -303,6 +303,79 @@ fn write_epoch_updates_both_and_leaves_no_staging_file() {
     );
 }
 
+/// Story 4.3, AC2: a re-key moves the file to the new key and the new epoch, written in the
+/// sidecar and in `_meta`; the rows stay, the old key no longer opens it, and no pending sidecar or
+/// WAL content is left.
+#[test]
+fn a_rekey_moves_the_file_to_its_new_key_and_epoch() {
+    let dir = scratch_dir("story43-rekey");
+    let file = create_module_file(&dir);
+    let next = KeyEpoch {
+        partition_root_version: 1,
+        generation: 1,
+    };
+    let mut handle = open::<Write>(&file, &KEY).expect("open");
+    handle
+        .execute("INSERT INTO items (label) VALUES ('second')", [])
+        .expect("write");
+    handle.rekey(&OTHER_KEY, next).expect("rekey");
+    assert_eq!(handle.epoch(), next);
+    handle.close().expect("close");
+    assert_eq!(read_epoch(&file).expect("sidecar"), next);
+    assert!(!file.pending_epoch_path().exists());
+    assert_eq!(wal_len(&file.wal_path()), 0);
+    assert!(matches!(open::<Read>(&file, &KEY), Err(Error::WrongKey)));
+    let reader = open::<Read>(&file, &OTHER_KEY).expect("open under the new key");
+    assert_eq!(reader.epoch(), next);
+    let labels: Vec<String> = reader
+        .prepare("SELECT label FROM items ORDER BY id")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("read");
+    assert_eq!(labels, ["first", "second"]);
+    reader.close().expect("close");
+    let in_meta: i64 = super::raw_connection_keyed(&file.path(), &OTHER_KEY)
+        .query_row(
+            "SELECT value FROM _meta WHERE key = 'generation'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read _meta");
+    assert_eq!(in_meta, 1);
+}
+
+/// A re-key whose key text is refused leaves the file under its key and epoch, with no pending
+/// sidecar, and one inside a transaction is refused before anything is written.
+#[test]
+fn a_refused_rekey_leaves_the_file_as_it_was() {
+    let dir = scratch_dir("story43-rekey-refused");
+    let file = create_module_file(&dir);
+    let next = KeyEpoch {
+        partition_root_version: 2,
+        generation: 0,
+    };
+    let mut handle = open::<Write>(&file, &KEY).expect("open");
+    let malformed = KEY.to_ascii_uppercase();
+    let keying = Lent::new(&malformed);
+    assert!(matches!(
+        handle.rekey(&keying, next),
+        Err(Error::MalformedKeyText)
+    ));
+    assert_eq!(handle.epoch(), EPOCH);
+    assert!(!file.pending_epoch_path().exists());
+    handle.execute_batch("BEGIN").expect("begin");
+    assert!(matches!(
+        handle.rekey(&OTHER_KEY, next),
+        Err(Error::TransactionOpen)
+    ));
+    handle.execute_batch("ROLLBACK").expect("rollback");
+    handle.close().expect("close");
+    assert_eq!(read_epoch(&file).expect("sidecar"), EPOCH);
+    assert_eq!(open::<Read>(&file, &KEY).expect("open").epoch(), EPOCH);
+}
+
 /// Review item 4: a read handle relies on `query_only`, which the authorizer keeps anyone from
 /// turning off: a pragma with a value is refused unless it is a table-argument introspection
 /// pragma.
@@ -729,8 +802,9 @@ fn the_key_text_is_lent_once_per_connection() {
     assert!(!other.path().exists() && !other.epoch_path().exists());
 }
 
-/// No product source builds `PRAGMA key` SQL text, which SQLite would keep in its statement
-/// memory and `rusqlite` in its errors; keying goes through `sqlite3_key_v2` (AC11).
+/// No product source builds `PRAGMA key` or `PRAGMA rekey` SQL text, which SQLite would keep in its
+/// statement memory and `rusqlite` in its errors; keying goes through `sqlite3_key_v2` (AC11) and
+/// re-keying through `sqlite3_rekey_v2` (Story 4.3).
 #[test]
 fn no_product_source_keys_through_sql_text() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -748,7 +822,8 @@ fn no_product_source_keys_through_sql_text() {
 ",
                 )
                 .to_ascii_lowercase();
-            if code.contains("pragma key") || code.contains("\"key\"") || code.contains("rekey") {
+            let pragma = ["pragma key", "pragma rekey", "\"key\"", "\"rekey\""];
+            if pragma.iter().any(|text| code.contains(text)) {
                 offenders.push(path);
             }
         }

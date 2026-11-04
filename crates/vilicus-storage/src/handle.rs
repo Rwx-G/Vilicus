@@ -851,6 +851,39 @@ impl Handle<Write> {
         Ok(())
     }
 
+    /// Re-keys the file under `key` at the key epoch `epoch` (AD-5, `doc/key-management.md` section
+    /// 8, "Database keys"), in durable steps: the WAL checkpointed empty, so no page under the old
+    /// key stays in it; the pending sidecar `<file>.epoch.next`; every page re-encrypted under the
+    /// new key with `sqlite3_rekey_v2`, in one transaction; `_meta` written under the Core policy;
+    /// the WAL checkpointed empty again, so the file alone holds the new pages; then the pending
+    /// sidecar renamed over `<file>.epoch`. The caller holds the file's only connection, this one,
+    /// as a re-key does (D151): another connection would still read the pages under the old key.
+    ///
+    /// A failure before the pages are re-encrypted removes the pending sidecar, and the file stays
+    /// under its key and epoch; a failure after it, or a crash anywhere, leaves the pending sidecar,
+    /// and every later open fails with [`Error::EpochTransitionPending`] naming both epochs, which
+    /// the Core resolves by the key that opens the file.
+    pub fn rekey(&mut self, key: &dyn FileKeying, epoch: KeyEpoch) -> Result<()> {
+        self.require_no_transaction()?;
+        checkpoint_until_empty(&self.file, self.connection(), None)?;
+        let pending = self.file.pending_epoch_path();
+        file::write_sidecar(&pending, epoch)?;
+        let connection = self.connection();
+        let rekeyed = key.lend_key_text(&mut |text| {
+            check_key_text(text)?;
+            Ok(ffi::rekey(connection, text)?)
+        });
+        if let Err(error) = rekeyed {
+            return Err(remove_if_present(&pending).err().unwrap_or(error));
+        }
+        self.update_meta(epoch)?;
+        checkpoint_until_empty(&self.file, self.connection(), None)?;
+        std::fs::rename(&pending, self.file.epoch_path())?;
+        file::sync_parent(&self.file.epoch_path())?;
+        self.epoch = epoch;
+        Ok(())
+    }
+
     /// Records `label` as a confirmed label of the reviewed vocabulary `vocabulary` in this file,
     /// confirmed by the member `confirmed_by` at `confirmed_at` (D104). The Core checks the
     /// label's form and that the file's module declares the vocabulary; this refuses a label

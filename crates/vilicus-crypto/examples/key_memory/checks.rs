@@ -171,7 +171,27 @@ impl Subject {
         drop(self.stdin);
         self.child.wait()
     }
+
+    /// Waits for a subject that was sent a signal to end of it, its stdin kept open meanwhile, for
+    /// at most [`SIGNALLED_WAIT`]; only then is its stdin closed. A core-dump signal (SIGABRT,
+    /// SIGQUIT) is taken by one thread of the subject, which goes through the dump path before the
+    /// group dies, and the kernel's fast group kill does not apply to it: closing stdin earlier
+    /// woke the subject's main thread on end of file, and its `exit_group(0)` could win the race,
+    /// which reported a normal exit instead of the signal.
+    fn finish_signalled(mut self) -> io::Result<ExitStatus> {
+        let deadline = std::time::Instant::now() + SIGNALLED_WAIT;
+        while std::time::Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        self.finish()
+    }
 }
+
+/// How long a signalled subject is given to end of the signal before its stdin is closed.
+const SIGNALLED_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn parse_pool(line: &str) -> Option<(usize, usize)> {
     let mut fields = line.trim().strip_prefix("POOL ")?.split(' ');
@@ -1065,10 +1085,15 @@ fn crash(
     };
     subject.expect("LIVE")?;
     match ending {
-        Ending::Signal(signal) => subject.signal(signal)?,
-        Ending::Fault => subject.answer("fault")?,
+        Ending::Signal(signal) => {
+            subject.signal(signal)?;
+            Ok(Some(subject.finish_signalled()?))
+        }
+        Ending::Fault => {
+            subject.answer("fault")?;
+            Ok(Some(subject.finish()?))
+        }
     }
-    Ok(Some(subject.finish()?))
 }
 
 /// The host's swap, from `/proc/meminfo`, which a container reads from its host.

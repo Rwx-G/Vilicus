@@ -7,7 +7,8 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use super::{
-    EPOCH, KEY, KEY_BYTES, create_module_file, key_text, module_file, raw_connection, scratch_dir,
+    EPOCH, KEY, KEY_BYTES, KEY_TEXT, create_module_file, key_text, module_file, raw_connection,
+    scratch_dir,
 };
 use crate::authorizer::{self, Policy};
 use crate::error::Error;
@@ -17,7 +18,8 @@ use crate::{
     Role, RoleKind, Settings, Write, create, open, read_epoch,
 };
 
-const OTHER_KEY: [u8; KEY_TEXT_LEN] = key_text([0xa5; 32]);
+const OTHER_KEY_TEXT: [u8; KEY_TEXT_LEN] = key_text([0xa5; 32]);
+const OTHER_KEY: super::TestKey = super::TestKey(OTHER_KEY_TEXT);
 
 /// A value no page of a file holds unless it was written there, to look for in raw bytes.
 const MARKER: &str = "vilicus-storage-plaintext-marker-6d1f0c";
@@ -224,7 +226,7 @@ fn the_setup_pragmas_are_refused_once_the_authorizer_is_on() {
     let connection = Connection::open(file.path()).expect("open");
     authorizer::install(&connection, Policy::Write).expect("install");
     for sql in [
-        super::raw_key_pragma(&KEY),
+        super::raw_key_pragma(&KEY_TEXT),
         "PRAGMA secure_delete = ON".to_owned(),
         "PRAGMA trusted_schema = OFF".to_owned(),
         format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}"),
@@ -336,7 +338,7 @@ fn a_rekey_moves_the_file_to_its_new_key_and_epoch() {
         .expect("read");
     assert_eq!(labels, ["first", "second"]);
     reader.close().expect("close");
-    let in_meta: i64 = super::raw_connection_keyed(&file.path(), &OTHER_KEY)
+    let in_meta: i64 = super::raw_connection_keyed(&file.path(), &OTHER_KEY_TEXT)
         .query_row(
             "SELECT value FROM _meta WHERE key = 'generation'",
             [],
@@ -357,7 +359,7 @@ fn a_refused_rekey_leaves_the_file_as_it_was() {
         generation: 0,
     };
     let mut handle = open::<Write>(&file, &KEY).expect("open");
-    let malformed = KEY.to_ascii_uppercase();
+    let malformed = KEY_TEXT.to_ascii_uppercase();
     let keying = Lent::new(&malformed);
     assert!(matches!(
         handle.rekey(&keying, next),
@@ -705,24 +707,24 @@ fn a_malformed_key_text_is_refused_before_it_keys() {
     let dir = scratch_dir("ac11-malformed-text");
     let file = create_module_file(&dir);
     let mut malformed: Vec<Vec<u8>> = vec![
-        KEY.to_ascii_uppercase(),
-        KEY[..KEY_TEXT_LEN - 2]
+        KEY_TEXT.to_ascii_uppercase(),
+        KEY_TEXT[..KEY_TEXT_LEN - 2]
             .iter()
             .chain(b"'")
             .copied()
             .collect(),
-        KEY[..KEY_TEXT_LEN - 1]
+        KEY_TEXT[..KEY_TEXT_LEN - 1]
             .iter()
             .chain(b"a'")
             .copied()
             .collect(),
-        KEY[1..].to_vec(),
-        KEY[..KEY_TEXT_LEN - 1].to_vec(),
+        KEY_TEXT[1..].to_vec(),
+        KEY_TEXT[..KEY_TEXT_LEN - 1].to_vec(),
         Vec::new(),
     ];
     for position in 2..KEY_TEXT_LEN - 1 {
         for outside in [b'/', b':', b'`', b'g', b'G', b'A', b'F', 0xff] {
-            let mut text = KEY;
+            let mut text = KEY_TEXT;
             text[position] = outside;
             malformed.push(text.to_vec());
         }
@@ -775,7 +777,7 @@ impl FileKeying for Lent<'_> {
 fn the_key_text_is_lent_once_per_connection() {
     let dir = scratch_dir("ac11-lent");
     let file = module_file(&dir);
-    let keying = Lent::new(&KEY);
+    let keying = Lent::new(&KEY_TEXT);
     create(&file, &keying, EPOCH)
         .expect("create")
         .close()
@@ -788,7 +790,7 @@ fn the_key_text_is_lent_once_per_connection() {
     assert_eq!(keying.lends.get(), 3);
     let refused = Lent {
         refuse: true,
-        ..Lent::new(&KEY)
+        ..Lent::new(&KEY_TEXT)
     };
     assert!(matches!(
         open::<Read>(&file, &refused),

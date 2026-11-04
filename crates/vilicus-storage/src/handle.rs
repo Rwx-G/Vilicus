@@ -272,18 +272,12 @@ pub const KEY_TEXT_LEN: usize = 2 + 2 * 32 + 1;
 /// 64 lowercase hex digits, then `'` ([`KEY_TEXT_LEN`] bytes), which skips SQLCipher's passphrase
 /// KDF (D2, AD-5). The text is lent for the one call that keys a connection and never kept: the
 /// Core lends the text `vilicus_crypto` writes from a file key in its locked pool (spine AD-4,
-/// D154), so this crate holds no key text of its own; a fixed text, `[u8; KEY_TEXT_LEN]`, keys
-/// the files of tests and of the registry's build-time check.
+/// D154), so this crate holds no key text of its own. Test code implements it over a fixed text,
+/// with a type of its own; the product implements it for the Core's file keys only.
 pub trait FileKeying {
     /// Lends the key text to `key_with`, which keys a connection with it, and returns what
     /// `key_with` returned; [`Error::KeyUnavailable`] when the text cannot be lent.
     fn lend_key_text(&self, key_with: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()>;
-}
-
-impl FileKeying for [u8; KEY_TEXT_LEN] {
-    fn lend_key_text(&self, key_with: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
-        key_with(self)
-    }
 }
 
 /// Refuses a key text that is not `x'`, 64 lowercase hex digits, then `'`, which SQLCipher would

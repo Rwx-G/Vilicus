@@ -24,7 +24,7 @@ use vilicus_types::{
 };
 
 /// Test key only; the Core derives one key per file.
-pub(crate) const KEY: [u8; vilicus_core::testing::KEY_TEXT_LEN] =
+pub(crate) const KEY: vilicus_core::testing::TestKeyText =
     vilicus_core::testing::sqlcipher_key_text([0x5e; 32]);
 
 const EPOCH: KeyEpoch = KeyEpoch {

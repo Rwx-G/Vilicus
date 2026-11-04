@@ -117,7 +117,7 @@ fn a_failed_backup_leaves_no_partial_file() {
     let target_dir = scratch_dir("ac9-failed-backup-target");
     let outcome = maintenance::backup(
         &file,
-        &super::key_text([0xa5; 32]),
+        &super::TestKey(super::key_text([0xa5; 32])),
         &target_dir.join("copy.db"),
         4,
         Duration::ZERO,

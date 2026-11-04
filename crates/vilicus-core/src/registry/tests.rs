@@ -17,7 +17,7 @@ use super::schema::{self, SchemaError, Snapshot};
 use super::{FileError, Registry, RegistryError, frozen};
 
 /// Test key only; the Core derives one key per file.
-const KEY: [u8; vilicus_storage::KEY_TEXT_LEN] = crate::testing::sqlcipher_key_text([0x3c; 32]);
+const KEY: crate::testing::TestKeyText = crate::testing::sqlcipher_key_text([0x3c; 32]);
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
@@ -1018,7 +1018,7 @@ fn sample_declaring(fts5: Fts5Table) -> ModuleDeclaration {
 fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
     let connection =
         rusqlite::Connection::open(file.path()).expect("open without the storage layer");
-    let text = std::str::from_utf8(&KEY).expect("a key text is ASCII");
+    let text = std::str::from_utf8(&KEY.0).expect("a key text is ASCII");
     connection
         .execute_batch(&format!("PRAGMA key = \"{text}\";"))
         .expect("key");

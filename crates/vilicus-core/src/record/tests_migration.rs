@@ -182,7 +182,7 @@ fn versions(file: &ModuleFile) -> SchemaVersions {
 
 fn labels_at(path: &Path) -> Vec<String> {
     let connection = rusqlite::Connection::open(path).expect("open");
-    let text = std::str::from_utf8(&KEY).expect("a key text is ASCII");
+    let text = std::str::from_utf8(&KEY.0).expect("a key text is ASCII");
     connection
         .execute_batch(&format!("PRAGMA key = \"{text}\";"))
         .expect("key");

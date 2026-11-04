@@ -31,9 +31,24 @@ use crate::{
 /// section 2).
 pub(crate) const KEY_BYTES: [u8; 32] = [0x5a; 32];
 
-/// SQLCipher's raw key text of [`KEY_BYTES`], which keys the test files as the text the Core lends
-/// from a file key does.
-pub(crate) const KEY: [u8; KEY_TEXT_LEN] = key_text(KEY_BYTES);
+/// SQLCipher's raw key text of [`KEY_BYTES`].
+pub(crate) const KEY_TEXT: [u8; KEY_TEXT_LEN] = key_text(KEY_BYTES);
+
+/// [`KEY_TEXT`], which keys the test files as the text the Core lends from a file key does.
+pub(crate) const KEY: TestKey = TestKey(KEY_TEXT);
+
+/// A fixed key text that keys the test files: test code only, the product's `FileKeying` being the
+/// Core's file keys.
+pub(crate) struct TestKey(pub(crate) [u8; KEY_TEXT_LEN]);
+
+impl crate::FileKeying for TestKey {
+    fn lend_key_text(
+        &self,
+        key_with: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        key_with(&self.0)
+    }
+}
 
 /// SQLCipher's raw key text of `key`, `x'`, its lowercase hex digits, then `'`: test code only,
 /// where the product's text is written by `vilicus-crypto` in its locked pool.
@@ -85,7 +100,7 @@ pub(crate) fn raw_key_pragma(text: &[u8]) -> String {
 
 /// A connection keyed with [`KEY`] and nothing else: no setup, no authorizer.
 pub(crate) fn raw_connection(path: &Path) -> Connection {
-    raw_connection_keyed(path, &KEY)
+    raw_connection_keyed(path, &KEY_TEXT)
 }
 
 /// A connection keyed with the key text `text` and nothing else: no setup, no authorizer.

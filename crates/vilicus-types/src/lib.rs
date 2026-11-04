@@ -92,6 +92,7 @@ mod id;
 mod label;
 mod limits;
 mod name;
+mod partition;
 mod principal;
 mod rev;
 mod source;
@@ -121,6 +122,7 @@ pub use limits::{
     UNDO_JOURNAL_RETENTION, UNLOCK_WINDOW_DEFAULT, UNLOCK_WINDOW_MAX,
 };
 pub use name::NameError;
+pub use partition::Partition;
 pub use principal::Principal;
 pub use rev::Rev;
 pub use source::{ModuleName, Source};

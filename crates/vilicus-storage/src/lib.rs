@@ -50,7 +50,7 @@ pub use event::{
     DeadLetter, DeliveryRow, DeliveryState, EventIntent, EventRow, LinkIntent, LinkRow, OutboxKind,
     OutboxPurge, OutboxRow, OutboxState, PendingRow,
 };
-pub use file::{KeyEpoch, ModuleFile, Partition, read_epoch};
+pub use file::{KeyEpoch, ModuleFile, read_epoch};
 pub use handle::{
     BUSY_TIMEOUT, CHECKPOINT_ATTEMPTS, CheckpointRetryObserver, Handle, Inspect,
     JOURNAL_SIZE_LIMIT, Migration, MigrationTrack, Read, Role, RoleKind, Settings, Write, create,
@@ -63,6 +63,9 @@ pub use record_key::Shredded;
 pub use schema::{
     ColumnInfo, ForeignKey, IndexColumn, IndexInfo, Schema, SchemaObject, TableInfo, TableKind,
 };
+
+/// The partition a module file belongs to, which names the file (AD-5).
+pub use vilicus_types::Partition;
 
 /// A value in one of SQLite's storage classes, as [`Handle::execute_values`] binds it and
 /// [`Handle::query_values`] reads it back.

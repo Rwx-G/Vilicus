@@ -348,6 +348,56 @@ fn a_rekey_moves_the_file_to_its_new_key_and_epoch() {
     assert_eq!(in_meta, 1);
 }
 
+/// A key text lent once for the re-key and another for every later lend: the read-back of the
+/// re-key then opens the file with a key it is not under, as it would after a re-key whose commit
+/// failed while SQLCipher reported success.
+struct Switching {
+    first: [u8; KEY_TEXT_LEN],
+    then: [u8; KEY_TEXT_LEN],
+    lends: std::cell::Cell<usize>,
+}
+
+impl FileKeying for Switching {
+    fn lend_key_text(
+        &self,
+        key_with: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        self.lends.set(self.lends.get() + 1);
+        key_with(if self.lends.get() == 1 {
+            &self.first
+        } else {
+            &self.then
+        })
+    }
+}
+
+/// Story 4.3 review, L4: a re-key is read back under its new key before its pending sidecar is
+/// renamed; when the file does not open under that key, the re-key fails and leaves the pending
+/// sidecar, so no open guesses which epoch holds.
+#[test]
+fn a_rekey_that_does_not_read_back_leaves_its_epoch_pending() {
+    let dir = scratch_dir("l4-read-back");
+    let file = create_module_file(&dir);
+    let next = KeyEpoch {
+        partition_root_version: 1,
+        generation: 1,
+    };
+    let keying = Switching {
+        first: OTHER_KEY_TEXT,
+        then: key_text([0x33; 32]),
+        lends: std::cell::Cell::new(0),
+    };
+    let mut handle = open::<Write>(&file, &KEY).expect("open");
+    assert!(matches!(handle.rekey(&keying, next), Err(Error::WrongKey)));
+    assert_eq!(keying.lends.get(), 2, "the re-key and its read-back");
+    handle.close().expect("close");
+    assert!(file.pending_epoch_path().exists());
+    assert!(matches!(
+        open::<Read>(&file, &OTHER_KEY),
+        Err(Error::EpochTransitionPending { .. })
+    ));
+}
+
 /// A re-key whose key text is refused leaves the file under its key and epoch, with no pending
 /// sidecar, and one inside a transaction is refused before anything is written.
 #[test]

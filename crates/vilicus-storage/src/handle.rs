@@ -853,10 +853,17 @@ impl Handle<Write> {
     /// sidecar renamed over `<file>.epoch`. The caller holds the file's only connection, this one,
     /// as a re-key does (D151): another connection would still read the pages under the old key.
     ///
+    /// Before the pending sidecar is renamed, the file is read back on a fresh connection keyed
+    /// with `key`, and its `_meta` must hold `epoch`: SQLCipher installs the new key whether or not
+    /// its re-key's commit succeeded, so the call's success alone proves nothing (story 4.3
+    /// review, L4).
+    ///
     /// A failure before the pages are re-encrypted removes the pending sidecar, and the file stays
-    /// under its key and epoch; a failure after it, or a crash anywhere, leaves the pending sidecar,
-    /// and every later open fails with [`Error::EpochTransitionPending`] naming both epochs, which
-    /// the Core resolves by the key that opens the file.
+    /// under its key and epoch; a failure after it, the read-back's included, or a crash anywhere,
+    /// leaves the pending sidecar, and every later open fails with
+    /// [`Error::EpochTransitionPending`] naming both epochs, which the Core resolves by the key
+    /// that opens the file, rewriting `_meta` to that key's epoch when the pages were re-encrypted
+    /// before `_meta` was.
     pub fn rekey(&mut self, key: &dyn FileKeying, epoch: KeyEpoch) -> Result<()> {
         self.require_no_transaction()?;
         checkpoint_until_empty(&self.file, self.connection(), None)?;
@@ -872,10 +879,29 @@ impl Handle<Write> {
         }
         self.update_meta(epoch)?;
         checkpoint_until_empty(&self.file, self.connection(), None)?;
+        self.read_back(key, epoch)?;
         std::fs::rename(&pending, self.file.epoch_path())?;
         file::sync_parent(&self.file.epoch_path())?;
         self.epoch = epoch;
         Ok(())
+    }
+
+    /// Opens the file again on a fresh connection keyed with `key` and checks that its `_meta`
+    /// holds `epoch`: [`Error::WrongKey`] when the key does not open it, [`Error::EpochMismatch`]
+    /// when `_meta` holds another epoch.
+    fn read_back(&self, key: &dyn FileKeying, epoch: KeyEpoch) -> Result<()> {
+        let (connection, _) = connect(&self.file, key, Setup::Maintenance, false)?;
+        let found = meta_epoch(&self.file, &connection);
+        checkpoint_and_close(connection)?;
+        let found = found?;
+        if found == epoch {
+            Ok(())
+        } else {
+            Err(Error::EpochMismatch {
+                sidecar: epoch,
+                file: found,
+            })
+        }
     }
 
     /// Records `label` as a confirmed label of the reviewed vocabulary `vocabulary` in this file,

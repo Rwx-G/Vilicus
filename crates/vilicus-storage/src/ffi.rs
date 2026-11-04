@@ -82,8 +82,11 @@ pub(crate) fn key(connection: &Connection, key_text: &[u8]) -> rusqlite::Result<
 }
 
 /// Re-encrypts every page of the main database under `key_text` with `sqlite3_rekey_v2`, which
-/// `PRAGMA rekey` calls too, in one write transaction of its own: on failure the database is
-/// rolled back and stays under its key. No SQL text holds the key.
+/// `PRAGMA rekey` calls too, in one write transaction of its own. A page that fails to rewrite
+/// rolls the transaction back, but SQLCipher ignores the return of its commit and installs the
+/// new key anyway (`sqlite3_rekey_v2` in the amalgamation), so a failed commit is reported as a
+/// success: the caller reads the file back under the new key before it relies on it
+/// (`Handle::rekey`). No SQL text holds the key.
 #[allow(unsafe_code)] // One FFI call; rusqlite re-keys only through SQL text (AD-4).
 pub(crate) fn rekey(connection: &Connection, key_text: &[u8]) -> rusqlite::Result<()> {
     let length = c_int::try_from(key_text.len()).map_err(|_| {

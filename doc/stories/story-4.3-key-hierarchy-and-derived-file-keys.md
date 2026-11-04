@@ -2,7 +2,7 @@
 title: 'Key hierarchy and derived file keys'
 epic: 4
 story: 3
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [D3, D4, D9, AD-5, AD-4]

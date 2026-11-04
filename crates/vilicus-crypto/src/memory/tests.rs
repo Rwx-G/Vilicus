@@ -8,9 +8,11 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::argon2id::{CheckedCost, derive_into};
 use crate::derive::derive_key;
+use crate::memory::working_memory_wiped;
 use crate::test_support::key_memory;
-use crate::{Kdf, KekDerivation, Label, SymmetricKey, WrapParams, Wrapper};
+use crate::{Argon2idParams, Kdf, KekDerivation, Label, SymmetricKey, WrapParams, Wrapper};
 
 const LABEL: Label = crate::label!("vilicus/v1/test/");
 const PURPOSE: Label = crate::label!("vilicus/v1/wrap/test");
@@ -392,16 +394,25 @@ fn every_key_operation_is_within_the_scrub() {
         .unwrap_key(&kek, PURPOSE, b"context")
         .expect("unwrap");
     let unwrap = canary::take_deepest();
+    let passphrase_kek = derive_into(
+        KeySlot::new().expect("slot"),
+        &small_cost(4),
+        "a passphrase that crosses a block of BLAKE2b in H0, \u{e9}t\u{e9} comme hiver".chars(),
+        b"saltsaltsaltsalt",
+    )
+    .expect("argon2id");
+    let argon2id = canary::take_deepest();
     for (operation, depth) in [
         ("generate", generate),
         ("derive_key", derive),
         ("wrap_key", wrap),
         ("unwrap_key", unwrap),
+        ("argon2id", argon2id),
     ] {
         let depth = depth.unwrap_or_else(|| panic!("{operation} ran no guarded call"));
         assert!(within_the_scrub(depth), "{operation}: {depth} bytes");
     }
-    drop((kek, derived, unwrapped));
+    drop((kek, derived, unwrapped, passphrase_kek));
 }
 
 /// A guarded call inside another is not scrubbed or measured on its own: the outermost one covers
@@ -418,4 +429,151 @@ fn nested_guarded_calls_are_measured_once() {
         .expect("not wiped");
     let depth = canary::take_deepest().expect("a measure");
     assert!(within_the_scrub(depth), "{depth}");
+}
+
+/// An Argon2id cost below the floor, small enough for a test runner's locked memory: 64 KiB in
+/// two passes over `lanes` lanes.
+fn small_cost(lanes: u32) -> CheckedCost {
+    CheckedCost::below_the_floor(Argon2idParams {
+        memory_kib: 64,
+        passes: 2,
+        lanes,
+    })
+    .expect("cost")
+}
+
+/// Story 4.4, review finding F1: the working memory of a derivation is locked, excluded from core
+/// dumps and wiped in fork children, framed by `PROT_NONE` pages as the pool is, and unmapped once
+/// dropped.
+#[test]
+fn the_working_memory_is_locked_advised_and_between_guard_pages() {
+    key_memory();
+    let memory = WorkingMemory::new(64, 4096).expect("working memory");
+    let base = memory.mapping.base.as_ptr().addr();
+    let len = memory.mapping.len;
+    let smaps = fs::read_to_string("/proc/self/smaps").expect("smaps");
+    let mut lines = smaps.lines();
+    let mut flags = None;
+    while let Some(line) = lines.next() {
+        if parse_range(line).is_some_and(|(start, end)| (start..end).contains(&base)) {
+            flags = lines
+                .find_map(|line| line.strip_prefix("VmFlags:"))
+                .map(str::to_string);
+            break;
+        }
+    }
+    let flags = flags.expect("the working memory's mapping");
+    for flag in ["lo", "dd", "wf"] {
+        assert!(
+            flags.split_whitespace().any(|found| found == flag),
+            "{flag} in {flags}"
+        );
+    }
+    let maps = fs::read_to_string("/proc/self/maps").expect("maps");
+    let guard_at = |boundary: fn(usize, usize) -> usize, address: usize| {
+        maps.lines().any(|line| {
+            parse_range(line).is_some_and(|(start, end)| boundary(start, end) == address)
+                && line.split_whitespace().nth(1) == Some("---p")
+        })
+    };
+    assert!(guard_at(|_, end| end, base), "a guard page before it");
+    assert!(
+        guard_at(|start, _| start, base + len),
+        "a guard page after it"
+    );
+    drop(memory);
+    let maps = fs::read_to_string("/proc/self/maps").expect("maps");
+    assert!(
+        !maps.lines().any(|line| {
+            parse_range(line).is_some_and(|(start, end)| (start..end).contains(&base))
+        }),
+        "unmapped once dropped"
+    );
+}
+
+#[test]
+fn a_refused_working_memory_lock_names_limit_memlock() {
+    let refused = KeyMemoryError::WorkingMemoryLock {
+        bytes: 1 << 28,
+        errno: libc::ENOMEM,
+    };
+    for text in [refused.to_string(), CryptoError::from(refused).to_string()] {
+        assert!(text.contains("LimitMEMLOCK"), "{text}");
+    }
+}
+
+/// Story 4.4, the open point of story 4.2: a derivation whose pool is wiped after its guarded call
+/// was admitted, before Argon2id runs, returns `Wiped` and no KEK, and its working memory is
+/// zeroes.
+#[test]
+fn a_derivation_whose_pool_is_wiped_meanwhile_returns_no_kek() {
+    let pool = private_pool();
+    let kek = pool.alloc::<KEY_LEN>(KeySlot::CLASS).expect("slot");
+    test_hooks::set(move |during| {
+        if during.address() == pool.address() {
+            pool.wipe_all(WIPE_WAIT);
+        }
+    });
+    working_memory_wiped::take();
+    let derived = derive_into(kek, &small_cost(1), "passphrase".chars(), b"saltsalt");
+    test_hooks::clear();
+    assert!(
+        matches!(derived, Err(CryptoError::KeyMemory(KeyMemoryError::Wiped))),
+        "no KEK from a wiped pool"
+    );
+    let memories = working_memory_wiped::take();
+    assert_eq!(memories.len(), 1);
+    assert!(memories[0].2, "the working memory is zeroes");
+}
+
+/// What the thread of a long derivation saw: whether it returned `Wiped`, how long it ran, the
+/// slots and the working memories it dropped.
+type LongDerivation = (
+    bool,
+    Duration,
+    Vec<(usize, [u8; KEY_LEN])>,
+    Vec<(usize, usize, bool)>,
+);
+
+/// Story 4.4, the open point of story 4.2: a derivation longer than the wipe's bound keeps running
+/// past it, since the crate has no step at which to stop; the wipe does not wait for it, and the
+/// derivation still returns `Wiped`, never a KEK, its slot and its working memory wiped.
+#[test]
+fn a_derivation_past_the_wipe_bound_returns_no_kek() {
+    let pool = private_pool();
+    let kek = pool.alloc::<KEY_LEN>(KeySlot::CLASS).expect("slot");
+    let long = CheckedCost::below_the_floor(Argon2idParams {
+        memory_kib: 64,
+        passes: 2_000,
+        lanes: 1,
+    })
+    .expect("cost");
+    let (started, start) = mpsc::channel();
+    let derivation = std::thread::spawn(move || -> LongDerivation {
+        crate::argon2id::tests::hooks::set(move || started.send(()).expect("signal"));
+        let began = Instant::now();
+        let derived = derive_into(kek, &long, "passphrase".chars(), b"saltsalt");
+        let took = began.elapsed();
+        crate::argon2id::tests::hooks::clear();
+        let refused = matches!(derived, Err(CryptoError::KeyMemory(KeyMemoryError::Wiped)));
+        (refused, took, wiped::take(), working_memory_wiped::take())
+    });
+    start.recv().expect("the derivation started");
+    let wiping = Instant::now();
+    pool.wipe_all(Duration::from_millis(20));
+    let waited = wiping.elapsed();
+    let (refused, took, slots, memories) = derivation.join().expect("derivation");
+    assert!(refused, "the derivation returned Wiped");
+    assert!(
+        waited < took,
+        "the wipe ({waited:?}) did not wait for the derivation ({took:?})"
+    );
+    assert!(!slots.is_empty(), "the KEK slot was dropped");
+    assert!(
+        slots
+            .iter()
+            .all(|(_, bytes)| bytes.iter().all(|byte| *byte == 0))
+    );
+    assert_eq!(memories.len(), 1);
+    assert!(memories[0].2, "the working memory is zeroes");
 }

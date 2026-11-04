@@ -10,6 +10,12 @@ use std::os::unix::fs::FileExt;
 use vilicus_types::Id;
 
 use super::{PANIC_OBSERVER, POOL, Slot, canary};
+/// Argon2id below the floor through the derivation the Core runs, for the vectors, the
+/// cross-tests of `oracles/argon2id` and the harness's passphrase path (Story 4.4).
+pub use crate::argon2id::derive_below_the_floor as argon2id_below_the_floor;
+/// A thread that awaits an admission of the limiter, and its timer, for the tests that queue
+/// derivations without an async runtime (Story 4.4).
+pub use crate::argon2id::test_runtime::{Sleep, block_on, sleep};
 /// The derivation of the crate, which only the harness calls outside it: it plants and recomputes
 /// derived keys (story 4.3 review, M1).
 pub use crate::derive::derive_key;

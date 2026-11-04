@@ -20,6 +20,9 @@
 //! - [`take_sigterm`] blocks SIGTERM and takes it on a thread of its own, which wipes the pool
 //!   before the orderly shutdown; [`install_panic_hook`] wipes the pool and aborts on a panic
 //!   outside a module handler. [`start_key_memory`] runs the four steps in the Core's order.
+//! - A [`WorkingMemory`] is the locked mapping of one Argon2id derivation, too large for a slot:
+//!   its blocks and its passphrase, framed, advised and locked as the pool is, refused rather than
+//!   left unlocked, and wiped then unmapped when dropped (Story 4.4).
 //!
 //! A wipe first marks the pool wiped, so that no slot is handed out and no guarded call starts,
 //! then waits up to [`WIPE_WAIT`] for the guarded calls and slot wipes in progress to end, then
@@ -44,6 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use argon2::Block;
 use zeroize::Zeroize;
 
 use crate::error::{CryptoError, KeyMemoryError};
@@ -175,6 +179,25 @@ fn is_hardened() -> Result<bool, KeyMemoryError> {
         return Err(KeyMemoryError::Harden { errno: errno() });
     }
     Ok(dumpable == 0 && core.rlim_cur == 0 && core.rlim_max == 0)
+}
+
+/// Fills `out` from the operating system's generator, `getrandom(2)` with no flag, so that it
+/// blocks until the generator is seeded, retrying an interrupted call and a short read: the salt
+/// of each passphrase wrapper (`doc/qa/argon2-review.md`, U6).
+pub(crate) fn os_random(out: &mut [u8]) -> Result<(), CryptoError> {
+    let mut filled = 0;
+    while filled < out.len() {
+        let rest = &mut out[filled..];
+        #[allow(unsafe_code)] // getrandom(2), which std does not expose.
+        // SAFETY: writes at most `rest.len()` bytes into `rest`, which outlives the call.
+        let read = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+        match usize::try_from(read) {
+            Ok(read) => filled += read,
+            Err(_) if errno() == libc::EINTR => {}
+            Err(_) => return Err(CryptoError::Random),
+        }
+    }
+    Ok(())
 }
 
 /// `/proc/self/status`.
@@ -413,31 +436,41 @@ impl Drop for InFlight<'_> {
     }
 }
 
-impl Pool {
-    /// Maps a pool of `classes`, each a slot size and a slot count: whole pages between two
-    /// `PROT_NONE` guard pages, advised `MADV_DONTDUMP` and `MADV_WIPEONFORK`, then locked. On
-    /// any failure the mapping is undone.
-    fn map(classes: [(usize, usize); CLASSES.len()]) -> Result<Self, KeyMemoryError> {
-        #[allow(unsafe_code)] // sysconf, which std does not wrap.
-        // SAFETY: sysconf with a valid name.
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        let page = usize::try_from(page)
-            .ok()
-            .filter(|page| *page > 0)
-            .ok_or(KeyMemoryError::Map { errno: errno() })?;
-        let mut offset = 0;
-        let classes = classes.map(|(slot_len, slots)| {
-            let class = Class {
-                offset,
-                slot_len,
-                in_use: Mutex::new(vec![false; slots]),
-            };
-            offset = (offset + slot_len * slots).next_multiple_of(16);
-            class
-        });
-        let len = offset.div_ceil(page) * page;
-        let total = len + 2 * page;
-        #[allow(unsafe_code)] // mmap of the pool (D131).
+/// The size of a page.
+fn page_size() -> Result<usize, KeyMemoryError> {
+    #[allow(unsafe_code)] // sysconf, which std does not wrap.
+    // SAFETY: sysconf with a valid name.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(page)
+        .ok()
+        .filter(|page| *page > 0)
+        .ok_or(KeyMemoryError::Map { errno: errno() })
+}
+
+/// A mapping of `len` bytes, whole pages, between two `PROT_NONE` guard pages, advised
+/// `MADV_DONTDUMP` and `MADV_WIPEONFORK`, then locked, all zeroes: what the pool and the Argon2id
+/// working memory are made of (D131). On any failure the mapping is undone; a refused `mlock`
+/// gives the error `refused` makes from the bytes asked for and the `errno`.
+struct LockedMapping {
+    /// The first byte after the low guard page.
+    base: NonNull<u8>,
+    /// Bytes between the guard pages.
+    len: usize,
+    /// The size of a page, the size of each guard.
+    page: usize,
+}
+
+impl LockedMapping {
+    fn new(len: usize, refused: fn(usize, i32) -> KeyMemoryError) -> Result<Self, KeyMemoryError> {
+        let page = page_size()?;
+        let len = len
+            .checked_next_multiple_of(page)
+            .filter(|len| *len > 0)
+            .ok_or(KeyMemoryError::Map { errno: 0 })?;
+        let total = len
+            .checked_add(2 * page)
+            .ok_or(KeyMemoryError::Map { errno: 0 })?;
+        #[allow(unsafe_code)] // mmap of locked memory (D131).
         // SAFETY: a new private anonymous mapping with no address hint; the result is compared
         // with MAP_FAILED before any use.
         let mapping = unsafe {
@@ -454,8 +487,8 @@ impl Pool {
             return Err(KeyMemoryError::Map { errno: errno() });
         }
         let undo = |error: KeyMemoryError| {
-            #[allow(unsafe_code)] // munmap of the pool that failed to set up.
-            // SAFETY: `mapping` and `total` are the mapping made above, which holds no key yet.
+            #[allow(unsafe_code)] // munmap of the mapping that failed to set up.
+            // SAFETY: `mapping` and `total` are the mapping made above, which holds no secret yet.
             let _ = unsafe { libc::munmap(mapping, total) };
             error
         };
@@ -475,7 +508,7 @@ impl Pool {
             (libc::MADV_DONTDUMP, "MADV_DONTDUMP"),
             (libc::MADV_WIPEONFORK, "MADV_WIPEONFORK"),
         ] {
-            #[allow(unsafe_code)] // madvise of the pool (D131).
+            #[allow(unsafe_code)] // madvise of locked memory (D131).
             // SAFETY: the pages between the guard pages, inside the mapping made above.
             let advised = unsafe { libc::madvise(base.cast(), len, advice) };
             if advised != 0 {
@@ -485,18 +518,39 @@ impl Pool {
                 }));
             }
         }
-        #[allow(unsafe_code)] // mlock of the pool (D131).
+        #[allow(unsafe_code)] // mlock (D131).
         // SAFETY: the pages between the guard pages, inside the mapping made above.
         let locked = unsafe { libc::mlock(base.cast(), len) };
         if locked != 0 {
-            return Err(undo(KeyMemoryError::Lock {
-                bytes: len,
-                errno: errno(),
-            }));
+            return Err(undo(refused(len, errno())));
         }
         Ok(Self {
             base: NonNull::new(base).ok_or(KeyMemoryError::Map { errno: 0 })?,
             len,
+            page,
+        })
+    }
+}
+
+impl Pool {
+    /// Maps a pool of `classes`, each a slot size and a slot count, in a [`LockedMapping`]. The
+    /// pool's mapping is never unmapped.
+    fn map(classes: [(usize, usize); CLASSES.len()]) -> Result<Self, KeyMemoryError> {
+        let mut offset = 0;
+        let classes = classes.map(|(slot_len, slots)| {
+            let class = Class {
+                offset,
+                slot_len,
+                in_use: Mutex::new(vec![false; slots]),
+            };
+            offset = (offset + slot_len * slots).next_multiple_of(16);
+            class
+        });
+        let mapping =
+            LockedMapping::new(offset, |bytes, errno| KeyMemoryError::Lock { bytes, errno })?;
+        Ok(Self {
+            base: mapping.base,
+            len: mapping.len,
             classes,
             wiped: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
@@ -673,6 +727,112 @@ impl<const N: usize> Drop for Slot<N> {
         wiped::record(self.bytes());
         drop(in_flight);
         self.pool.release(Self::CLASS, self.index);
+    }
+}
+
+// A block of Argon2id lies in the mapping as the crate lays it out: 1 KiB, aligned below a page.
+const _: () = assert!(size_of::<Block>() == Block::SIZE && align_of::<Block>() <= 4096);
+
+/// The working memory of one Argon2id derivation, outside the pool: exactly the blocks the
+/// derivation asks for, then a buffer for the passphrase it derives from, in a locked mapping of
+/// its own (Story 4.4; `doc/qa/argon2-review.md`, finding F1: the blocks are worth the KEK, so
+/// a swapped page of them would skip the derivation's cost). The Core holds at most
+/// `vilicus_types::ARGON2ID_MEMORY_BUDGET_KIB` of it at once, which its `LimitMEMLOCK` covers
+/// beside the pool.
+///
+/// It is wiped with volatile writes, then unmapped, when it is dropped: on success, on error and
+/// while a panic unwinds alike. A refused `mlock` is [`KeyMemoryError::WorkingMemoryLock`], never
+/// answered with unlocked memory.
+pub(crate) struct WorkingMemory {
+    mapping: LockedMapping,
+    blocks: usize,
+    passphrase_len: usize,
+}
+
+impl WorkingMemory {
+    /// A locked mapping of `blocks` blocks followed by `passphrase_len` bytes, all zeroes, in
+    /// whole pages.
+    pub(crate) fn new(blocks: usize, passphrase_len: usize) -> Result<Self, KeyMemoryError> {
+        let bytes = blocks
+            .checked_mul(Block::SIZE)
+            .and_then(|bytes| bytes.checked_add(passphrase_len))
+            .ok_or(KeyMemoryError::Map { errno: 0 })?;
+        let mapping = LockedMapping::new(bytes, |bytes, errno| {
+            KeyMemoryError::WorkingMemoryLock { bytes, errno }
+        })?;
+        Ok(Self {
+            mapping,
+            blocks,
+            passphrase_len,
+        })
+    }
+
+    /// The blocks and the passphrase buffer after them, exactly as long as [`new`](Self::new) was
+    /// given.
+    pub(crate) fn split(&mut self) -> (&mut [Block], &mut [u8]) {
+        let blocks_len = self.blocks * Block::SIZE;
+        let base = self.mapping.base.as_ptr();
+        #[allow(unsafe_code)] // the blocks are the start of the raw mapping.
+        // SAFETY: the mapping is page-aligned, which `Block`'s alignment divides (the assertion
+        // above), holds `blocks_len` bytes at its start (`new`), and is zeroes or what the
+        // derivation wrote, either a valid `Block`, whose only field is an array of integers.
+        // `&mut self` makes the borrow exclusive, and the passphrase buffer below is disjoint.
+        let blocks = unsafe { std::slice::from_raw_parts_mut(base.cast::<Block>(), self.blocks) };
+        #[allow(unsafe_code)] // the passphrase buffer is the rest of the raw mapping.
+        // SAFETY: `blocks_len + passphrase_len` is at most `len` (`new`), so the range lies inside
+        // the mapping, after the blocks and disjoint from them.
+        let passphrase =
+            unsafe { std::slice::from_raw_parts_mut(base.add(blocks_len), self.passphrase_len) };
+        (blocks, passphrase)
+    }
+}
+
+impl Drop for WorkingMemory {
+    fn drop(&mut self) {
+        let base = self.mapping.base.as_ptr();
+        #[allow(unsafe_code)] // the raw mapping, as 64-bit words.
+        // SAFETY: the mapping is page-aligned and a whole number of pages, so it is exactly
+        // `len / 8` aligned words; no borrow of it outlives `&mut self`.
+        let words = unsafe {
+            std::slice::from_raw_parts_mut(base.cast::<u64>(), self.mapping.len / size_of::<u64>())
+        };
+        // Volatile writes of whole words: one per eight bytes of a buffer of hundreds of MiB.
+        words.zeroize();
+        #[cfg(test)]
+        working_memory_wiped::record(words);
+        #[allow(unsafe_code)] // munmap, which also unlocks.
+        // SAFETY: the guard page before `base`, the `len` bytes and the guard page after them are
+        // the mapping `LockedMapping::new` made, and nothing refers to it any more.
+        let _ = unsafe {
+            libc::munmap(
+                base.sub(self.mapping.page).cast(),
+                self.mapping.len + 2 * self.mapping.page,
+            )
+        };
+    }
+}
+
+/// What every dropped [`WorkingMemory`] held once wiped, read by the tests: its address, its
+/// length and whether every byte was zero after the wipe. Recorded per thread.
+#[cfg(test)]
+pub(crate) mod working_memory_wiped {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SEEN: RefCell<Vec<(usize, usize, bool)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(words: &[u64]) {
+        let all_zero = words.iter().all(|word| *word == 0);
+        SEEN.with(|seen| {
+            seen.borrow_mut()
+                .push((words.as_ptr().addr(), size_of_val(words), all_zero));
+        });
+    }
+
+    /// Every working memory dropped on this thread since the last call, oldest first.
+    pub(crate) fn take() -> Vec<(usize, usize, bool)> {
+        SEEN.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
     }
 }
 

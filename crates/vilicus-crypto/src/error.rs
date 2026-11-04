@@ -8,7 +8,8 @@ use core::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CryptoError {
-    /// The CSPRNG of aws-lc-rs failed to fill a key or a nonce.
+    /// The CSPRNG of aws-lc-rs failed to fill a key or a nonce, or the operating system's
+    /// generator a salt.
     Random,
     /// AES-256-GCM refused to seal.
     Seal,
@@ -57,6 +58,34 @@ pub enum CryptoError {
         /// The version of the key it is checked with.
         held: u32,
     },
+    /// An Argon2id cost is below the floor or above the ceiling of D128, or one the `argon2` crate
+    /// refuses: refused before the derivation is queued.
+    Argon2idCost {
+        /// m, in KiB.
+        memory_kib: u32,
+        /// t.
+        passes: u32,
+        /// p.
+        lanes: u32,
+    },
+    /// A wrapper names another KDF than Argon2id where a passphrase KEK is derived.
+    NotArgon2id,
+    /// A passphrase is longer than `vilicus_types::PASSPHRASE_MAX_LEN` bytes, or its NFC form
+    /// longer than the derivation's buffer.
+    PassphraseTooLong,
+    /// A salt is not as long as the derivation requires.
+    SaltLength {
+        /// Its length in bytes.
+        len: usize,
+    },
+    /// The Argon2id limiter admitted no derivation within `vilicus_types::ARGON2ID_QUEUE_WAIT`:
+    /// retryable. The time waited is not part of the error, so it never reaches a client.
+    Argon2idBusy,
+    /// A derivation was given the permit of another cost than its own.
+    PermitMismatch,
+    /// The `argon2` crate refused a derivation: never expected once the cost, the salt and the
+    /// buffer are checked, and never retried.
+    Argon2id,
 }
 
 impl From<KeyMemoryError> for CryptoError {
@@ -106,6 +135,25 @@ impl fmt::Display for CryptoError {
                 formatter,
                 "the MAC states household key version {stated}, the key is version {held}"
             ),
+            Self::Argon2idCost {
+                memory_kib,
+                passes,
+                lanes,
+            } => write!(
+                formatter,
+                "the Argon2id cost m = {memory_kib} KiB, t = {passes}, p = {lanes} is outside the \
+                 floor and ceiling"
+            ),
+            Self::NotArgon2id => formatter.write_str("the wrapper's KDF is not Argon2id"),
+            Self::PassphraseTooLong => formatter.write_str("the passphrase is too long"),
+            Self::SaltLength { len } => write!(formatter, "a salt of {len} bytes is refused"),
+            Self::Argon2idBusy => {
+                formatter.write_str("no Argon2id derivation could start in time: retry later")
+            }
+            Self::PermitMismatch => {
+                formatter.write_str("the derivation permit was admitted for another cost")
+            }
+            Self::Argon2id => formatter.write_str("the Argon2id derivation was refused"),
         }
     }
 }
@@ -149,6 +197,14 @@ pub enum KeyMemoryError {
     /// `mlock` refused the pool: the Core's `LimitMEMLOCK` is below the pool's size.
     Lock {
         /// The pool's size in bytes, what `mlock` was asked to lock.
+        bytes: usize,
+        /// The `errno` of the failed call.
+        errno: i32,
+    },
+    /// `mlock` refused the working memory of an Argon2id derivation: the Core's `LimitMEMLOCK`
+    /// does not cover the key pool and the Argon2id memory budget. The derivation does not run.
+    WorkingMemoryLock {
+        /// The working memory's size in bytes, what `mlock` was asked to lock.
         bytes: usize,
         /// The `errno` of the failed call.
         errno: i32,
@@ -204,6 +260,12 @@ impl fmt::Display for KeyMemoryError {
                 formatter,
                 "mlock refused the key pool of {bytes} bytes (errno {errno}): the Core's \
                  LimitMEMLOCK must cover it, and it does not start on unlocked memory"
+            ),
+            Self::WorkingMemoryLock { bytes, errno } => write!(
+                formatter,
+                "mlock refused {bytes} bytes of Argon2id working memory (errno {errno}): the \
+                 Core's LimitMEMLOCK must cover the key pool and the Argon2id memory budget, and \
+                 no derivation runs on unlocked memory"
             ),
             Self::AlreadyLocked => formatter.write_str("the process already has its key pool"),
             Self::Sigterm { errno } => {

@@ -19,15 +19,18 @@
 //! - **Message authentication**: HMAC-SHA-256 from aws-lc-rs, for the MAC of the `wrappers.db`
 //!   record set ([`WrapperSetKey`]), its tags compared in constant time.
 //! - **Hashing**: SHA-256 from aws-lc-rs ([`sha256`]).
+//! - **Passphrase stretching**: Argon2id from the `argon2` crate, with the `blake2` crate it
+//!   depends on, under the exception to D28 that D129 records, with its `zeroize` feature alone
+//!   ([`derive_passphrase_kek`]): every derivation admitted by one limiter
+//!   ([`admit_derivation`]), its cost within the floor and the ceiling of D128
+//!   ([`CheckedCost`]), its working memory locked and wiped.
 //!
-//! The rest of the suite is not in this crate yet. Argon2id, for the passphrase and backup
-//! secret KEKs, will come from the `argon2` crate, without its `parallel` feature, with the
-//! `blake2` crate it depends on, under the exception to D28 that D129 records. HPKE, which wraps
-//! the household key to member public keys and seals inbox rows, will come from the `hpke`
-//! crate under the exception D61 and D120 record; inside HPKE, the `hpke` crate brings its own
-//! primitive crates for X25519, HKDF and AES-GCM, which aws-lc-rs does not replace there. OPAQUE,
-//! for pairing codes, will come from `opaque-ke` under the exception D123 records. None of
-//! these three crates has a published audit of the version the Core pins: each one rests on
+//! The rest of the suite is not in this crate yet. HPKE, which wraps the household key to member
+//! public keys and seals inbox rows, will come from the `hpke` crate under the exception D61 and
+//! D120 record; inside HPKE, the `hpke` crate brings its own primitive crates for X25519, HKDF
+//! and AES-GCM, which aws-lc-rs does not replace there. OPAQUE, for pairing codes, will come from
+//! `opaque-ke` under the exception D123 records. None of `argon2`, `hpke` and `opaque-ke` has a
+//! published audit of the version the Core pins: each one rests on
 //! the reviews, test vectors and cross-tests its record requires. `ci/check_supply_chain.py`
 //! lists every primitive source with its record (`ci/primitive_sources.toml`) and fails on a
 //! crate of the dependency tree that its publisher classifies as cryptographic and that is not
@@ -149,6 +152,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("vilicus-crypto locks its key memory with Linux system calls; build it on Linux");
 
+mod argon2id;
 mod aws_lc;
 mod derive;
 mod error;
@@ -160,6 +164,10 @@ mod wrapper_set;
 
 use vilicus_types::SHA256_LEN;
 
+pub use argon2id::{
+    Admission, CheckedCost, DerivationPermit, admit_derivation, derive_passphrase_kek,
+    passphrase_salt,
+};
 pub use derive::{Label, LabelError};
 pub use error::{CryptoError, KeyMemoryError, WrapperError};
 pub use hierarchy::{

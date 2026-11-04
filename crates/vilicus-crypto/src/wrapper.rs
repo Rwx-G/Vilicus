@@ -22,8 +22,9 @@ pub const OLDEST_ACCEPTED_FORMAT_VERSION: u16 = 1;
 /// id WebAuthn allows.
 pub const MAX_KEK_REFERENCE_LEN: usize = 1023;
 
-/// The Argon2 version of the suite's Argon2id, 0x13 (RFC 9106).
-pub const ARGON2_VERSION: u32 = 0x13;
+/// The Argon2 version of the suite's Argon2id, 0x13 (RFC 9106), the named constant of
+/// `vilicus-types` (D128).
+pub const ARGON2_VERSION: u32 = vilicus_types::ARGON2ID_VERSION;
 
 const KDF_NONE: u16 = 0x0001;
 const KDF_ARGON2ID: u16 = 0x0002;

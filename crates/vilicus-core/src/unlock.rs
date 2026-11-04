@@ -3,15 +3,15 @@
 //! Core's Argon2id derivations, one request in flight per member, and with a growing delay after
 //! each failed passphrase.
 //!
-//! An unlock runs in four steps, each on the thread it belongs on:
+//! An unlock runs in four steps:
 //!
-//! 1. [`prepare`], on the async worker that received the request: refused without a successful
-//!    first factor ([`UnlockRefused::NoFirstFactor`]), while the member has another request in
-//!    flight or is in their delay, for a passphrase longer than
+//! 1. [`prepare`]: refused without a successful first factor
+//!    ([`UnlockRefused::NoFirstFactor`]), while the member has another request in flight or is in
+//!    their delay, for a passphrase longer than
 //!    [`PASSPHRASE_MAX_LEN`](vilicus_types::PASSPHRASE_MAX_LEN), and for a wrapper header whose
 //!    cost is outside the floor and the ceiling or whose salt is not 16 bytes. Nothing is
 //!    queued and no Argon2id runs before all of these pass.
-//! 2. [`Prepared::admission`], awaited on that worker: the limiter's admission, or a retryable
+//! 2. [`Prepared::admission`], awaited on an async worker: the limiter's admission, or a retryable
 //!    refusal after `ARGON2ID_QUEUE_WAIT`; no thread waits in the queue.
 //! 3. [`Prepared::unlock`], on a thread of the blocking pool: the derivation over the passphrase
 //!    normalised to NFC, then the DEK opened. A wrong passphrase starts the member's delay.

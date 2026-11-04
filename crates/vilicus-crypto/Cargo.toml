@@ -48,3 +48,10 @@ argon2.workspace = true
 [[example]]
 name = "key_memory"
 required-features = ["testing"]
+
+# The unlock benchmark of Story 4.4 (AC3, E12): the version 1 cost through the limiter and the
+# locked working memory, alone and as two simultaneous unlocks, run on the reference host by
+# `bash oracles/argon2id/run.sh --bench`; it awaits its admissions with the `testing` runtime.
+[[example]]
+name = "argon2id_bench"
+required-features = ["testing"]

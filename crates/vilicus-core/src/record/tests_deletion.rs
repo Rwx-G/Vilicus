@@ -13,7 +13,7 @@ use vilicus_types::{HOME_JOURNAL_RETENTION, Id, ModuleName, UNDO_JOURNAL_RETENTI
 
 use super::inspect::{Inspected, Needles, Rng, inspect};
 use super::journal::encode_row;
-use super::tests::{KEY, module, noon, raw_connection, registry_of, scratch_dir};
+use super::tests::{KEY, KEY_BYTES, module, noon, raw_connection, registry_of, scratch_dir};
 use super::tests_call::{ella, own_action};
 use super::{CallResult, Invocation, Stamper, journal_retention, purge_expired_journal, run_call};
 
@@ -251,7 +251,7 @@ fn the_retention_purge_leaves_no_run_of_an_expired_entry() {
         let recent = UtcMillis::from_millis(start.as_millis() + 29 * DAY).expect("in range");
         let workload = write_workload(&handle, module, &mut clock, 12, start, recent);
 
-        let before = inspect(&file, &KEY);
+        let before = inspect(&file, &KEY_BYTES);
         let everywhere = file_and_wal(&before);
         assert_eq!(
             workload.expired.found_in(&everywhere),
@@ -268,7 +268,7 @@ fn the_retention_purge_leaves_no_run_of_an_expired_entry() {
         );
         assert_eq!(purge.checkpoint_attempts, 1);
 
-        let after = inspect(&file, &KEY);
+        let after = inspect(&file, &KEY_BYTES);
         assert_eq!(
             (after.wal_frames, after.wal.len()),
             (0, 0),
@@ -297,7 +297,7 @@ fn the_home_partition_keeps_its_journal_a_day() {
     let now = UtcMillis::from_millis(start.as_millis() + 2 * DAY + 60_000).expect("in range");
     let purge = purge_expired_journal(&handle, now).expect("purge");
     assert_eq!(purge.deleted, 9);
-    let after = inspect(&file, &KEY);
+    let after = inspect(&file, &KEY_BYTES);
     assert_gone(&workload.expired, &after, "home");
     assert_eq!(workload.live.found_in(&after.file), workload.live.len());
 }
@@ -358,7 +358,7 @@ fn the_purge_checkpoint_waits_for_a_reader_and_completes_once_it_ends() {
                 ),
                 "{purge:?}"
             );
-            let still = inspect(&file, &KEY);
+            let still = inspect(&file, &KEY_BYTES);
             assert!(
                 workload.expired.found_in(&still.wal) > 0,
                 "while the reader holds its snapshot, deleted values stay in the WAL"
@@ -369,7 +369,7 @@ fn the_purge_checkpoint_waits_for_a_reader_and_completes_once_it_ends() {
                 .checkpoint_truncate()
                 .expect("the next checkpoint completes");
         }
-        let after = inspect(&file, &KEY);
+        let after = inspect(&file, &KEY_BYTES);
         assert_eq!(after.wal_frames, 0);
         assert_gone(&workload.expired, &after, "after the reader");
         assert_eq!(workload.live.found_in(&after.file), workload.live.len());
@@ -444,7 +444,7 @@ fn shredding_leaves_no_run_of_the_destroyed_key() {
     let kept = needles(made.keys[10..].iter().map(Vec::as_slice));
     let ciphertexts = needles(made.ciphertexts[..10].iter().map(String::as_bytes));
 
-    let before = inspect(&file, &KEY);
+    let before = inspect(&file, &KEY_BYTES);
     assert_eq!(
         destroyed.found_in(&file_and_wal(&before)),
         10,
@@ -457,7 +457,7 @@ fn shredding_leaves_no_run_of_the_destroyed_key() {
             (true, 1)
         );
     }
-    let after = inspect(&file, &KEY);
+    let after = inspect(&file, &KEY_BYTES);
     assert_eq!(after.wal_frames, 0);
     assert_gone(&destroyed, &after, "destroyed keys");
     assert_eq!(kept.found_in(&after.file), 10, "the kept keys remain");
@@ -511,7 +511,7 @@ fn a_journaled_shredding_keeps_the_keys_until_the_journal_rows_go() {
     for record in &made.records[..10] {
         handle.destroy_wrapped_record_key(*record).expect("shred");
     }
-    let kept_in_journal = inspect(&file, &KEY);
+    let kept_in_journal = inspect(&file, &KEY_BYTES);
     assert_eq!(kept_in_journal.wal_frames, 0);
     assert_eq!(
         destroyed.found_in(&kept_in_journal.file),
@@ -525,7 +525,7 @@ fn a_journaled_shredding_keeps_the_keys_until_the_journal_rows_go() {
         purge.deleted, 10,
         "only the rows that imaged the keys are expired"
     );
-    let after = inspect(&file, &KEY);
+    let after = inspect(&file, &KEY_BYTES);
     assert_gone(&destroyed, &after, "once the journal rows go");
     assert_eq!(kept.found_in(&after.file), 10);
 }

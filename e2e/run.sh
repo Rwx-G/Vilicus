@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Replayable end-to-end campaign for the Epic 1 spikes. Runs one phase per spike, strictly one
+# Replayable end-to-end campaign for the Epic 1 spikes, and the key memory regression of story 4.2. Runs one phase per spike, strictly one
 # after the other (never in parallel, so the CPU-sensitive spikes measure on an idle engine),
 # captures each phase's full output, and writes a per-run summary under e2e/results/.
 #
@@ -39,6 +39,7 @@ PHASES=(
   "core-execution|1.15|core-execution|yes|3600"
   "hybrid-kex|1.16|hybrid-kex|no|2400"
   "prf-probe|1.17|prf-probe|no|2400"
+  "key-memory|4.2|-|no|2400"
 )
 
 usage() {
@@ -55,12 +56,14 @@ is_phase() {
   phase_names | grep -qx -- "$1"
 }
 
-# The runner of a phase: the spike's run.sh, or the built-in cargo gates for story 1.1, which
-# has no run.sh of its own.
+# The runner of a phase: the spike's run.sh, the built-in cargo gates for story 1.1, which
+# has no run.sh of its own, or, for story 4.2, the key memory regression of the product build.
 runner_of() {
   local phase="$1" dir="$2"
   if [ "$phase" = "ad36" ]; then
     echo "builtin"
+  elif [ "$phase" = "key-memory" ]; then
+    echo "ci/key_memory.py"
   else
     echo "spikes/$dir/run.sh"
   fi
@@ -274,6 +277,8 @@ for entry in "${PHASES[@]}"; do
       export -f run_ad36 host_path
       export SPIKES_DIR RUST_IMAGE
       timeout --kill-after=60 "$((timeout * TIMEOUT_SCALE))" bash -c run_ad36 2>&1 | tee -a "$log"
+    elif [ "${runner##*.}" = "py" ]; then
+      timeout --kill-after=60 "$((timeout * TIMEOUT_SCALE))" python3 "$REPO_DIR/$runner" 2>&1 | tee -a "$log"
     else
       timeout --kill-after=60 "$((timeout * TIMEOUT_SCALE))" bash "$REPO_DIR/$runner" 2>&1 | tee -a "$log"
     fi

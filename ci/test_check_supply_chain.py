@@ -45,7 +45,10 @@ class Tree:
 
     def metadata(self) -> dict:
         nodes = [{"id": pid, "deps": [{"pkg": dep} for dep in deps]} for pid, deps in self.edges.items()]
-        return {"packages": list(self.packages.values()), "resolve": {"nodes": nodes}}
+        # The workspace members are the packages nothing depends on.
+        targets = {dep for deps in self.edges.values() for dep in deps}
+        members = [pid for pid in self.packages if pid not in targets]
+        return {"packages": list(self.packages.values()), "workspace_members": members, "resolve": {"nodes": nodes}}
 
 
 class BuildTimeCodeTest(unittest.TestCase):
@@ -169,6 +172,248 @@ class DuplicateExceptionTest(unittest.TestCase):
         violations = self.check([], **{"skip-tree": [{"crate": "rand_chacha@0.2.2"}]})
         self.assertEqual(len(violations), 1, violations)
         self.assertIn("skip-tree", violations[0])
+
+
+class PrimitiveSourceTest(unittest.TestCase):
+    """Story 4.1, AC1 and AC6, and its review (findings 3, 4, 6, 7): the primitive sources of D28
+    and their recorded exceptions."""
+
+    # An exception of D28 and its recorded amendment, as recorded_exceptions reads them.
+    EXCEPTIONS = {"D61": {"D61", "D120"}, "D123": {"D123"}}
+
+    def setUp(self) -> None:
+        self.tree = Tree()
+        self.member = self.tree.add("member", "0.0.0")
+        self.features: dict[str, list[str]] = {}
+        self.config = {
+            "source": {
+                "aws-lc-rs": {"record": "the audited library"},
+                "kem": {"version": "1.0.0", "exception": ["D61", "D120"], "brings_primitives": True, "record": "x"},
+                "stretch": {"version": "2.0.0", "exception": ["D123"], "forbidden_features": ["parallel"], "record": "y"},
+            },
+            "not_primitive": {"wiper": {"reason": "wipes memory"}},
+        }
+        self.tree.depend(self.member, self.cryptographic("wiper", "1.0.0"))
+
+    def cryptographic(self, name: str, version: str, *, keyword: bool = False) -> str:
+        package_id = self.tree.add(name, version)
+        if keyword:
+            self.tree.packages[package_id]["keywords"] = ["Crypto"]
+        else:
+            self.tree.packages[package_id]["categories"] = ["cryptography::cryptocurrencies"]
+        return package_id
+
+    def check(self, config: dict | None = None) -> tuple[list[str], list[str]]:
+        metadata = self.tree.metadata()
+        for node in metadata["resolve"]["nodes"]:
+            node["features"] = self.features.get(node["id"], [])
+        return sc.check_primitive_sources(metadata, config or self.config, self.EXCEPTIONS)
+
+    def assert_single(self, *fragments: str) -> None:
+        violations, _ = self.check()
+        self.assertEqual(len(violations), 1, violations)
+        for fragment in fragments:
+            self.assertIn(fragment, violations[0])
+
+    def kem_bringing(self, *names: tuple[str, str]) -> dict[str, str]:
+        kem = self.cryptographic("kem", "1.0.0")
+        self.tree.depend(self.member, kem)
+        brought = {}
+        for name, version in names:
+            brought[name] = self.cryptographic(name, version)
+            self.tree.depend(kem, brought[name])
+        return brought
+
+    def test_listed_sources_and_a_classified_package_reached_only_through_one_that_brings_its_own_pass(self) -> None:
+        for name, version in (("aws-lc-rs", "3.1.0"), ("stretch", "2.0.0")):
+            self.tree.depend(self.member, self.cryptographic(name, version))
+        self.kem_bringing(("curve", "4.0.0"))
+        violations, listing = self.check()
+        self.assertEqual(violations, [])
+        self.assertIn(
+            "primitive source: kem 1.0.0 (exception to D28: D61, D120; in the tree at 1.0.0; "
+            "with the primitive crates it depends on: curve 4.0.0): x",
+            listing,
+        )
+
+    def test_a_classified_package_off_the_list_fails_by_category_or_keyword(self) -> None:
+        for keyword in (False, True):
+            with self.subTest(keyword=keyword):
+                self.setUp()
+                self.tree.depend(self.member, self.cryptographic("homemade", "0.1.0", keyword=keyword))
+                self.assert_single("homemade 0.1.0 is classified as cryptographic and is neither a primitive source")
+
+    def test_a_package_a_source_brings_is_not_covered_where_a_member_reaches_it_another_way(self) -> None:
+        # The review's probe: hpke brings aes-gcm 0.10.3, and a member also depends on it.
+        brought = self.kem_bringing(("cipher", "0.10.3"))
+        self.tree.depend(self.member, brought["cipher"])
+        self.assert_single("cipher 0.10.3 is classified as cryptographic")
+
+    def test_coverage_is_by_package_id_not_by_name(self) -> None:
+        # Another version of a crate the source brings, reached directly: not covered.
+        self.kem_bringing(("cipher", "0.10.3"))
+        self.tree.depend(self.member, self.cryptographic("cipher", "0.11.0"))
+        self.assert_single("cipher 0.11.0 is classified as cryptographic")
+
+    def test_a_package_reached_through_a_non_source_beside_the_source_is_not_covered(self) -> None:
+        brought = self.kem_bringing(("digest", "0.10.7"))
+        helper = self.tree.add("helper", "1.0.0")
+        self.tree.depend(self.member, helper)
+        self.tree.depend(helper, brought["digest"])
+        self.assert_single("digest 0.10.7 is classified as cryptographic")
+
+    def test_argon2s_real_closure_is_covered_by_argon2_and_its_digest_is_not_hpkes(self) -> None:
+        """argon2 0.6.0 with its dependency closure as `spikes/argon2id-params/Cargo.lock` resolves
+        it, without the crates of its `parallel` feature, the crates.io-classified ones marked,
+        beside hpke 0.13.0 bringing digest 0.10.7: each source covers its own versions only."""
+        config = tomllib.loads(sc.PRIMITIVE_SOURCES_FILE.read_text(encoding="utf-8"))
+        tree = Tree()
+        crypto = tree.add("vilicus-crypto", "0.0.0")
+        classified = {"argon2", "base64ct", "blake2", "digest", "block-buffer", "crypto-common", "password-hash",
+                      "ctutils", "cmov", "zeroize", "hpke"}
+        ids: dict[tuple[str, str], str] = {}
+
+        def add(name: str, version: str) -> str:
+            ids[(name, version)] = tree.add(name, version)
+            if name in classified:
+                tree.packages[ids[(name, version)]]["categories"] = ["cryptography", "no-std"]
+            return ids[(name, version)]
+
+        edges = {
+            ("argon2", "0.6.0"): [("base64ct", "1.8.3"), ("blake2", "0.11.0"), ("cpufeatures", "0.3.1"),
+                                  ("password-hash", "0.6.1"), ("zeroize", "1.9.1")],
+            ("blake2", "0.11.0"): [("digest", "0.11.3")],
+            ("digest", "0.11.3"): [("block-buffer", "0.12.1"), ("crypto-common", "0.2.2"), ("ctutils", "0.4.3")],
+            ("block-buffer", "0.12.1"): [("hybrid-array", "0.4.15")],
+            ("crypto-common", "0.2.2"): [("hybrid-array", "0.4.15")],
+            ("hybrid-array", "0.4.15"): [("typenum", "1.20.1")],
+            ("ctutils", "0.4.3"): [("cmov", "0.5.4")],
+            ("password-hash", "0.6.1"): [("phc", "0.6.1")],
+            ("phc", "0.6.1"): [("base64ct", "1.8.3")],
+            ("hpke", "0.13.0"): [("digest", "0.10.7")],
+        }
+        for source, targets in edges.items():
+            source_id = ids.get(source) or add(*source)
+            for target in targets:
+                tree.depend(source_id, ids.get(target) or add(*target))
+        tree.depend(crypto, ids[("argon2", "0.6.0")])
+        tree.depend(crypto, ids[("hpke", "0.13.0")])
+        tree.depend(crypto, ids[("zeroize", "1.9.1")])
+
+        def check(metadata_tree: Tree, features: dict[str, list[str]] | None = None) -> tuple[list[str], list[str]]:
+            metadata = metadata_tree.metadata()
+            for node in metadata["resolve"]["nodes"]:
+                node["features"] = (features or {}).get(node["id"], [])
+            exceptions = sc.recorded_exceptions(sc.DECISIONS_FILE.read_text(encoding="utf-8"))
+            return sc.check_primitive_sources(metadata, config, exceptions)
+
+        violations, listing = check(tree)
+        self.assertEqual(violations, [])
+        argon2 = next(line for line in listing if line.startswith("primitive source: argon2 "))
+        for crate in ("blake2 0.11.0", "digest 0.11.3", "block-buffer 0.12.1", "crypto-common 0.2.2", "password-hash 0.6.1"):
+            self.assertIn(crate, argon2)
+        self.assertNotIn("base64ct", argon2)
+        hpke = next(line for line in listing if line.startswith("primitive source: hpke "))
+        self.assertIn("digest 0.10.7", hpke)
+        self.assertNotIn("digest 0.11.3", hpke)
+
+        # Usage rule U1 of doc/qa/argon2-review.md: `zeroize` alone passes, and each feature the
+        # record forbids fails on its own, whatever else is enabled.
+        argon2_id = ids[("argon2", "0.6.0")]
+        violations, _ = check(tree, {argon2_id: ["zeroize"]})
+        self.assertEqual(violations, [])
+        forbidden = config["source"]["argon2"]["forbidden_features"]
+        self.assertTrue({"parallel", "alloc"} <= set(forbidden), forbidden)
+        for feature in forbidden:
+            with self.subTest(feature=feature):
+                violations, _ = check(tree, {argon2_id: ["zeroize", feature]})
+                self.assertEqual(len(violations), 1, violations)
+                self.assertIn(f"argon2 0.6.0 has the feature `{feature}`", violations[0])
+
+        # The Core reaching argon2's digest directly loses the coverage.
+        tree.depend(crypto, ids[("digest", "0.11.3")])
+        violations, _ = check(tree)
+        self.assertTrue(any("digest 0.11.3 is classified as cryptographic" in v for v in violations), violations)
+        self.assertFalse(any(v.startswith("primitive sources: blake2 ") for v in violations), violations)
+
+    def test_a_source_at_another_version_than_its_record_fails(self) -> None:
+        self.tree.depend(self.member, self.cryptographic("kem", "1.0.1"))
+        self.assert_single("kem 1.0.1 is in the tree, and its record is for 1.0.0")
+
+    def test_a_forbidden_feature_fails(self) -> None:
+        stretch = self.cryptographic("stretch", "2.0.0")
+        self.tree.depend(self.member, stretch)
+        self.features[stretch] = ["alloc", "parallel"]
+        self.assert_single("stretch 2.0.0 has the feature `parallel`, which its record forbids")
+
+    def test_every_exception_must_be_one_of_d28_or_a_recorded_amendment(self) -> None:
+        self.config["source"]["stretch"]["exception"] = ["D123", "D9999"]
+        self.assert_single("stretch names D9999, which is neither an exception of D28's row")
+        self.setUp()
+        self.config["source"]["kem"]["exception"] = ["D99"]
+        violations, _ = self.check()
+        self.assertEqual(len(violations), 2, violations)
+        self.assertIn("kem names D99", violations[0])
+        self.assertIn("D28's exception D61 has no source", violations[1])
+
+    def test_an_amendment_alone_names_its_exception(self) -> None:
+        self.config["source"]["kem"]["exception"] = ["D120"]
+        self.assertEqual(self.check()[0], [])
+
+    def test_only_the_audited_sources_go_without_an_exception(self) -> None:
+        # The review's probe: a new source with no exception at all.
+        self.config["source"]["ring"] = {"record": "faster"}
+        self.assert_single("ring names no exception; only aws-lc-rs, aws-lc-sys are sources without one")
+        self.setUp()
+        self.config["source"]["aws-lc-rs"]["exception"] = ["D61"]
+        self.assert_single("aws-lc-rs is an audited source of D28 and names an exception")
+
+    def test_entries_without_a_record_or_a_reason_fail(self) -> None:
+        self.config["source"]["aws-lc-rs"]["record"] = " "
+        self.assert_single("aws-lc-rs gives no record")
+        self.setUp()
+        self.config["not_primitive"]["wiper"] = {"reason": ""}
+        self.assert_single("not_primitive entry wiper gives no reason")
+
+    def test_d28_exceptions_are_read_from_its_exceptions_clause_only(self) -> None:
+        row = sc.DECISIONS_FILE.read_text(encoding="utf-8").split("\n| D28 |", 1)[1].split("\n", 1)[0]
+        status = row.split("|")[1].strip()
+        self.assertIn("exceptions in ", status)
+        # D153 will amend D28 and D129; the "amended by" clause names no exception.
+        amended = f"{status}, amended by D153"
+        table = f"| D28 | Supply chain controls | {amended} |\n| D129 | argon2 | Accepted, amended by D153 |\n"
+        table += "| D61 | HPKE | Accepted, amended by D74, D107 and D120 |\n| D123 | OPAQUE | Accepted |\n"
+        self.assertEqual(sc.d28_exceptions(table), sc.d28_exceptions(sc.DECISIONS_FILE.read_text(encoding="utf-8")))
+        self.assertNotIn("D153", sc.d28_exceptions(table))
+        self.assertEqual(sc.recorded_exceptions(table)["D129"], {"D129", "D153"})
+        self.assertEqual(sc.recorded_exceptions(table)["D61"], {"D61", "D74", "D107", "D120"})
+
+    def test_the_repository_list_agrees_with_d28_and_names_the_sources_of_its_records(self) -> None:
+        config = tomllib.loads(sc.PRIMITIVE_SOURCES_FILE.read_text(encoding="utf-8"))
+        exceptions = sc.recorded_exceptions(sc.DECISIONS_FILE.read_text(encoding="utf-8"))
+        violations, listing = sc.check_primitive_sources(Tree().metadata(), config, exceptions)
+        self.assertEqual(violations, [])
+        self.assertEqual(len(listing), len(config["source"]))
+        # Written out on purpose: the sources and pins of AC6 of Story 4.1 (D28, D120, D123, D129).
+        for name, pin, exception in (
+            ("aws-lc-rs", "", "no exception"),
+            ("hpke", " 0.13.0", "exception to D28: D61, D120"),
+            ("argon2", " 0.6.0", "exception to D28: D129"),
+            ("opaque-ke", " 4.0.1", "exception to D28: D123"),
+        ):
+            with self.subTest(source=name):
+                self.assertTrue(
+                    any(line.startswith(f"primitive source: {name}{pin} ({exception};") for line in listing),
+                    listing,
+                )
+        for name in ("hpke", "argon2"):
+            line = next(line for line in listing if line.startswith(f"primitive source: {name} "))
+            self.assertIn("with the primitive crates it depends on", line)
+        argon2 = next(line for line in listing if line.startswith("primitive source: argon2 "))
+        for feature in config["source"]["argon2"]["forbidden_features"]:
+            self.assertIn(f"`{feature}`", argon2)
+        self.assertIn("without `parallel`", argon2)
+        self.assertIn("blake2", argon2)
 
 
 class VendorTest(unittest.TestCase):

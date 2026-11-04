@@ -11,7 +11,10 @@ target of a workspace package. The check fails when an artefact
 - names a package that is not a workspace member, or a binary that package does not build;
 - enables the `testing` feature of a workspace crate, which compiles test code such as the write
   path fuzz test of vilicus-core (Story 3.4), from the artefact's package or any crate it links:
-  through a normal or build dependency, or in a feature of its own. A dev-dependency may.
+  through a normal or build dependency, or in a feature of its own. A dev-dependency may, and
+  so may the `testing` feature itself, which only passes test code on to the crates below it
+  (vilicus-core's enables vilicus-crypto's, Story 4.2): it reaches an artefact only when one of
+  the ways above enables it.
 
 With `--contents FILE`, it also reads a listing of the files a release ships, one path per line,
 and fails on any path that names a never-packaged crate or one of its targets. No package exists
@@ -175,7 +178,7 @@ def test_feature_violations(label: str, linked: list[str], members: dict[str, di
                     f"{dep.get('kind') or 'normal'} dependency of {name} (Story 3.4)"
                 )
         for feature, enabled in package.get("features", {}).items():
-            if any(entry == TEST_FEATURE or entry.endswith(f"/{TEST_FEATURE}") for entry in enabled):
+            if feature != TEST_FEATURE and any(entry == TEST_FEATURE or entry.endswith(f"/{TEST_FEATURE}") for entry in enabled):
                 violations.append(
                     f"packaging: {label} links {name}, whose feature {feature} enables {TEST_FEATURE} "
                     f"(Story 3.4)"

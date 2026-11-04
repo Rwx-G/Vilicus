@@ -17,7 +17,7 @@ use vilicus_module_api::{
     Table, VOCABULARY_LABEL_MAX_LEN, VOCABULARY_LABEL_SEPARATORS, Value, ValueError,
     check_vocabulary_label, is_free_text_character, is_vocabulary_label_letter,
 };
-use vilicus_storage::{CORE_PRIVATE_TABLES, Handle, SqlValue, TableKind, Write};
+use vilicus_storage::{CORE_PRIVATE_TABLES, FileKeying, Handle, SqlValue, TableKind, Write};
 use vilicus_types::{Id, RecordLabels, Source, Taint, TextTaint, UtcMillis};
 
 use super::envelope::{EnvelopeRule, data_types_text, rule};
@@ -200,7 +200,7 @@ impl Registry {
     pub fn fuzz_write_paths(
         &self,
         directory: &Path,
-        key: &[u8; 32],
+        key: &dyn FileKeying,
         seed: u64,
         rounds: u32,
     ) -> Result<WriteFuzzReport, WriteFuzzError> {

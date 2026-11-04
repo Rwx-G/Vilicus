@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::file::{self, KeyEpoch, ModuleFile};
-use crate::handle::{self, MigrationTrack, Setup};
+use crate::handle::{self, FileKeying, MigrationTrack, Setup};
 use crate::maintenance;
 
 /// The cold copies kept for one file, at most (AD-23, D84).
@@ -303,7 +303,7 @@ pub struct MigrationCopy {
 /// The live file is only read: on any failure it is as it was, and nothing of the copy is left.
 pub fn copy_for_migration(
     file: &ModuleFile,
-    key: &[u8; 32],
+    key: &dyn FileKeying,
     verified_backup: Option<VerifiedBackup>,
 ) -> Result<MigrationCopy> {
     clear_interrupted_migration(file)?;

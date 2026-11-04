@@ -81,6 +81,7 @@ macro_rules! closed_set {
     };
 }
 
+mod argon2id;
 mod availability;
 mod call_id;
 mod data_type;
@@ -92,6 +93,7 @@ mod id;
 mod label;
 mod limits;
 mod name;
+mod partition;
 mod principal;
 mod rev;
 mod source;
@@ -102,6 +104,14 @@ mod time;
 #[cfg(test)]
 mod test_support;
 
+pub use argon2id::{
+    ARGON2ID_CONCURRENCY_LIMIT, ARGON2ID_FLOOR_OPTIONS, ARGON2ID_MAX_LANES,
+    ARGON2ID_MAX_MEMORY_KIB, ARGON2ID_MAX_WORK_KIB, ARGON2ID_MEMORY_BUDGET_KIB,
+    ARGON2ID_QUEUE_WAIT, ARGON2ID_VERSION, PASSPHRASE_ARGON2ID_LANES,
+    PASSPHRASE_ARGON2ID_MEMORY_KIB, PASSPHRASE_ARGON2ID_PASSES, PASSPHRASE_BACKOFF_BASE,
+    PASSPHRASE_BACKOFF_MAX, PASSPHRASE_KEK_LEN, PASSPHRASE_MAX_LEN, PASSPHRASE_SALT_LEN,
+    argon2id_meets_floor, argon2id_within_ceiling,
+};
 pub use availability::AvailabilityState;
 pub use call_id::{CallId, CallIdError};
 pub use data_type::DataType;
@@ -121,6 +131,7 @@ pub use limits::{
     UNDO_JOURNAL_RETENTION, UNLOCK_WINDOW_DEFAULT, UNLOCK_WINDOW_MAX,
 };
 pub use name::NameError;
+pub use partition::Partition;
 pub use principal::Principal;
 pub use rev::Rev;
 pub use source::{ModuleName, Source};

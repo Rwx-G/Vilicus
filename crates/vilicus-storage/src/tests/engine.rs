@@ -4,7 +4,8 @@
 use rusqlite::Connection;
 
 use super::{
-    KEY, create_module_file, no_such_function, raw_connection, raw_key_pragma, scratch_dir,
+    KEY, KEY_TEXT, create_module_file, no_such_function, raw_connection, raw_key_pragma,
+    scratch_dir,
 };
 use crate::{Migration, Read, Write, open};
 
@@ -17,7 +18,7 @@ const REGENERATE_SCRIPT: &str = include_str!("../../sqlcipher/regenerate.sh");
 fn keyed_in_memory() -> Connection {
     let connection = Connection::open_in_memory().expect("open in memory");
     connection
-        .execute_batch(&raw_key_pragma(&KEY))
+        .execute_batch(&raw_key_pragma(&KEY_TEXT))
         .expect("key");
     connection
 }

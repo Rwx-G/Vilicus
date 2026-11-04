@@ -114,6 +114,55 @@ depends_on = ["proto"]
 # The fuzzing runtime and its dependency (owner approval, Story 2.7), never in a shipped crate.
 exclusive_dependencies = ["libfuzzer-sys", "arbitrary"]
 
+# Cross-test oracles, crates outside the workspace with their own `[workspace]` table and
+# Cargo.lock (D153: an oracle stays outside the workspace, as the hpke-rs oracle does). No
+# workspace crate is one or depends on one; `path` is its directory, and its path dependencies are
+# workspace crates of the nodes `depends_on` lists, or what they reach, none of which is or reaches
+# a shipped crate. Each has its `record`. Read by ci/check_workspace.py.
+#
+# Story 4.4 (D129; doc/qa/argon2-review.md, U8): the Core's Argon2id against phc-winner-argon2,
+# through Debian 13's libargon2, and OpenSSL 3.5's EVP_KDF-ARGON2, at real costs, run by the
+# argon2id job of .github/workflows/ci.yml.
+[oracle.argon2id]
+path = "oracles/argon2id"
+depends_on = ["crypto"]
+record = "cross-tests vilicus-crypto's Argon2id against the reference implementation and OpenSSL (D129)"
+
+# Packages that only the named workspace crates may declare as a dependency, each crate with its
+# reason: `linked` names those that may take the package as a normal or build dependency, `dev`
+# those that may take it as a dev-dependency. Any other declaration fails the check, whatever
+# its kind. Reaching a package through a registry crate is not a declaration and is not checked
+# here: the Gateway reaching aws-lc-rs through rustls is allowed (Story 4.1 review, finding 5).
+#
+# Spine AD-4 and FR-13: every key type is defined in vilicus-crypto and wipes its buffer when
+# dropped, with `zeroize`, the one dependency of the Stack that wipes memory reliably where
+# unsafe code is forbidden; a crate that would define a key type elsewhere fails here instead.
+[restricted.zeroize.linked]
+vilicus-crypto = "defines every key type, each wiped on drop"
+
+# AD-4, AD-18, D28 and D131: key operations run in vilicus-crypto, where their objects live for
+# one operation; a crate that used a primitive source directly could hold a key outside it.
+[restricted.aws-lc-rs.linked]
+vilicus-crypto = "AES-256-GCM, HKDF-SHA-256 and SHA-256 of the suite (AD-18)"
+
+[restricted.aws-lc-rs.dev]
+vilicus-proto = "SHA-256 of the canonical CBOR vector files in its tests (Story 2.5)"
+vilicus-core = "decrypts the pages of a module file for the file inspection of its tests (Story 3.6, E17)"
+
+[restricted.hpke.linked]
+vilicus-crypto = "HPKE of the household key wraps and sealed inbox rows (AD-18, D120)"
+
+[restricted.argon2.linked]
+vilicus-crypto = "Argon2id KEKs, derived into a buffer the Core owns and wipes (AD-18, D128, D129)"
+
+[restricted.opaque-ke.linked]
+vilicus-crypto = "the OPAQUE server of pairing codes, whose server setup holds a private key (AD-4, D123)"
+
+# The passphrase-strength library of D113 is still to choose; zxcvbn is the candidate this rule
+# anticipates. It reads the candidate passphrase, which stays where the derivation is.
+[restricted.zxcvbn.linked]
+vilicus-crypto = "the strength check of a candidate passphrase, which never leaves the derivation (FR-7, D113)"
+
 # D140 and the spine's Consistency Conventions, Unsafe code. The crates in `allowed` are the
 # only ones where unsafe code may appear: each denies unsafe_code at crate level and denies
 # clippy's undocumented_unsafe_blocks, instead of inheriting [workspace.lints]. Every other
@@ -123,3 +172,12 @@ exclusive_dependencies = ["libfuzzer-sys", "arbitrary"]
 [unsafe_code]
 allowed = ["vilicus-crypto", "vilicus-storage", "vilicus-core", "vilicus-gateway"]
 forbid_attribute = ["vilicus-mod-*", "vilicus-plugin-*", "vilicus-double-*"]
+
+# D140 and Story 4.2 AC3: in each crate of `allowed`, unsafe code lives in one module of FFI
+# wrappers that expose safe functions, the file `<module>.rs` and the files under `<module>/`
+# (paths relative to the crate's directory). Outside these modules the `unsafe` keyword appears
+# nowhere in the workspace, tests and examples included; a crate of `allowed` without an entry
+# holds none yet, and names its module here with the story that adds its first block.
+[unsafe_code.modules]
+vilicus-crypto = "src/memory"
+vilicus-storage = "src/ffi"

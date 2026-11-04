@@ -18,8 +18,40 @@ missing_docs = "deny"
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 
+# `testing` compiles `vilicus_crypto::testing`, what the key memory regression harness needs (Story
+# 4.2, AC10): keys planted from a file, the stack canary of the guarded calls, and the fork, signal
+# and fault it inspects. Only test code enables it, through vilicus-core's `testing` feature;
+# ci/check_packaging.py refuses it in the normal or build dependencies of a release artefact.
+[features]
+testing = []
+
 [dependencies]
 vilicus-types.workspace = true
 # The cryptographic library of the spine's Stack (aws-lc-rs with its aws-lc-sys backend, D28),
-# at the version and features the workspace pins; its first runtime use is SHA-256 (Story 3.7).
+# at the version and features the workspace pins; its first runtime use is SHA-256 (Story 3.7),
+# then AES-256-GCM key wrapping and HKDF-SHA-256 derivation (Story 4.1).
 aws-lc-rs.workspace = true
+# Key buffers wiped on drop (spine AD-4, Stack), at the version Cargo.lock already holds.
+zeroize.workspace = true
+# The system calls of the key memory (Story 4.2, D131: mmap, mprotect, madvise, mlock, prctl,
+# setrlimit, the SIGTERM signalfd), at the version and features the workspace pins (owner
+# approval): a new edge to a package Cargo.lock already holds.
+libc.workspace = true
+# Argon2id of the passphrase KEK (Story 4.4, D128, D129), at the version and features the
+# workspace pins (owner approval, usage rule U1 of doc/qa/argon2-review.md). No crate names
+# `blake2`, which it brings.
+argon2.workspace = true
+
+# The key memory regression harness of Story 4.2 (AC2, AC9, AC10), run by ci/key_memory.py in
+# containers given the capabilities and limits each check needs; never a test of `cargo test`,
+# which runs without them.
+[[example]]
+name = "key_memory"
+required-features = ["testing"]
+
+# The unlock benchmark of Story 4.4 (AC3, E12): the version 1 cost through the limiter and the
+# locked working memory, alone and as two simultaneous unlocks, run on the reference host by
+# `bash oracles/argon2id/run.sh --bench`; it awaits its admissions with the `testing` runtime.
+[[example]]
+name = "argon2id_bench"
+required-features = ["testing"]

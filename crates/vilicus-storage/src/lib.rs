@@ -6,8 +6,10 @@
 //! per block and with a `// SAFETY:` comment, all in one private module.
 //!
 //! One SQLCipher file per module per partition, `<module>.<partition>.db`, keyed with its raw
-//! 256-bit key ([`ModuleFile`], [`open`], [`create`]). Every connection is set up before its
-//! authorizer goes on and reads every setting back ([`Settings`]); a [`Handle`] then runs in one
+//! 256-bit key ([`ModuleFile`], [`open`], [`create`]), whose text the caller lends for the call
+//! that keys each connection ([`FileKeying`]): the Core lends it from its locked key pool, and
+//! this crate builds no key text. Every connection is set up before its authorizer goes on and
+//! reads every setting back ([`Settings`]); a [`Handle`] then runs in one
 //! role, [`Read`] (`SELECT` only), [`Write`] (rows only) or [`Migration`] (closed outside
 //! [`Handle::apply_module_migrations`] and [`Handle::apply_core_migrations`], which record each
 //! track's schema version in `_meta` and the frozen hash of each migration in `_migrations`,
@@ -26,6 +28,10 @@
 //! to each consumer, its dead letters and the outbox's retention purge ([`EventIntent`],
 //! [`LinkIntent`], [`Handle::purge_outbox`], AD-10, AD-29), consumed events, and wrapped record
 //! keys, whose destruction shreds a record ([`Handle::destroy_wrapped_record_key`], D132).
+//!
+//! `wrappers.db` ([`WrapperStore`]) holds every member DEK wrapper and member public key, in a
+//! file of its own that no instance key opens, with the counter and the MAC that authenticate its
+//! record set as a whole (gate AD36-1); the caller computes the MAC.
 
 mod authorizer;
 mod core_schema;
@@ -42,6 +48,7 @@ mod migration_copy;
 mod outbox;
 mod record_key;
 mod schema;
+mod wrappers;
 
 pub use authorizer::{CORE_PRIVATE_TABLES, CORE_TABLES};
 pub use core_schema::{CORE_SCHEMA_VERSION, core_migrations};
@@ -50,11 +57,11 @@ pub use event::{
     DeadLetter, DeliveryRow, DeliveryState, EventIntent, EventRow, LinkIntent, LinkRow, OutboxKind,
     OutboxPurge, OutboxRow, OutboxState, PendingRow,
 };
-pub use file::{KeyEpoch, ModuleFile, Partition, read_epoch};
+pub use file::{KeyEpoch, ModuleFile, read_epoch};
 pub use handle::{
-    BUSY_TIMEOUT, CHECKPOINT_ATTEMPTS, CheckpointRetryObserver, Handle, Inspect,
-    JOURNAL_SIZE_LIMIT, Migration, MigrationTrack, Read, Role, RoleKind, Settings, Write, create,
-    open,
+    BUSY_TIMEOUT, CHECKPOINT_ATTEMPTS, CheckpointRetryObserver, FileKeying, Handle, Inspect,
+    JOURNAL_SIZE_LIMIT, KEY_TEXT_LEN, Migration, MigrationTrack, Read, Role, RoleKind, Settings,
+    Write, create, open,
 };
 pub use journal::{AuthorityKind, CallKey, JournalEntry, JournalPurge, JournalRow};
 pub use migration::FrozenMigration;
@@ -63,6 +70,14 @@ pub use record_key::Shredded;
 pub use schema::{
     ColumnInfo, ForeignKey, IndexColumn, IndexInfo, Schema, SchemaObject, TableInfo, TableKind,
 };
+pub use wrappers::{
+    DekWrapperRow, KekKind, PublicKeyKind, PublicKeyRow, RECORD_TABLES, RecordTable, SCHEMA_TABLE,
+    WRAPPERS_FILE_NAME, WRAPPERS_SCHEMA_VERSION, WrapperChange, WrapperSet, WrapperSnapshot,
+    WrapperStore, WrapperWrite, create_wrappers, open_wrappers,
+};
+
+/// The partition a module file belongs to, which names the file (AD-5).
+pub use vilicus_types::Partition;
 
 /// A value in one of SQLite's storage classes, as [`Handle::execute_values`] binds it and
 /// [`Handle::query_values`] reads it back.

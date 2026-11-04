@@ -1,0 +1,26 @@
+[package]
+name = "argon2id-oracle"
+description = "Cross-tests of the Core's Argon2id against phc-winner-argon2 and OpenSSL 3.5 (D129, Story 4.4)"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Outside the Vilicus workspace on purpose (D153, owner decision): an oracle is never a dependency of
+# a workspace crate and keeps its own lockfile. ci/check_workspace.py holds it to [oracle.argon2id]
+# of ci/crate_graph.toml. It builds offline from the workspace's vendor/, with
+# `--config ../../ci/cargo-vendored.toml`, so every crate it compiles is one the workspace vendors.
+[workspace]
+
+[dependencies]
+# The derivation under test, through its `testing` API for costs below the floor (Story 4.4).
+vilicus-crypto = { path = "../../crates/vilicus-crypto", features = ["testing"] }
+vilicus-types = { path = "../../crates/vilicus-types" }
+# NFC of the random passphrases, at the version and features the workspace pins (D130).
+unicode-normalization = { version = "=0.1.25", default-features = false }
+
+# The reference implementation is linked from Debian 13's libargon2-dev through the FFI of
+# src/reference.rs, and OpenSSL is run as its `openssl kdf` command: neither adds a crate.
+
+[profile.release]
+panic = "unwind"

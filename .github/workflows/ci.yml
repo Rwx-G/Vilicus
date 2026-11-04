@@ -95,6 +95,37 @@ jobs:
       - name: Test
         run: cargo test --workspace --frozen --config ci/cargo-vendored.toml
 
+  # Story 4.2 (AC2, AC6, AC7, AC9, AC10; D131): the key memory regression harness of
+  # crates/vilicus-crypto/examples/key_memory on the release build, each group in a container of
+  # the pinned image with only the capabilities and limits it needs (the docstring of the script
+  # lists them). The memory scans need CAP_SYS_PTRACE, which build-and-test does not have.
+  key-memory:
+    name: Key memory regression (D131, E16)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the key memory regression in containers
+        run: python3 ci/key_memory.py
+
+  # Story 4.4 (D128, D129; doc/qa/argon2-review.md, U8): the Argon2id checks that lock more memory
+  # than build-and-test's RLIMIT_MEMLOCK allows, in a container of the pinned image whose limit is
+  # unlimited: the workspace tests marked ignored for that reason, then the oracle crate of
+  # oracles/argon2id, outside the workspace (D153), which cross-tests the Core's Argon2id against
+  # phc-winner-argon2 (Debian 13's libargon2-dev) and OpenSSL 3.5's EVP_KDF-ARGON2.
+  argon2id:
+    name: Argon2id at real costs and its two oracles (D128, D129)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the real-cost tests and the cross-tests in a container
+        run: bash oracles/argon2id/run.sh
+
   deny:
     name: Licences, duplicates, advisories and sources (cargo deny)
     runs-on: ubuntu-24.04

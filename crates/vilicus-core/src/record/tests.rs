@@ -41,8 +41,11 @@ fn update(
     super::update(handle, module, table, id, envelope, fields, &[])
 }
 
-/// Test key only; the Core derives one key per file.
-pub(crate) const KEY: [u8; 32] = [0x4d; 32];
+/// The bytes of the test key only; the Core derives one key per file.
+pub(crate) const KEY_BYTES: [u8; 32] = [0x4d; 32];
+
+/// SQLCipher's raw key text of [`KEY_BYTES`], which keys the test files.
+pub(crate) const KEY: crate::testing::TestKeyText = crate::testing::sqlcipher_key_text(KEY_BYTES);
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
@@ -322,9 +325,9 @@ pub(super) fn content(handle: &Handle<Write>) -> Vec<Vec<Vec<SqlValue>>> {
 pub(crate) fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
     let connection =
         rusqlite::Connection::open(file.path()).expect("open without the storage layer");
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    let text = std::str::from_utf8(&KEY.0).expect("a key text is ASCII");
     connection
-        .execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
+        .execute_batch(&format!("PRAGMA key = \"{text}\";"))
         .expect("key");
     connection
 }

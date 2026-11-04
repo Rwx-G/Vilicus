@@ -33,6 +33,11 @@ version = "1.5.0"
 criteria = "safe-to-run"
 notes = "Not reviewed in this project (Story 2.7), exempted at this exact version only. Fuzzing tree of vilicus-fuzz (owner approval), never in a release artefact; required by libfuzzer-sys. cargo vet suggests `cargo vet diff arbitrary 1.4.2 1.5.0` (12 files changed, 101 insertions(+), 94 deletions(-))."
 
+[[exemptions.argon2]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. The primitive source of D129 itself: a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; the Argon2id of the passphrase KEK (D128, D129), reviewed in doc/qa/argon2-review.md, which no audit replaces; required by vilicus-crypto. cargo vet suggests `cargo vet inspect argon2 0.6.0` (4022 lines)."
+
 [[exemptions.autocfg]]
 version = "1.5.1"
 criteria = "safe-to-deploy"
@@ -48,10 +53,25 @@ version = "0.46.0"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. In the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; also in the dev-dependency tree of vilicus-proto and vilicus-core; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
 
+[[exemptions.base64ct]]
+version = "1.8.3"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by argon2. cargo vet suggests `cargo vet inspect base64ct 1.8.3` (3651 lines)."
+
 [[exemptions.bitflags]]
 version = "2.13.2"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.40.2 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff bitflags 2.11.1 2.13.2` (12 files changed, 641 insertions(+), 92 deletions(-))."
+
+[[exemptions.blake2]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by argon2. cargo vet suggests `cargo vet inspect blake2 0.11.0` (1561 lines)."
+
+[[exemptions.block-buffer]]
+version = "0.12.1"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by digest. cargo vet suggests `cargo vet diff block-buffer 0.10.4 0.12.1` (9 files changed, 964 insertions(+), 281 deletions(-))."
 
 [[exemptions.cc]]
 version = "1.9.0"
@@ -73,10 +93,35 @@ version = "0.1.58"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. A build dependency of aws-lc-sys, in the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; aws-lc-sys does not run cmake on Linux (ci/build_time_code.toml); required by aws-lc-sys. cargo vet suggests `cargo vet diff cmake 0.1.50 0.1.58` (7 files changed, 458 insertions(+), 144 deletions(-))."
 
+[[exemptions.cmov]]
+version = "0.5.4"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by ctutils. cargo vet suggests `cargo vet inspect cmov 0.5.4` (2904 lines)."
+
+[[exemptions.cpufeatures]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by argon2 on x86 and aarch64 targets. cargo vet suggest gives no command for it; `cargo vet inspect cpufeatures 0.3.1` is the audit to do."
+
+[[exemptions.crypto-common]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by digest. cargo vet suggests `cargo vet diff crypto-common 0.1.6 0.2.2` (8 files changed, 791 insertions(+), 137 deletions(-))."
+
+[[exemptions.ctutils]]
+version = "0.4.8"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by digest; 0.4.4 or later, past RUSTSEC-2026-0385 (U9). cargo vet suggests `cargo vet inspect ctutils 0.4.8` (4855 lines)."
+
 [[exemptions.dcbor]]
 version = "0.25.2"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. The canonical CBOR crate of D130 (spine Stack), a normal dependency of vilicus-proto. cargo vet suggests `cargo vet inspect dcbor 0.25.2` (20494 lines)."
+
+[[exemptions.digest]]
+version = "0.11.3"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by blake2. cargo vet suggests `cargo vet inspect digest 0.11.3` (3747 lines)."
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.15"
@@ -107,6 +152,11 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 version = "2.7.1"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by dcbor. cargo vet suggests `cargo vet diff half 2.5.0 2.7.1` (15 files changed, 453 insertions(+), 137 deletions(-))."
+
+[[exemptions.hybrid-array]]
+version = "0.4.15"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by block-buffer and crypto-common. cargo vet suggests `cargo vet inspect hybrid-array 0.4.15` (4817 lines)."
 
 [[exemptions.iana-time-zone]]
 version = "0.1.65"
@@ -242,6 +292,11 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 version = "1.13.3"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by unicode-normalization. cargo vet suggests `cargo vet diff tinyvec 1.9.0 1.13.3` (25 files changed, 1421 insertions(+), 9784 deletions(-))."
+
+[[exemptions.typenum]]
+version = "1.20.1"
+criteria = "safe-to-deploy"
+notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by hybrid-array. cargo vet suggests `cargo vet inspect typenum 1.20.1` (41159 lines)."
 
 [[exemptions.unicode-ident]]
 version = "1.0.27"

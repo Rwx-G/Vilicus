@@ -7,31 +7,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use vilicus_types::{Id, ModuleName};
+use vilicus_types::{ModuleName, Partition};
 
 use crate::error::{Error, Result};
-
-/// The partition a module file belongs to (AD-5, AD-37).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Partition {
-    /// The household partition.
-    Household,
-    /// The home partition, one per instance.
-    Home,
-    /// A member's personal partition, named by the member's id.
-    Member(Id),
-}
-
-impl fmt::Display for Partition {
-    /// The partition as it appears in a file name: `household`, `home` or the member id's text.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Household => formatter.write_str("household"),
-            Self::Home => formatter.write_str("home"),
-            Self::Member(id) => write!(formatter, "{id}"),
-        }
-    }
-}
 
 /// One module file: the module and partition it belongs to and the directory that holds it.
 /// Module names carry no dot and partition labels no dot either, so a file name names one pair.
@@ -231,6 +209,8 @@ pub(crate) fn sync_parent(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use vilicus_types::Id;
+
     use super::*;
 
     fn member() -> Id {

@@ -17,7 +17,7 @@ use super::schema::{self, SchemaError, Snapshot};
 use super::{FileError, Registry, RegistryError, frozen};
 
 /// Test key only; the Core derives one key per file.
-const KEY: [u8; 32] = [0x3c; 32];
+const KEY: crate::testing::TestKeyText = crate::testing::sqlcipher_key_text([0x3c; 32]);
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
@@ -529,6 +529,37 @@ fn migrated_sample(label: &str) -> ModuleFile {
     ModuleFile::new(dir, ModuleName::from_static("sample"), Partition::Household)
 }
 
+/// Story 4.3 review, H1, for module files: a trigger planted in a registered file by a writer that
+/// holds the file's key (no other can write a SQLCipher page that opens) is an undeclared object,
+/// refused at the next open on a read or a write handle, before any call of module code or any
+/// Core write runs on the file.
+#[test]
+fn a_trigger_planted_in_a_module_file_is_refused_at_its_next_open() {
+    let file = migrated_sample("planted-trigger");
+    let registry = registry_of(vec![sample()]);
+    registry
+        .open::<Write>(&file, &KEY)
+        .expect("conforming")
+        .close()
+        .expect("close");
+    raw_connection(&file)
+        .execute_batch("CREATE TRIGGER planted AFTER INSERT ON items BEGIN DELETE FROM items; END;")
+        .expect("plant a trigger with the file's key");
+    for outcome in [
+        registry.open::<Read>(&file, &KEY).map(drop),
+        registry.open::<Write>(&file, &KEY).map(drop),
+    ] {
+        assert!(
+            matches!(
+                &outcome,
+                Err(FileError::Schema(SchemaError::UndeclaredObject { kind, name }))
+                    if kind == "trigger" && name == "planted"
+            ),
+            "{outcome:?}"
+        );
+    }
+}
+
 /// AC5 at open: the Core checks every file it opens, on a read or a write handle, and refuses
 /// one whose schema differs from the declaration with a typed error.
 #[test]
@@ -1018,9 +1049,9 @@ fn sample_declaring(fts5: Fts5Table) -> ModuleDeclaration {
 fn raw_connection(file: &ModuleFile) -> rusqlite::Connection {
     let connection =
         rusqlite::Connection::open(file.path()).expect("open without the storage layer");
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    let text = std::str::from_utf8(&KEY.0).expect("a key text is ASCII");
     connection
-        .execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
+        .execute_batch(&format!("PRAGMA key = \"{text}\";"))
         .expect("key");
     connection
 }

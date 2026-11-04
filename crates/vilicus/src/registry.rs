@@ -66,7 +66,12 @@ mod tests {
             std::env::temp_dir().join(format!("vilicus-shipped-fuzz-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("create the scratch directory");
         let report = REGISTRY
-            .fuzz_write_paths(&directory, &[0x6b; 32], 0x5419_7ed0, 256)
+            .fuzz_write_paths(
+                &directory,
+                &vilicus_core::testing::sqlcipher_key_text([0x6b; 32]),
+                0x5419_7ed0,
+                256,
+            )
             .unwrap_or_else(|error| panic!("{error}"));
         let tables: usize = REGISTRY
             .modules()

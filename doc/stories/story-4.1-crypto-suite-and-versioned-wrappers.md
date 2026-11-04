@@ -2,7 +2,7 @@
 title: 'Crypto suite and versioned wrappers'
 epic: 4
 story: 1
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [AD-18, AD-4, D28, FR-13, NFR-7, D120, D123, D129, D131]

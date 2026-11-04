@@ -15,7 +15,9 @@
 //! inside the fault boundary of AD-9, [`handlers`] binds each module's code to its declaration,
 //! [`api`] serves the typed APIs modules read each other through (AD-5), and [`startup`] brings a
 //! partition's files up once its keys are derived: re-key, migration, then outbox delivery
-//! (FR-11).
+//! (FR-11). [`keys`] derives each module file's key from its partition root at the file's key
+//! epoch, lends its key text to the storage layer for each connection, and authenticates
+//! `wrappers.db` as a whole (AD-4, AD-5).
 
 // AD-9, D131: a module's panic is caught at the boundary of its call and never unwinds into the
 // Core, which needs unwinding; a build that aborts on panic would take the Core down with any
@@ -29,6 +31,7 @@ pub mod availability;
 pub mod boundary;
 pub mod bus;
 pub mod handlers;
+pub mod keys;
 pub mod record;
 pub mod registry;
 pub mod startup;

@@ -28,6 +28,10 @@
 //! to each consumer, its dead letters and the outbox's retention purge ([`EventIntent`],
 //! [`LinkIntent`], [`Handle::purge_outbox`], AD-10, AD-29), consumed events, and wrapped record
 //! keys, whose destruction shreds a record ([`Handle::destroy_wrapped_record_key`], D132).
+//!
+//! `wrappers.db` ([`WrapperStore`]) holds every member DEK wrapper and member public key, in a
+//! file of its own that no instance key opens, with the counter and the MAC that authenticate its
+//! record set as a whole (gate AD36-1); the caller computes the MAC.
 
 mod authorizer;
 mod core_schema;
@@ -44,6 +48,7 @@ mod migration_copy;
 mod outbox;
 mod record_key;
 mod schema;
+mod wrappers;
 
 pub use authorizer::{CORE_PRIVATE_TABLES, CORE_TABLES};
 pub use core_schema::{CORE_SCHEMA_VERSION, core_migrations};
@@ -64,6 +69,11 @@ pub use outbox::{EffectIntent, EffectRow, EffectState};
 pub use record_key::Shredded;
 pub use schema::{
     ColumnInfo, ForeignKey, IndexColumn, IndexInfo, Schema, SchemaObject, TableInfo, TableKind,
+};
+pub use wrappers::{
+    DekWrapperRow, KekKind, PublicKeyKind, PublicKeyRow, RECORD_TABLES, WRAPPERS_FILE_NAME,
+    WRAPPERS_SCHEMA_VERSION, WrapperChange, WrapperSet, WrapperStore, create_wrappers,
+    open_wrappers,
 };
 
 /// The partition a module file belongs to, which names the file (AD-5).

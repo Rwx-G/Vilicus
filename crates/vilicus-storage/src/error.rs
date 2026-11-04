@@ -208,6 +208,17 @@ pub enum Error {
     },
     /// The mark of a failed migration beside a file is not in the form the storage layer writes.
     MalformedFailureMark(PathBuf),
+    /// The file at this path is not the SQLite database `wrappers.db` must be.
+    NotAWrapperFile(PathBuf),
+    /// `wrappers.db` states another schema version than this Core's, or none.
+    WrappersSchemaVersion {
+        /// The version its `_meta` states, if any.
+        found: Option<i64>,
+    },
+    /// A row of `wrappers.db` is outside the shape its schema and its types give it.
+    MalformedWrapperRow,
+    /// A write to `wrappers.db` removes a record that is not there.
+    WrapperRecordMissing,
     /// Any other SQLite failure.
     Sqlite(rusqlite::Error),
     /// A file system failure on the file, its sidecar or its directory.
@@ -420,6 +431,19 @@ impl fmt::Display for Error {
                     path.display()
                 )
             }
+            Self::NotAWrapperFile(path) => {
+                write!(formatter, "{} is not a wrapper file", path.display())
+            }
+            Self::WrappersSchemaVersion { found } => {
+                write!(
+                    formatter,
+                    "wrappers.db schema version {found:?} is not this Core's"
+                )
+            }
+            Self::MalformedWrapperRow => formatter.write_str("a row of wrappers.db is malformed"),
+            Self::WrapperRecordMissing => {
+                formatter.write_str("the wrappers.db record to remove is not there")
+            }
             Self::Sqlite(error) => write!(formatter, "SQLite: {}", Summary(error)),
             Self::Io(error) => write!(formatter, "file system: {error}"),
         }
@@ -467,6 +491,10 @@ impl fmt::Debug for Error {
             Self::CopyRaced(_) => "CopyRaced",
             Self::ColdCopiesFull { .. } => "ColdCopiesFull",
             Self::MalformedFailureMark(_) => "MalformedFailureMark",
+            Self::NotAWrapperFile(_) => "NotAWrapperFile",
+            Self::WrappersSchemaVersion { .. } => "WrappersSchemaVersion",
+            Self::MalformedWrapperRow => "MalformedWrapperRow",
+            Self::WrapperRecordMissing => "WrapperRecordMissing",
             Self::Sqlite(_) => "Sqlite",
             Self::Io(_) => "Io",
         };

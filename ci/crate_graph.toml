@@ -114,6 +114,20 @@ depends_on = ["proto"]
 # The fuzzing runtime and its dependency (owner approval, Story 2.7), never in a shipped crate.
 exclusive_dependencies = ["libfuzzer-sys", "arbitrary"]
 
+# Cross-test oracles, crates outside the workspace with their own `[workspace]` table and
+# Cargo.lock (D153: an oracle stays outside the workspace, as the hpke-rs oracle does). No
+# workspace crate is one or depends on one; `path` is its directory, and its path dependencies are
+# workspace crates of the nodes `depends_on` lists, or what they reach, none of which is or reaches
+# a shipped crate. Each has its `record`. Read by ci/check_workspace.py.
+#
+# Story 4.4 (D129; doc/qa/argon2-review.md, U8): the Core's Argon2id against phc-winner-argon2,
+# through Debian 13's libargon2, and OpenSSL 3.5's EVP_KDF-ARGON2, at real costs, run by the
+# argon2id job of .github/workflows/ci.yml.
+[oracle.argon2id]
+path = "oracles/argon2id"
+depends_on = ["crypto"]
+record = "cross-tests vilicus-crypto's Argon2id against the reference implementation and OpenSSL (D129)"
+
 # Packages that only the named workspace crates may declare as a dependency, each crate with its
 # reason: `linked` names those that may take the package as a normal or build dependency, `dev`
 # those that may take it as a dev-dependency. Any other declaration fails the check, whatever

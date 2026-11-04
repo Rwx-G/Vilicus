@@ -43,6 +43,11 @@
   a crate fails too.
 - Vendored sources (D28): ci/cargo-vendored.toml, the configuration CI passes to every workspace
   build with `--config`, exists and holds nothing but the replacement of crates.io by vendor/.
+- Oracles (D153, Story 4.4): a cross-test oracle of an `[oracle.*]` table of ci/crate_graph.toml
+  is a crate outside the workspace, with its own `[workspace]` table and Cargo.lock; no workspace
+  crate is it or depends on it, it takes nothing from git, and its path dependencies are workspace
+  crates of the nodes its table lists, or what they reach, none of which is or reaches a shipped
+  crate.
 
 Standard library only, Python 3.11 or later. Exits 1 and prints every violation when a check fails.
 """
@@ -888,6 +893,85 @@ def run_checks(
     ]
 
 
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _manifest_dependencies(manifest: dict) -> list[tuple[str, object]]:
+    """Every dependency a manifest declares, by name, in its own and its target-specific tables."""
+    tables = [manifest.get(table, {}) for table in DEPENDENCY_TABLES]
+    for target in manifest.get("target", {}).values():
+        tables.extend(target.get(table, {}) for table in DEPENDENCY_TABLES)
+    return [(name, spec) for table in tables for name, spec in table.items()]
+
+
+def check_oracles(config: dict, metadata: dict) -> list[str]:
+    """Cross-test oracles outside the workspace ([oracle.*] of ci/crate_graph.toml; D153, Story
+    4.4): each is its own workspace with its own lockfile, no workspace crate is it or depends on
+    it, and its path dependencies are workspace crates of the nodes it lists, none of which is or
+    reaches a shipped crate."""
+    violations: list[str] = []
+    workspace_root = Path(metadata["workspace_root"])
+    graph = Graph.from_config(config)
+    crates = load_workspace(metadata)
+    by_name = {crate.name: crate for crate in crates}
+    by_directory = {(workspace_root / crate.directory).resolve(): crate for crate in crates}
+    shipped = set()
+    for crate in crates:
+        node = graph.classify(crate.name, crate.directory)
+        if node is not None and node.shipped:
+            shipped.add(crate.name)
+    for oracle_id, table in sorted(config.get("oracle", {}).items()):
+        where = f"[oracle.{oracle_id}]"
+        if not str(table.get("record", "")).strip():
+            violations.append(f"oracle: {where} gives no record")
+        unknown = [node for node in table.get("depends_on", []) if node not in graph.nodes]
+        if unknown:
+            violations.append(f"oracle: {where} names unknown node(s) {', '.join(unknown)}")
+        directory = (workspace_root / table.get("path", "")).resolve()
+        manifest_path = directory / "Cargo.toml"
+        if not table.get("path") or not manifest_path.is_file():
+            violations.append(f"oracle: {where} names no crate directory with a Cargo.toml ({table.get('path')})")
+            continue
+        manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest.get("workspace"), dict):
+            violations.append(f"oracle: {where} has no [workspace] table of its own: it would join the Vilicus workspace")
+        if not (directory / "Cargo.lock").is_file():
+            violations.append(f"oracle: {where} has no Cargo.lock of its own")
+        for package in metadata["packages"]:
+            if package["id"] not in metadata["workspace_members"]:
+                continue
+            if Path(package["manifest_path"]).resolve().is_relative_to(directory):
+                violations.append(f"oracle: {package['name']} under {where} is a workspace member")
+            for dep in package["dependencies"]:
+                if dep.get("path") is not None and Path(dep["path"]).resolve().is_relative_to(directory):
+                    violations.append(f"oracle: {package['name']} depends on {dep['name']} of {where}; no crate may")
+        allowed = set(table.get("depends_on", []))
+        for node in table.get("depends_on", []):
+            if node in graph.nodes:
+                allowed |= graph.reachable(node)
+        for name, spec in _manifest_dependencies(manifest):
+            if not isinstance(spec, dict):
+                continue
+            if "git" in spec:
+                violations.append(f"oracle: {where} takes {name} from git")
+            if "path" not in spec:
+                continue
+            crate = by_directory.get((directory / spec["path"]).resolve())
+            if crate is None:
+                violations.append(f"oracle: {where} depends on {name} by a path that is not a workspace crate")
+                continue
+            node = graph.classify(crate.name, crate.directory)
+            if node is None or node.id not in allowed:
+                violations.append(
+                    f"oracle: {where} depends on {crate.name}, outside the nodes it lists "
+                    f"({', '.join(table.get('depends_on', [])) or 'none'})"
+                )
+            reached = {name for name, _ in linked_closure(crate, by_name)} | {crate.name}
+            for reached_name in sorted(reached & shipped):
+                violations.append(f"oracle: {where} reaches the shipped crate {reached_name} through {crate.name}")
+    return violations
+
+
 def repository_files(root: Path) -> list[Path]:
     """Tracked files and untracked files not ignored by git, so a new file is checked before its
     commit; without git, every file of the tree outside build output and the git directory."""
@@ -928,7 +1012,10 @@ def main(argv: list[str] | None = None) -> int:
     root_manifest = tomllib.loads((workspace_root / "Cargo.toml").read_text(encoding="utf-8"))
     toolchain_channel = tomllib.loads(TOOLCHAIN_FILE.read_text(encoding="utf-8"))["toolchain"]["channel"]
 
-    violations = run_checks(metadata, config, root_manifest, toolchain_channel, repository_files(workspace_root))
+    violations = [
+        *run_checks(metadata, config, root_manifest, toolchain_channel, repository_files(workspace_root)),
+        *check_oracles(config, metadata),
+    ]
     for violation in violations:
         print(violation)
     if violations:

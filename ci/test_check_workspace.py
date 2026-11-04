@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import fnmatch
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -502,6 +503,121 @@ class PathOnlyTest(WorkspaceTestCase):
                         name = node.pattern.replace("*", "other")
                         self.workspace.add(name, f"{path}/{name}")
                     self.assertEqual(self.workspace.check(), [])
+
+
+class OracleTest(WorkspaceTestCase):
+    """Story 4.4, D153: a cross-test oracle is a crate outside the workspace, with its own
+    workspace and lockfile, that no workspace crate is or depends on, and whose path dependencies
+    are crates of the nodes its table lists, none of them reaching a shipped crate."""
+
+    def table(self) -> tuple[str, dict]:
+        tables = CONFIG.get("oracle", {})
+        self.assertTrue(tables, "ci/crate_graph.toml names the Argon2id oracle")
+        return next(iter(sorted(tables.items())))
+
+    def oracle(self, dependencies: str, *, workspace: bool = True, lockfile: bool = True) -> Path:
+        """The table's oracle directory in the synthetic workspace, with `dependencies` as the body
+        of its [dependencies] table."""
+        _, table = self.table()
+        directory = self.workspace.root / table["path"]
+        directory.mkdir(parents=True, exist_ok=True)
+        manifest = '[package]\nname = "an-oracle"\n'
+        if workspace:
+            manifest += "\n[workspace]\n"
+        manifest += f"\n[dependencies]\n{dependencies}\n"
+        (directory / "Cargo.toml").write_text(manifest, encoding="utf-8")
+        if lockfile:
+            (directory / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+        return directory
+
+    def path_to(self, directory: Path, crate: str) -> str:
+        target = Path(self.workspace.packages[crate]["manifest_path"]).parent
+        return Path(os.path.relpath(target, directory)).as_posix()
+
+    def check(self) -> list[str]:
+        return cw.check_oracles(CONFIG, self.workspace.metadata())
+
+    def listed_crates(self, names: dict[str, str]) -> list[str]:
+        _, table = self.table()
+        return [names[node] for node in table["depends_on"]]
+
+    def test_an_oracle_of_its_listed_nodes_passes(self) -> None:
+        names = self.full_graph()
+        directory = self.oracle("")
+        lines = [
+            f'{crate} = {{ path = "{self.path_to(directory, crate)}", features = ["testing"] }}'
+            for crate in self.listed_crates(names)
+        ]
+        lines.append(f'vilicus-types = {{ path = "{self.path_to(directory, names["types"])}" }}')
+        lines.append('unicode-normalization = "=0.1.25"')
+        self.oracle("\n".join(lines))
+        self.assertEqual(self.check(), [])
+
+    def test_an_oracle_depending_on_the_shipped_crate_fails(self) -> None:
+        names = self.full_graph()
+        shipped = next(node.id for node in GRAPH.nodes.values() if node.shipped)
+        directory = self.oracle("")
+        self.oracle(f'vilicus = {{ path = "{self.path_to(directory, names[shipped])}" }}')
+        violations = self.check()
+        self.assertTrue(any("reaches the shipped crate" in v for v in violations), violations)
+        self.assertTrue(any("outside the nodes it lists" in v for v in violations), violations)
+
+    def test_an_oracle_depending_on_an_unlisted_node_fails(self) -> None:
+        names = self.full_graph()
+        _, table = self.table()
+        allowed = set(table["depends_on"]).union(*(GRAPH.reachable(node) for node in table["depends_on"]))
+        unlisted = next(node for node in GRAPH.nodes.values() if node.id not in allowed and not node.shipped)
+        directory = self.oracle("")
+        crate = names[unlisted.id]
+        self.oracle(f'{crate} = {{ path = "{self.path_to(directory, crate)}" }}')
+        self.assert_single(self.check(), f"depends on {crate}, outside the nodes it lists")
+
+    def test_an_oracle_path_outside_the_workspace_crates_or_from_git_fails(self) -> None:
+        self.full_graph()
+        self.oracle('elsewhere = { path = "../../elsewhere" }\nfrom-git = { git = "https://example.com/x" }')
+        violations = self.check()
+        self.assertEqual(len(violations), 2, violations)
+        self.assertTrue(any("by a path that is not a workspace crate" in v for v in violations))
+        self.assertTrue(any("takes from-git from git" in v for v in violations))
+
+    def test_an_oracle_without_its_own_workspace_or_lockfile_fails(self) -> None:
+        self.full_graph()
+        self.oracle("", workspace=False, lockfile=False)
+        violations = self.check()
+        self.assertEqual(len(violations), 2, violations)
+        self.assertTrue(any("no [workspace] table of its own" in v for v in violations))
+        self.assertTrue(any("no Cargo.lock of its own" in v for v in violations))
+
+    def test_an_oracle_that_is_a_member_or_a_dependency_fails(self) -> None:
+        names = self.full_graph()
+        _, table = self.table()
+        directory = self.oracle("")
+        self.workspace.add("an-oracle", table["path"])
+        self.workspace.depend(names["core"], "an-oracle", "dev")
+        violations = self.check()
+        self.assertTrue(any("an-oracle under [oracle." in v and "is a workspace member" in v for v in violations), violations)
+        self.assertTrue(any(f"{names['core']} depends on an-oracle" in v for v in violations), violations)
+        self.assertTrue(directory.is_dir())
+
+    def test_a_table_without_a_crate_or_a_record_fails(self) -> None:
+        self.full_graph()
+        config = copy.deepcopy(CONFIG)
+        config["oracle"] = {"stray": {"path": "nowhere", "depends_on": ["crypto", "unknown"]}}
+        violations = cw.check_oracles(config, self.workspace.metadata())
+        self.assertEqual(len(violations), 3, violations)
+        for fragment in ("gives no record", "unknown node(s) unknown", "names no crate directory"):
+            self.assertTrue(any(fragment in v for v in violations), (fragment, violations))
+
+    def test_the_repository_oracle_is_outside_the_workspace(self) -> None:
+        """The repository's own oracle, read from disk: its own workspace and lockfile, and path
+        dependencies on vilicus-crypto and what it reaches only."""
+        _, table = self.table()
+        directory = cw.REPO_ROOT / table["path"]
+        manifest = tomllib.loads((directory / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertIsInstance(manifest.get("workspace"), dict)
+        self.assertTrue((directory / "Cargo.lock").is_file())
+        paths = sorted(spec["path"] for _, spec in cw._manifest_dependencies(manifest) if isinstance(spec, dict) and "path" in spec)
+        self.assertEqual(paths, ["../../crates/vilicus-crypto", "../../crates/vilicus-types"])
 
 
 class IsolatedTest(WorkspaceTestCase):

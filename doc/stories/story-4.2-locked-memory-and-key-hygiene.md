@@ -2,7 +2,7 @@
 title: 'Locked memory and key hygiene'
 epic: 4
 story: 2
-status: review
+status: done
 author: Rwx-G
 created: 2026-10-16
 implements: [FR-13, E16, AD-4, NFR-2, D131, AD-9]

@@ -37,7 +37,10 @@
   crate root; no Cargo configuration file can change lint levels for the workspace. The `unsafe`
   keyword, outside comments and literals, appears only in the module `[unsafe_code.modules]`
   names for its crate, a crate of `allowed` (Story 4.2, AC3): in no other file of any workspace
-  crate, tests and examples included.
+  crate, tests and examples included, doc tests (fenced code of `///` and `//!` comments)
+  included. An entry names one module under `src/`, never `src` or a crate root, and no
+  `#[path]` or `include!` literal brings a file into or out of it; a computed `include!` in such
+  a crate fails too.
 - Vendored sources (D28): ci/cargo-vendored.toml, the configuration CI passes to every workspace
   build with `--config`, exists and holds nothing but the replacement of crates.io by vendor/.
 
@@ -113,6 +116,9 @@ SOURCE_NOISE = re.compile(
     re.DOTALL,
 )
 UNSAFE_KEYWORD = re.compile(r"\bunsafe\b")
+# An entry of [unsafe_code.modules]: one module directly under src/, which a crate root is not.
+UNSAFE_MODULE_ENTRY = re.compile(r"src/[A-Za-z_][A-Za-z0-9_]*")
+CRATE_ROOT_MODULES = frozenset({"src/lib", "src/main"})
 # `path = "..."` inside an attribute (`cfg_attr` included), and the `include!` family with its
 # argument when that is a single string literal; group 2 is None for a computed path.
 STRING_LITERAL = r'"(?:[^"\\]|\\.)*"'
@@ -619,13 +625,81 @@ def check_unsafe(config: dict, root_manifest: dict, crates: list[Crate]) -> list
     return violations
 
 
+def _doc_code(text: str) -> str:
+    """The code of the fenced blocks of the doc comments of `text` (`///` and `//!` lines),
+    hidden lines included: rustdoc compiles those blocks as doc tests, so their `unsafe` counts."""
+    code = []
+    fenced = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith(("///", "//!")):
+            fenced = False
+            continue
+        content = stripped[3:]
+        content = content[1:] if content.startswith(" ") else content
+        if content.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            hidden = content.lstrip()
+            code.append(hidden[2:] if hidden.startswith("# ") else "" if hidden == "#" else content)
+    return "\n".join(code)
+
+
 def _uses_unsafe(path: Path) -> bool:
-    return UNSAFE_KEYWORD.search(SOURCE_NOISE.sub(" ", path.read_text(encoding="utf-8"))) is not None
+    text = path.read_text(encoding="utf-8")
+    return any(UNSAFE_KEYWORD.search(SOURCE_NOISE.sub(" ", code)) for code in (text, _doc_code(text)))
+
+
+def _in_module(relative: str, module: str) -> bool:
+    return relative == f"{module}.rs" or relative.startswith(f"{module}/")
+
+
+def _module_entry_violation(name: str, module: object) -> str | None:
+    """An entry must name one module under `src/`, never `src` itself or a crate root, either of
+    which would let the whole crate hold unsafe code."""
+    if isinstance(module, str) and UNSAFE_MODULE_ENTRY.fullmatch(module) and module not in CRATE_ROOT_MODULES:
+        return None
+    return (
+        f"unsafe: [unsafe_code.modules] entry {module!r} of {name} must name one module under src/, "
+        f"src/<name>, not src itself, a crate root ({', '.join(sorted(CRATE_ROOT_MODULES))}) or a deeper path"
+    )
+
+
+def _crossings(path: Path, relative: str, crate_dir: Path, module: str) -> list[str]:
+    """The `#[path]` and `include!`-family literals of `path` that cross into or out of `module`,
+    and its computed `include!` calls, which cannot be resolved. A `#[path]` is resolved against
+    the file's directory and, for a module declared inside an inline module, against the
+    directory named after the file, both tried."""
+    code = LINE_COMMENT.sub("", BLOCK_COMMENT.sub(" ", path.read_text(encoding="utf-8", errors="replace")))
+    inside = _in_module(relative, module)
+    found = []
+    targets: list[tuple[str, str]] = [(match.group(1), "#[path]") for match in PATH_ATTRIBUTE.finditer(code)]
+    for match in INCLUDE_MACRO.finditer(code):
+        macro, literal = match.groups()
+        if literal is None:
+            found.append(f"calls {macro}! with a computed path, which cannot be held to its unsafe module")
+        else:
+            targets.append((literal, f"{macro}!"))
+    for literal, how in targets:
+        candidates = [path.parent / _literal_path(literal), path.parent / path.stem / _literal_path(literal)]
+        for candidate in candidates:
+            resolved = Path(os.path.normpath(candidate))
+            try:
+                target = resolved.relative_to(Path(os.path.normpath(crate_dir))).as_posix()
+            except ValueError:
+                target = resolved.as_posix()
+            if _in_module(target, module) != inside:
+                direction = "out of" if inside else "into"
+                found.append(f"takes {literal} by {how}, which crosses {direction} its unsafe module {module}")
+                break
+    return found
 
 
 def check_unsafe_modules(config: dict, crates: list[Crate]) -> list[str]:
     """The `unsafe` keyword appears only in the module of a crate of `allowed` that
-    `[unsafe_code.modules]` names: `<module>.rs` and the files under `<module>/`."""
+    `[unsafe_code.modules]` names: `<module>.rs` and the files under `<module>/`, doc tests
+    included; no `#[path]` or `include!` brings a file into or out of that module."""
     policy = config["unsafe_code"]
     modules = policy.get("modules", {})
     violations = [
@@ -633,15 +707,26 @@ def check_unsafe_modules(config: dict, crates: list[Crate]) -> list[str]:
         for name in sorted(modules)
         if name not in policy["allowed"]
     ]
+    for name, module in sorted(modules.items()):
+        violation = _module_entry_violation(name, module)
+        if violation:
+            violations.append(violation)
     for crate in crates:
         crate_dir = crate.manifest_path.parent
         module = modules.get(crate.name)
+        if module is not None and _module_entry_violation(crate.name, module):
+            module = None
         for source in sorted(crate_dir.rglob("*.rs")):
             relative = source.relative_to(crate_dir).as_posix()
             if relative.split("/", 1)[0] in WALK_SKIPPED_DIRECTORIES:
                 continue
-            if module is not None and (relative == f"{module}.rs" or relative.startswith(f"{module}/")):
-                continue
+            if module is not None:
+                violations.extend(
+                    f"unsafe: {source} of {crate.name} {crossing} (D140)"
+                    for crossing in _crossings(source, relative, crate_dir, module)
+                )
+                if _in_module(relative, module):
+                    continue
             if _uses_unsafe(source):
                 where = (
                     f"outside its unsafe module {module}"

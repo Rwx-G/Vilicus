@@ -1024,6 +1024,82 @@ class UnsafeTest(WorkspaceTestCase):
         config = {**CONFIG, "unsafe_code": {**CONFIG["unsafe_code"], "modules": {"vilicus-types": "src/ffi"}}}
         self.assert_single(self.workspace.check(config=config), "[unsafe_code.modules] names vilicus-types")
 
+    def allowed_crate_with_module(self) -> tuple[str, str, str]:
+        """A crate of `allowed` with an unsafe module, its directory and the module."""
+        modules = CONFIG["unsafe_code"]["modules"]
+        name, module = sorted(modules.items())[0]
+        directory = next(d for n, d in (sample_crate(node) for node in GRAPH.nodes.values()) if n == name)
+        return name, directory, module
+
+    def test_unsafe_in_a_doc_test_outside_the_unsafe_module_fails(self) -> None:
+        """Review finding 5: rustdoc compiles a doc comment's fenced code, hidden lines included."""
+        name, directory, _ = self.allowed_crate_with_module()
+        for label, doc in {
+            "visible": "/// ```\n/// unsafe { core::hint::unreachable_unchecked() }\n/// ```\n",
+            "hidden": "/// ```\n/// # unsafe { core::hint::unreachable_unchecked() }\n/// ```\n",
+            "inner doc": "//! ```rust\n//! unsafe fn sample() {}\n//! ```\n",
+        }.items():
+            with self.subTest(case=label):
+                self.setUp()
+                self.full_graph()
+                source = self.workspace.add(name, directory) / "src" / "other.rs"
+                source.write_text(f"//! Sample.\n{doc}fn x() {{}}\n", encoding="utf-8")
+                self.assert_single(self.workspace.check(), f"unsafe: {source} of {name} uses unsafe code")
+
+    def test_the_word_unsafe_in_doc_prose_passes(self) -> None:
+        name, directory, _ = self.allowed_crate_with_module()
+        self.full_graph()
+        source = self.workspace.add(name, directory) / "src" / "other.rs"
+        source.write_text("//! An unsafe word.\n/// Not unsafe { code } here.\n/// ```\n/// let safe = 1;\n/// ```\nfn x() {}\n", encoding="utf-8")
+        self.assertEqual(self.workspace.check(), [])
+
+    def test_a_module_entry_that_is_not_one_module_under_src_fails(self) -> None:
+        """Review finding 5: `src` or a crate root would let the whole crate hold unsafe code."""
+        name, _, _ = self.allowed_crate_with_module()
+        for entry in ("src", "", ".", "src/lib", "src/main", "src/a/b", "../src/x", "/src/x"):
+            with self.subTest(entry=entry):
+                self.setUp()
+                self.full_graph()
+                modules = {**CONFIG["unsafe_code"]["modules"], name: entry}
+                config = {**CONFIG, "unsafe_code": {**CONFIG["unsafe_code"], "modules": modules}}
+                self.assert_single(self.workspace.check(config=config), f"entry {entry!r} of {name} must name one module under src/")
+
+    def test_a_path_or_include_across_the_unsafe_module_fails(self) -> None:
+        """Review finding 5: `#[path]` and `include!` must not move a file into or out of it."""
+        name, directory, module = self.allowed_crate_with_module()
+        leaf = module.split("/", 1)[1]
+        cases = {
+            "path into": ("src/lib.rs", f'//! Sample.\n#[path = "{leaf}/inner.rs"]\nmod inner;\n', "into"),
+            "include into": ("src/other.rs", f'//! Sample.\ninclude!("{leaf}.rs");\n', "into"),
+            "include out of": (f"{module}/inner.rs", '//! Sample.\ninclude!("../other.rs");\n', "out of"),
+            "computed": ("src/other.rs", '//! Sample.\ninclude!(concat!("a", ".rs"));\n', "computed path"),
+        }
+        for label, (place, text, expected) in cases.items():
+            with self.subTest(case=label):
+                self.setUp()
+                self.full_graph()
+                source = self.workspace.add(name, directory) / place
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(text, encoding="utf-8")
+                # A computed include! also fails the shipped-sources check, which ShippedSourcesTest covers.
+                violations = [v for v in self.workspace.check() if v.startswith("unsafe:")]
+                self.assert_single(violations, f"unsafe: {source} of {name}", expected)
+
+    def test_a_path_or_include_within_one_side_passes(self) -> None:
+        name, directory, module = self.allowed_crate_with_module()
+        cases = {
+            "within the module": (f"{module}/a.rs", '//! Sample.\ninclude!("b.rs");\n'),
+            "outside the module": ("src/a.rs", '//! Sample.\nconst TEXT: &str = include_str!("../README.md");\n'),
+        }
+        for label, (place, text) in cases.items():
+            with self.subTest(case=label):
+                self.setUp()
+                self.full_graph()
+                source = self.workspace.add(name, directory) / place
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(text, encoding="utf-8")
+                self.assertEqual(self.workspace.check(), [])
+
     def test_module_or_plugin_crate_without_forbid_attribute_fails(self) -> None:
         sources = {
             "absent": "//! Crate.\n",

@@ -23,10 +23,32 @@ use rusqlite::Connection;
 use vilicus_types::ModuleName;
 
 use crate::authorizer::{self, Policy};
-use crate::{FrozenMigration, Handle, KeyEpoch, ModuleFile, Partition, Role, RoleKind, create};
+use crate::{
+    FrozenMigration, Handle, KEY_TEXT_LEN, KeyEpoch, ModuleFile, Partition, Role, RoleKind, create,
+};
 
-/// Test key only; the Core derives one key per file (`doc/key-management.md` section 2).
-pub(crate) const KEY: [u8; 32] = [0x5a; 32];
+/// The bytes of the test key only; the Core derives one key per file (`doc/key-management.md`
+/// section 2).
+pub(crate) const KEY_BYTES: [u8; 32] = [0x5a; 32];
+
+/// SQLCipher's raw key text of [`KEY_BYTES`], which keys the test files as the text the Core lends
+/// from a file key does.
+pub(crate) const KEY: [u8; KEY_TEXT_LEN] = key_text(KEY_BYTES);
+
+/// SQLCipher's raw key text of `key`, `x'`, its lowercase hex digits, then `'`: test code only,
+/// where the product's text is written by `vilicus-crypto` in its locked pool.
+pub(crate) const fn key_text(key: [u8; 32]) -> [u8; KEY_TEXT_LEN] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = [b'\''; KEY_TEXT_LEN];
+    text[0] = b'x';
+    let mut index = 0;
+    while index < key.len() {
+        text[2 + 2 * index] = HEX[(key[index] >> 4) as usize];
+        text[3 + 2 * index] = HEX[(key[index] & 0x0f) as usize];
+        index += 1;
+    }
+    text
+}
 
 pub(crate) const EPOCH: KeyEpoch = KeyEpoch {
     partition_root_version: 1,
@@ -54,11 +76,11 @@ pub(crate) fn module_file(dir: &Path) -> ModuleFile {
     )
 }
 
-/// The SQLCipher `x'...'` form of [`KEY`], for connections the tests open outside the storage
-/// layer. Test code only: the product keys through `ffi::key` from a wiped buffer.
-pub(crate) fn raw_key_pragma(key: &[u8; 32]) -> String {
-    let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("PRAGMA key = \"x'{hex}'\";")
+/// `PRAGMA key` with the key text `text`, for connections the tests open outside the storage
+/// layer. Test code only: the product keys through `ffi::key` from the text the Core lends.
+pub(crate) fn raw_key_pragma(text: &[u8]) -> String {
+    let text = std::str::from_utf8(text).expect("a key text is ASCII");
+    format!("PRAGMA key = \"{text}\";")
 }
 
 /// A connection keyed with [`KEY`] and nothing else: no setup, no authorizer.

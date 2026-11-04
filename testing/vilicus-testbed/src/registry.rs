@@ -38,7 +38,8 @@ mod tests {
     use super::{HANDLERS, REGISTRY};
 
     /// Test key only; the Core derives one key per file.
-    const KEY: [u8; 32] = [0x7e; 32];
+    const KEY: [u8; vilicus_core::testing::KEY_TEXT_LEN] =
+        vilicus_core::testing::sqlcipher_key_text([0x7e; 32]);
 
     fn read(path: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);

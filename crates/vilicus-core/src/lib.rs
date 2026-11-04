@@ -32,5 +32,6 @@ pub mod handlers;
 pub mod record;
 pub mod registry;
 pub mod startup;
-#[cfg(feature = "testing")]
+// The test builds of the Core compile it too, for the key text of their test files.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;

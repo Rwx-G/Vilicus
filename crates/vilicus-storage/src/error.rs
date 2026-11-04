@@ -46,6 +46,11 @@ pub enum Error {
     Refused(rusqlite::Error),
     /// The key does not open the file. Nothing of the file's content was read.
     WrongKey,
+    /// The key text lent to key a connection is not `x'`, 64 lowercase hex digits, then `'`.
+    MalformedKeyText,
+    /// The key text could not be lent: the Core's key memory refused it, a slot short or the pool
+    /// wiped as the process ends.
+    KeyUnavailable,
     /// A setting read back after the connection setup differs from the one set (D127).
     SetupMismatch {
         /// The pragma or connection option.
@@ -237,6 +242,7 @@ impl Error {
             | Self::AlreadyExists(_)
             | Self::TransactionOpen
             | Self::WrongKey
+            | Self::KeyUnavailable
             | Self::EpochTransitionPending { .. }
             | Self::EpochSidecarMissing(_)
             | Self::EpochSidecarWithoutFile(_) => true,
@@ -286,6 +292,8 @@ impl fmt::Display for Error {
                 Summary(error)
             ),
             Self::WrongKey => formatter.write_str("the key does not open the file"),
+            Self::MalformedKeyText => formatter.write_str("the key text is not a raw key's"),
+            Self::KeyUnavailable => formatter.write_str("the key text could not be lent"),
             Self::SetupMismatch {
                 setting,
                 expected,
@@ -424,6 +432,8 @@ impl fmt::Debug for Error {
         let variant = match self {
             Self::Refused(_) => "Refused",
             Self::WrongKey => "WrongKey",
+            Self::MalformedKeyText => "MalformedKeyText",
+            Self::KeyUnavailable => "KeyUnavailable",
             Self::SetupMismatch { .. } => "SetupMismatch",
             Self::EpochMismatch { .. } => "EpochMismatch",
             Self::EpochSidecarMissing(_) => "EpochSidecarMissing",
@@ -546,6 +556,7 @@ mod tests {
             Error::CopyRaced(PathBuf::from("f")),
             Error::ColdCopiesFull { kept: 3 },
             Error::WrongKey,
+            Error::KeyUnavailable,
             sqlite(rusqlite::ffi::SQLITE_FULL),
             sqlite(rusqlite::ffi::SQLITE_BUSY),
             sqlite(rusqlite::ffi::SQLITE_IOERR),
@@ -569,6 +580,7 @@ mod tests {
                 version: 1,
             },
             Error::MalformedFailureMark(PathBuf::from("f")),
+            Error::MalformedKeyText,
         ];
         for error in repeated {
             assert!(!error.is_environmental(), "{error:?}");

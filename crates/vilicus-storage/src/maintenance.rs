@@ -23,7 +23,7 @@ use rusqlite::backup::Backup;
 
 use crate::error::{Error, Result};
 use crate::file::{self, KeyEpoch, ModuleFile};
-use crate::handle::{self, Setup};
+use crate::handle::{self, FileKeying, Setup};
 
 pub use crate::failure_mark::{
     FailedMigrationMark, clear_failed_migration_mark, failed_migration_mark,
@@ -125,12 +125,12 @@ pub fn copy_file(file: &ModuleFile, destination: &Path) -> Result<()> {
 
 /// Copies `file` and its sidecar to `destination` with SQLite's online backup API,
 /// `pages_per_step` pages at a time with `pause` between steps, so a writer of the file waits for
-/// at most one step (AD-31, D136). The copy is a SQLCipher file under the same raw `key`, whose
+/// at most one step (AD-31, D136). The copy is a SQLCipher file under the same `key`, whose
 /// connection is set up like every other (no URI, busy timeout, extension loading off, the setup
 /// pragmas, `DEFENSIVE`, read back).
 pub fn backup(
     file: &ModuleFile,
-    key: &[u8; 32],
+    key: &dyn FileKeying,
     destination: &Path,
     pages_per_step: c_int,
     pause: Duration,
@@ -163,7 +163,7 @@ pub fn backup(
 /// Runs VACUUM on `file`, on a connection opened for that purpose and closed after it. It is the
 /// fallback for content deleted while `secure_delete` was off, never a routine step: deletions
 /// under `secure_delete` = ON followed by a TRUNCATE checkpoint need none (D132, E17).
-pub fn vacuum(file: &ModuleFile, key: &[u8; 32]) -> Result<()> {
+pub fn vacuum(file: &ModuleFile, key: &dyn FileKeying) -> Result<()> {
     let (connection, _) = handle::connect(file, key, Setup::Maintenance, false)?;
     let outcome = handle::checked_epoch(file, &connection)
         .and_then(|_| connection.execute_batch("VACUUM").map_err(Error::from))

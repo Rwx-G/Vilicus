@@ -6,16 +6,18 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use super::{EPOCH, KEY, create_module_file, module_file, raw_connection, scratch_dir};
+use super::{
+    EPOCH, KEY, KEY_BYTES, create_module_file, key_text, module_file, raw_connection, scratch_dir,
+};
 use crate::authorizer::{self, Policy};
 use crate::error::Error;
-use crate::handle::{Setup, raw_key_text};
+use crate::handle::Setup;
 use crate::{
-    BUSY_TIMEOUT, Handle, JOURNAL_SIZE_LIMIT, KeyEpoch, Migration, Read, Role, RoleKind, Settings,
-    Write, create, open, read_epoch,
+    BUSY_TIMEOUT, FileKeying, Handle, JOURNAL_SIZE_LIMIT, KEY_TEXT_LEN, KeyEpoch, Migration, Read,
+    Role, RoleKind, Settings, Write, create, open, read_epoch,
 };
 
-const OTHER_KEY: [u8; 32] = [0xa5; 32];
+const OTHER_KEY: [u8; KEY_TEXT_LEN] = key_text([0xa5; 32]);
 
 /// A value no page of a file holds unless it was written there, to look for in raw bytes.
 const MARKER: &str = "vilicus-storage-plaintext-marker-6d1f0c";
@@ -64,7 +66,7 @@ fn create_writes_an_encrypted_file_named_module_dot_partition() {
 fn the_file_is_keyed_with_the_raw_key_not_a_passphrase_kdf() {
     let dir = scratch_dir("ac1-raw");
     let file = create_module_file(&dir);
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = KEY_BYTES.iter().map(|byte| format!("{byte:02x}")).collect();
     let as_passphrase = Connection::open(file.path()).expect("open");
     as_passphrase
         .execute_batch(&format!("PRAGMA key = '{hex}';"))
@@ -621,16 +623,110 @@ fn checkpoint_truncate_empties_the_wal_and_reports_a_busy_one() {
 
 // --- AC11 ---
 
-/// The hex form of the key is built in a buffer allocated once at its final size, so no
-/// reallocation leaves a copy behind, and it is a `Zeroizing` buffer, wiped on drop.
+/// A key text that is not `x'`, 64 lowercase hex digits, then `'` is refused before it keys the
+/// connection, since SQLCipher would take it for a passphrase and derive another key from it: the
+/// whole text in uppercase, one digit short or long, a quote missing, and at each digit position
+/// one byte outside the lowercase hex digits, an uppercase hex digit among them.
 #[test]
-fn the_key_text_is_one_buffer_of_its_final_size() {
-    let text: zeroize::Zeroizing<Vec<u8>> = raw_key_text(&KEY);
-    assert_eq!(text.len(), text.capacity());
-    assert_eq!(text.len(), 67);
-    assert!(text.starts_with(b"x'") && text.ends_with(b"'"));
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
-    assert_eq!(&text[2..66], hex.as_bytes());
+fn a_malformed_key_text_is_refused_before_it_keys() {
+    let dir = scratch_dir("ac11-malformed-text");
+    let file = create_module_file(&dir);
+    let mut malformed: Vec<Vec<u8>> = vec![
+        KEY.to_ascii_uppercase(),
+        KEY[..KEY_TEXT_LEN - 2]
+            .iter()
+            .chain(b"'")
+            .copied()
+            .collect(),
+        KEY[..KEY_TEXT_LEN - 1]
+            .iter()
+            .chain(b"a'")
+            .copied()
+            .collect(),
+        KEY[1..].to_vec(),
+        KEY[..KEY_TEXT_LEN - 1].to_vec(),
+        Vec::new(),
+    ];
+    for position in 2..KEY_TEXT_LEN - 1 {
+        for outside in [b'/', b':', b'`', b'g', b'G', b'A', b'F', 0xff] {
+            let mut text = KEY;
+            text[position] = outside;
+            malformed.push(text.to_vec());
+        }
+    }
+    for text in malformed {
+        let keying = Lent::new(&text);
+        let outcome = open::<Read>(&file, &keying).map(drop);
+        assert!(
+            matches!(outcome, Err(Error::MalformedKeyText)),
+            "{text:?}: {outcome:?}"
+        );
+    }
+    assert!(open::<Read>(&file, &KEY).is_ok());
+}
+
+/// A key text lent through [`FileKeying`], counting its lends and refusing them on request.
+struct Lent<'a> {
+    text: &'a [u8],
+    lends: std::cell::Cell<usize>,
+    refuse: bool,
+}
+
+impl<'a> Lent<'a> {
+    fn new(text: &'a [u8]) -> Self {
+        Self {
+            text,
+            lends: std::cell::Cell::new(0),
+            refuse: false,
+        }
+    }
+}
+
+impl FileKeying for Lent<'_> {
+    fn lend_key_text(
+        &self,
+        key_with: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        if self.refuse {
+            return Err(Error::KeyUnavailable);
+        }
+        self.lends.set(self.lends.get() + 1);
+        key_with(self.text)
+    }
+}
+
+/// The key text is lent once for each connection the storage layer keys, and never kept: `open`
+/// keys one connection, `create` its staging file's and then the handle's. A text that cannot be
+/// lent stops the open or the creation with [`Error::KeyUnavailable`], and nothing is created.
+#[test]
+fn the_key_text_is_lent_once_per_connection() {
+    let dir = scratch_dir("ac11-lent");
+    let file = module_file(&dir);
+    let keying = Lent::new(&KEY);
+    create(&file, &keying, EPOCH)
+        .expect("create")
+        .close()
+        .expect("close");
+    assert_eq!(keying.lends.get(), 2);
+    open::<Read>(&file, &keying)
+        .expect("open")
+        .close()
+        .expect("close");
+    assert_eq!(keying.lends.get(), 3);
+    let refused = Lent {
+        refuse: true,
+        ..Lent::new(&KEY)
+    };
+    assert!(matches!(
+        open::<Read>(&file, &refused),
+        Err(Error::KeyUnavailable)
+    ));
+    let other = module_file(&scratch_dir("ac11-lent-refused"));
+    assert!(matches!(
+        create(&other, &refused, EPOCH),
+        Err(Error::KeyUnavailable)
+    ));
+    assert!(!other.path().exists() && !other.epoch_path().exists());
 }
 
 /// No product source builds `PRAGMA key` SQL text, which SQLite would keep in its statement
@@ -665,7 +761,7 @@ fn no_product_source_keys_through_sql_text() {
 fn the_key_is_never_printed() {
     let dir = scratch_dir("ac11-print");
     let file = create_module_file(&dir);
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = KEY_BYTES.iter().map(|byte| format!("{byte:02x}")).collect();
     let handle = open::<Write>(&file, &KEY).expect("open");
     let error = open::<Write>(&file, &OTHER_KEY).expect_err("wrong key");
     let shown = format!("{handle:?} {error} {error:?}");

@@ -19,7 +19,7 @@ use vilicus_storage::{
 use vilicus_types::ModuleName;
 
 use super::inspect::{Needles, Rng, inspect};
-use super::tests::{KEY, create_sql, envelope_of, registry_of, scratch_dir, text, uuid};
+use super::tests::{KEY, KEY_BYTES, create_sql, envelope_of, registry_of, scratch_dir, text, uuid};
 use crate::alert::InstanceAdminAlert;
 use crate::registry::{
     FileError, FileMigration, FileToMigrate, MigrationError, MigrationRunError, frozen,
@@ -182,9 +182,9 @@ fn versions(file: &ModuleFile) -> SchemaVersions {
 
 fn labels_at(path: &Path) -> Vec<String> {
     let connection = rusqlite::Connection::open(path).expect("open");
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    let text = std::str::from_utf8(&KEY).expect("a key text is ASCII");
     connection
-        .execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
+        .execute_batch(&format!("PRAGMA key = \"{text}\";"))
         .expect("key");
     connection
         .prepare("SELECT label FROM items ORDER BY label")
@@ -215,7 +215,7 @@ fn a_pending_file_is_migrated_on_a_copy_and_its_original_kept_cold() {
     let mut needles = Needles::default();
     needles.add(secret.as_bytes());
     assert_eq!(
-        needles.found_in(&inspect(&file, &KEY).file),
+        needles.found_in(&inspect(&file, &KEY_BYTES).file),
         1,
         "the control"
     );
@@ -264,7 +264,7 @@ fn a_pending_file_is_migrated_on_a_copy_and_its_original_kept_cold() {
         labels.sort();
         labels
     });
-    let inspected = inspect(&file, &KEY);
+    let inspected = inspect(&file, &KEY_BYTES);
     for (part, bytes) in inspected.parts() {
         assert_eq!(needles.found_in_short(bytes), 0, "{part}");
     }

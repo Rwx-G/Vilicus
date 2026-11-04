@@ -125,7 +125,6 @@ exclusive_dependencies = ["libfuzzer-sys", "arbitrary"]
 # unsafe code is forbidden; a crate that would define a key type elsewhere fails here instead.
 [restricted.zeroize.linked]
 vilicus-crypto = "defines every key type, each wiped on drop"
-vilicus-storage = "the SQLCipher key text it builds from a file key the Core lends it, wiped once the file is keyed (D143); a buffer, not a key type"
 
 # AD-4, AD-18, D28 and D131: key operations run in vilicus-crypto, where their objects live for
 # one operation; a crate that used a primitive source directly could hold a key outside it.

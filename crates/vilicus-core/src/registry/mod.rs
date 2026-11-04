@@ -64,8 +64,8 @@ use std::path::Path;
 use vilicus_module_api::{Consumer, DeclarationError, ModuleDeclaration, Topic};
 use vilicus_storage::maintenance::SchemaVersions;
 use vilicus_storage::{
-    CORE_SCHEMA_VERSION, FrozenMigration, Handle, Inspect, KeyEpoch, Migration, MigrationTrack,
-    ModuleFile, Partition, Read,
+    CORE_SCHEMA_VERSION, FileKeying, FrozenMigration, Handle, Inspect, KeyEpoch, Migration,
+    MigrationTrack, ModuleFile, Partition, Read,
 };
 use vilicus_types::ModuleName;
 
@@ -408,7 +408,7 @@ impl Registry {
             .find(|module| module.name == name.as_str())
     }
 
-    /// Opens `file` in role `R` with its raw `key`, after checking it against its module's
+    /// Opens `file` in role `R`, keyed by `key`, after checking it against its module's
     /// declaration (AD-9): the module is registered, the file's Core tables are at the Core's
     /// schema version and its module schema at the module's latest version (AD-26), the frozen
     /// hashes it recorded for both tracks are the code's (AD-23, D21), and its schema is the
@@ -418,7 +418,7 @@ impl Registry {
     pub(crate) fn open<R: Inspect>(
         &self,
         file: &ModuleFile,
-        key: &[u8; 32],
+        key: &dyn FileKeying,
     ) -> Result<Handle<R>, FileError> {
         let module = self
             .module(file.module())
@@ -433,7 +433,11 @@ impl Registry {
     /// module's migrations in order through the migration runner, then opens it as the Core opens
     /// every file, comparing the migrated schema with the declaration.
     /// `directory` holds no file of these modules beforehand; the files stay there.
-    pub fn verify_migrations(&self, directory: &Path, key: &[u8; 32]) -> Result<(), VerifyError> {
+    pub fn verify_migrations(
+        &self,
+        directory: &Path,
+        key: &dyn FileKeying,
+    ) -> Result<(), VerifyError> {
         for module in self.modules {
             verify_module(self, module, directory, key).map_err(|error| VerifyError {
                 module: module.name,
@@ -448,7 +452,7 @@ fn verify_module(
     registry: &Registry,
     module: &'static ModuleDeclaration,
     directory: &Path,
-    key: &[u8; 32],
+    key: &dyn FileKeying,
 ) -> Result<(), FileError> {
     let file = create_migrated(module, directory, key)?;
     registry.open::<Read>(&file, key)?.close()?;
@@ -462,7 +466,7 @@ fn verify_module(
 pub(crate) fn create_migrated(
     module: &'static ModuleDeclaration,
     directory: &Path,
-    key: &[u8; 32],
+    key: &dyn FileKeying,
 ) -> Result<ModuleFile, FileError> {
     let file = ModuleFile::new(
         directory,

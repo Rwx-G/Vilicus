@@ -1343,9 +1343,10 @@ class RestrictedDependencyTest(WorkspaceTestCase):
         self.assert_single(self.workspace.check(config), "[restricted.zeroize.linked] entry vilicus-crypto gives no reason")
 
     def test_the_repository_restricts_zeroize_and_the_primitive_sources(self) -> None:
-        # Written out on purpose: the rules of Story 4.1 and of finding 5 of its review.
+        # Written out on purpose: the rules of Story 4.1 and of finding 5 of its review; since Story
+        # 4.3, vilicus-storage keys a file from a text the Core lends it and wipes no buffer of its own.
         linked = {package: set(tables.get("linked", {})) for package, tables in self.RESTRICTED.items()}
-        self.assertEqual(linked["zeroize"], {"vilicus-crypto", "vilicus-storage"})
+        self.assertEqual(linked["zeroize"], {"vilicus-crypto"})
         for package in ("aws-lc-rs", "hpke", "argon2", "opaque-ke", "zxcvbn"):
             self.assertEqual(linked[package], {"vilicus-crypto"}, package)
         self.assertEqual(set(self.RESTRICTED["aws-lc-rs"]["dev"]), {"vilicus-proto", "vilicus-core"})

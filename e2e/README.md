@@ -38,6 +38,7 @@ other, never in parallel.
 | `core-execution` | 1.15 | CPU- and fsync-sensitive: waits for an idle engine. 15 to 25 minutes. |
 | `hybrid-kex` | 1.16 | Compose project. |
 | `prf-probe` | 1.17 | Proves the probe pipeline only. |
+| `key-memory` | 4.2 | Not a spike: `ci/key_memory.py`, the key memory regression of the product build (D131), which CI also runs. On a Debian 13 host with `systemd-coredump` it also checks `coredumpctl`; this phase is what the reference host run of FR-13 replays. |
 
 A phase whose runner does not exist yet is reported `SKIP` with the reason, not failed.
 

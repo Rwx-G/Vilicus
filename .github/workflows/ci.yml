@@ -95,6 +95,21 @@ jobs:
       - name: Test
         run: cargo test --workspace --frozen --config ci/cargo-vendored.toml
 
+  # Story 4.2 (AC2, AC6, AC7, AC9, AC10; D131): the key memory regression harness of
+  # crates/vilicus-crypto/examples/key_memory on the release build, each group in a container of
+  # the pinned image with only the capabilities and limits it needs (the docstring of the script
+  # lists them). The memory scans need CAP_SYS_PTRACE, which build-and-test does not have.
+  key-memory:
+    name: Key memory regression (D131, E16)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the key memory regression in containers
+        run: python3 ci/key_memory.py
+
   deny:
     name: Licences, duplicates, advisories and sources (cargo deny)
     runs-on: ubuntu-24.04

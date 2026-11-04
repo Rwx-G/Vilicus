@@ -38,3 +38,9 @@ zeroize.workspace = true
 # approval): a new edge to a package Cargo.lock already holds.
 libc.workspace = true
 
+# The key memory regression harness of Story 4.2 (AC2, AC9, AC10), run by ci/key_memory.py in
+# containers given the capabilities and limits each check needs; never a test of `cargo test`,
+# which runs without them.
+[[example]]
+name = "key_memory"
+required-features = ["testing"]

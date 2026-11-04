@@ -139,10 +139,6 @@ impl Findings {
             .collect::<Vec<_>>()
             .join(" ")
     }
-
-    pub fn names(&self) -> BTreeSet<String> {
-        self.hits.keys().cloned().collect()
-    }
 }
 
 /// The windows of a pattern set, indexed by their first 8 bytes.

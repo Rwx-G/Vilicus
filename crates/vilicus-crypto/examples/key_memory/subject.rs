@@ -1,11 +1,15 @@
 //! The subject process: sets the process up, plants keys, runs one path, and stops at each phase
 //! so that the harness can read its memory. It talks over stdin and stdout, one line a message.
 //!
-//! Variants: `core` sets the process up as the Core does (`harden_process`, `take_sigterm` for
-//! the SIGTERM scenario, `lock_key_memory`) and runs the path through `vilicus_crypto`; `asis` runs
-//! the same operation the default way, on aws-lc-rs directly, with the keys in ordinary heap
+//! Variants: `core` sets the process up as the Core does (`start_key_memory`: hardening, the
+//! SIGTERM thread, the pool, the panic hook) and runs the path through `vilicus_crypto`; `asis`
+//! runs the same operation the default way, on aws-lc-rs directly, with the keys in ordinary heap
 //! memory and the aws-lc-rs objects kept until the drop; `unhardened` asks for the pool without
 //! hardening first; `control` neither hardens nor locks, the dumpable process of the dump checks.
+//!
+//! The default shape reads each key once, straight into a heap copy it reports as `PLANTED
+//! <pattern> <address>`, so that the harness can tell that planted input apart from the copies
+//! the operation itself made, which alone count as the control of the product shape's absences.
 
 use std::fs::File;
 use std::io::{self, BufRead, Write};
@@ -58,28 +62,35 @@ fn pause(phase: &str) -> String {
     answer.trim().to_string()
 }
 
+thread_local! {
+    /// The harness's stand-in for the Core's mark of a module handler's boundary
+    /// (`vilicus_core::boundary::in_module_code`).
+    static IN_HANDLER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn in_handler() -> bool {
+    IN_HANDLER.with(std::cell::Cell::get)
+}
+
+fn on_term() {
+    pause("TERMWIPED");
+    std::process::exit(0);
+}
+
 /// Sets the process up for `variant`; `false` when the key memory was refused, which the subject
 /// reports and ends on.
-fn set_up(scenario: &str, variant: &str) -> Result<bool> {
-    match variant {
-        "core" => {
-            vilicus_crypto::harden_process()?;
-            if scenario == "sigterm" {
-                vilicus_crypto::take_sigterm(|| {
-                    pause("TERMWIPED");
-                    std::process::exit(0);
-                })?;
-            }
-        }
-        "unhardened" => {}
+fn set_up(variant: &str) -> Result<bool> {
+    let started = match variant {
+        "core" => vilicus_crypto::start_key_memory(on_term, in_handler),
+        "unhardened" => vilicus_crypto::lock_key_memory(),
         "asis" | "control" => {
             say("POOL 0 0");
             say(&format!("STATUS dumpable={}", testing::dumpable()));
             return Ok(true);
         }
         other => return Err(format!("unknown variant {other}").into()),
-    }
-    if let Err(error) = vilicus_crypto::lock_key_memory() {
+    };
+    if let Err(error) = started {
         let generate = match SymmetricKey::generate() {
             Ok(_) => "created".to_string(),
             Err(error) => format!("refused ({error})"),
@@ -87,29 +98,29 @@ fn set_up(scenario: &str, variant: &str) -> Result<bool> {
         say(&format!("REFUSED {error:?}: {error}; a key: {generate}"));
         return Ok(false);
     }
-    let (start, len) = testing::key_pool().ok_or("no pool after lock_key_memory")?;
+    let (start, len) = testing::key_pool().ok_or("no pool after the start")?;
     say(&format!("POOL {start:x} {len}"));
     say(&format!("STATUS dumpable={}", testing::dumpable()));
     Ok(true)
 }
 
 fn run_inner(scenario: &str, variant: &str, material: &Path) -> Result<()> {
-    if !set_up(scenario, variant)? {
+    if !set_up(variant)? {
         std::process::exit(EXIT_REFUSED);
     }
     let file = File::open(material)?;
     let core = variant == "core";
     match scenario {
-        "hold" => hold(&file),
+        "hold" | "sigterm" => hold(&file),
         "capacity" => capacity(),
         "copies" => copies(&file, core),
         "derive" => derive(&file, core),
         "wrap" => wrap(&file, core),
         "unwrap" => unwrap(&file, core, CONTEXT),
         "unwrap-wrong" => unwrap(&file, core, OTHER_CONTEXT),
+        "key-text" => key_text(&file, core),
         "thread" => thread(&file, core),
         "panic-hook" => panic_hook(&file),
-        "sigterm" => hold(&file),
         "fork" => fork(&file),
         "dump" => dump(&file, core),
         "swap" => swap(&file),
@@ -117,10 +128,14 @@ fn run_inner(scenario: &str, variant: &str, material: &Path) -> Result<()> {
     }
 }
 
-fn secret(file: &File, field: Field) -> Result<[u8; 32]> {
-    let mut bytes = [0_u8; 32];
-    file.read_exact_at(&mut bytes, field.0)?;
-    Ok(bytes)
+/// The secret of `field`, read straight into a heap copy for the default shape and reported as
+/// planted: at offset 32 of a 64-byte allocation, so that the allocator's free-list pointers,
+/// written over the first 16 bytes of a freed chunk, do not hide it.
+fn planted_plain(file: &File, field: Field, name: &str) -> Result<Vec<u8>> {
+    let mut heap = vec![0_u8; 64];
+    file.read_exact_at(&mut heap[32..], field.0)?;
+    say(&format!("PLANTED {name} {:x}", heap[32..].as_ptr().addr()));
+    Ok(heap)
 }
 
 /// Runs `operation`, a key operation of the crate, and reports how deep its guarded calls
@@ -195,13 +210,26 @@ fn copies(file: &File, core: bool) -> Result<()> {
         pause("LIVE");
         drop(key);
     } else {
-        let key = material::plain_copy(&secret(file, KEY)?);
+        let key = planted_plain(file, KEY, "key")?;
         copy_to_deep_stack(&key[32..]);
         pause("LIVE");
         drop(key);
     }
     pause("DROPPED");
     Ok(())
+}
+
+/// The HKDF `info` of the derivation, as `vilicus_crypto::derive_key` builds it: the label, its
+/// 0x00 end byte, then the context with its length as a `u16` big-endian (D153).
+fn derive_info() -> Result<Vec<u8>> {
+    let len = u16::try_from(DERIVE_CONTEXT.len())?;
+    Ok([
+        DERIVE_LABEL.as_str().as_bytes(),
+        &[0x00],
+        &len.to_be_bytes(),
+        DERIVE_CONTEXT,
+    ]
+    .concat())
 }
 
 fn derive(file: &File, core: bool) -> Result<()> {
@@ -213,10 +241,11 @@ fn derive(file: &File, core: bool) -> Result<()> {
         pause("LIVE");
         drop((parent, child));
     } else {
-        let parent = material::plain_copy(&secret(file, PARENT)?);
+        let parent = planted_plain(file, PARENT, "parent")?;
+        let info = derive_info()?;
         let prk = Salt::new(HKDF_SHA256, &[]).extract(&parent[32..]);
         let mut child = vec![0_u8; 32];
-        prk.expand(&[DERIVE_LABEL.as_str().as_bytes()], HKDF_SHA256)
+        prk.expand(&[&info], HKDF_SHA256)
             .map_err(material::other)?
             .fill(&mut child)
             .map_err(material::other)?;
@@ -246,15 +275,15 @@ fn wrap(file: &File, core: bool) -> Result<()> {
     Ok(())
 }
 
-/// The default shape's KEK: a heap copy, and the AES-256-GCM key object built from it.
+/// The default shape's KEK: its planted heap copy, and the AES-256-GCM key object built from it.
 type AsisKek = (Vec<u8>, LessSafeKey);
 
-/// The default shape of a wrap: the KEK and the key in heap copies, an AES-256-GCM key object
-/// kept, the key sealed in a heap buffer.
+/// The default shape of a wrap: the KEK and the key in planted heap copies, an AES-256-GCM key
+/// object kept, the key sealed in place in its copy.
 fn asis_seal(file: &File) -> Result<(AsisKek, Vec<u8>)> {
-    let kek = material::plain_copy(&secret(file, KEK)?);
+    let kek = planted_plain(file, KEK, "kek")?;
     let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &kek[32..]).map_err(material::other)?);
-    let mut sealed = material::plain_copy(&secret(file, DEK)?);
+    let mut sealed = planted_plain(file, DEK, "dek")?;
     let tag = key
         .seal_in_place_separate_tag(
             Nonce::assume_unique_for_key(NONCE),
@@ -300,6 +329,32 @@ fn unwrap(file: &File, core: bool, context: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// SQLCipher's key text of a key: built in a text slot and lent to a closure in the product
+/// shape; in the default shape, built in a heap buffer as `vilicus-storage` builds it today and
+/// freed with no wipe.
+fn key_text(file: &File, core: bool) -> Result<()> {
+    if core {
+        let key = material::planted(file, KEY)?;
+        let len = measured("key-text", || {
+            key.with_sqlcipher_key_text(|text| std::hint::black_box(text).len())
+        })?;
+        say(&format!("TEXT {len}"));
+        pause("LIVE");
+        drop(key);
+    } else {
+        let key = planted_plain(file, KEY, "key")?;
+        let mut text = Vec::with_capacity(vilicus_crypto::SQLCIPHER_KEY_TEXT_LEN);
+        text.extend_from_slice(b"x'");
+        text.extend_from_slice(material::hex(&key[32..]).as_bytes());
+        text.push(b'\'');
+        std::hint::black_box(&text);
+        pause("LIVE");
+        drop((key, text));
+    }
+    pause("DROPPED");
+    Ok(())
+}
+
 /// A wrap and an unwrap on a spawned thread, as the Core's blocking pool would run them; the
 /// thread reports an address inside its stack, then ends, and the harness looks for residue in
 /// that stack's mapping, which the C library keeps cached after the join.
@@ -326,10 +381,15 @@ fn thread(file: &File, core: bool) -> Result<()> {
             .map_err(|e| e.to_string())?;
             drop((kek, dek, opened));
         } else {
-            let kek = secret(&file, KEK).map_err(|e| e.to_string())?;
-            copy_to_deep_stack(&kek);
-            let (kept, sealed) = asis_seal(&file).map_err(|e| e.to_string())?;
-            drop((kept, sealed));
+            let ((kek, key), mut sealed) = asis_seal(&file).map_err(|e| e.to_string())?;
+            let opened = key
+                .open_in_place(
+                    Nonce::assume_unique_for_key(NONCE),
+                    Aad::from(CONTEXT),
+                    &mut sealed[32..],
+                )
+                .map(|plaintext| plaintext.to_vec());
+            drop((kek, key, sealed, opened));
         }
         Ok(())
     });
@@ -341,24 +401,13 @@ fn thread(file: &File, core: bool) -> Result<()> {
     Ok(())
 }
 
-thread_local! {
-    /// The harness's stand-in for the Core's mark of a module handler's boundary
-    /// (`vilicus_core::boundary::in_module_code`).
-    static IN_HANDLER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn in_handler() -> bool {
-    IN_HANDLER.with(std::cell::Cell::get)
-}
-
 fn observe_panic() {
     pause("PANICKED");
 }
 
 /// The Core's panic shape: a panic inside a handler's boundary unwinds to it and the keys stay;
-/// a panic outside one wipes the pool and aborts.
+/// a panic outside one wipes the pool and aborts. `start_key_memory` installed the hook.
 fn panic_hook(file: &File) -> Result<()> {
-    vilicus_crypto::install_panic_hook(in_handler);
     testing::set_panic_observer(observe_panic);
     let key = material::planted(file, KEY)?;
     let dek = material::planted(file, DEK)?;
@@ -378,7 +427,8 @@ fn panic_hook(file: &File) -> Result<()> {
 
 fn fork(file: &File) -> Result<()> {
     let key = material::planted(file, KEY)?;
-    let control = secret(file, MARKER)?.to_vec();
+    let mut control = vec![0_u8; 32];
+    file.read_exact_at(&mut control, MARKER.0)?;
     let view = testing::fork_and_read(&key, &control)?;
     say(&format!(
         "FORK slot_zero={} control_kept={}",
@@ -396,7 +446,7 @@ fn dump(file: &File, core: bool) -> Result<()> {
     } else {
         None
     };
-    let marker = material::plain_copy(&secret(file, MARKER)?);
+    let marker = planted_plain(file, MARKER, "marker")?;
     if pause("LIVE") == "fault" {
         testing::fault()?;
     }
@@ -412,7 +462,7 @@ fn swap(file: &File) -> Result<()> {
     const PRESSURE_MIB: usize = 384;
     let key = material::planted(file, KEY)?;
     let mut plain = vec![0_u8; 1 << 20];
-    plain[..32].copy_from_slice(&secret(file, KEY)?);
+    file.read_exact_at(&mut plain[..32], KEY.0)?;
     let mut pressure: Vec<Vec<u8>> = Vec::new();
     for index in 0..PRESSURE_MIB {
         pressure.push(vec![u8::try_from(index % 251).unwrap_or(1) | 1; 1 << 20]);

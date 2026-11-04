@@ -7,7 +7,6 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
 
 use vilicus_crypto::{PLANNED_SLOTS, STACK_SCRUB_LEN, STACK_SCRUB_MARGIN, testing};
 
@@ -61,6 +60,8 @@ struct Subject {
     pool: (usize, usize),
     /// `PR_GET_DUMPABLE` as the subject reported it once set up.
     dumpable: Option<i32>,
+    /// The planted input copies of the default shape, by pattern and address (`PLANTED` lines).
+    planted: Vec<(String, usize)>,
 }
 
 /// A subject that ended before it was set up: its exit status and its last line.
@@ -100,6 +101,7 @@ impl Subject {
             stdout,
             pool,
             dumpable,
+            planted: Vec::new(),
         }))
     }
 
@@ -116,6 +118,14 @@ impl Subject {
             }
             if line.starts_with("ERROR") {
                 return Err(io::Error::other(line.trim().to_string()));
+            }
+            if let Some((name, address)) = line
+                .trim()
+                .strip_prefix("PLANTED ")
+                .and_then(|rest| rest.split_once(' '))
+                && let Ok(address) = usize::from_str_radix(address, 16)
+            {
+                self.planted.push((name.to_string(), address));
             }
             if line.starts_with(tag) {
                 return Ok(line.trim().to_string());
@@ -219,10 +229,15 @@ pub fn run(group: &str, report: &mut Report) -> io::Result<()> {
     }
 }
 
-/// The keys a path holds in the pool while live, and every pattern of the path.
+/// The patterns of a path: the keys it holds in the pool while live, every pattern searched, and
+/// those without a positive control, each with the reason.
 struct PathPatterns {
     held: Vec<&'static str>,
     all: Vec<Pattern>,
+    /// Patterns asserted absent after the drop for which the default shape leaves no copy but its
+    /// planted input: their absence alone shows nothing. The check fails when this list and the
+    /// run disagree, either way.
+    no_control: &'static [(&'static str, &'static str)],
 }
 
 fn secret_pattern(m: &Material, name: &str, field: Field) -> Pattern {
@@ -235,40 +250,195 @@ fn wrap_patterns(m: &Material) -> io::Result<Vec<Pattern>> {
     Ok(all)
 }
 
+/// Why aws-lc-rs's raw GHASH key has no control: its GCM code keeps the key only in the POLYVAL
+/// form, the `kek-gcm-h-polyval` pattern, which has one.
+const RAW_GHASH: (&str, &str) = (
+    "kek-gcm-h",
+    "aws-lc keeps the GHASH key only in its POLYVAL form, which has its own control",
+);
+
+/// The HKDF intermediates of aws-lc-rs: computed in an HMAC context on the stack of its C code,
+/// which it cleanses before returning, so no shape leaves them (Story 1.10 found the PRK in no
+/// scan either).
+const HKDF_INTERMEDIATES: [(&str, &str); 4] = [
+    (
+        "parent-hkdf-prk",
+        "aws-lc-rs's HKDF keeps the PRK in a context it cleanses",
+    ),
+    (
+        "prk-hmac-ipad",
+        "aws-lc-rs's HMAC keeps its states in a context it cleanses",
+    ),
+    (
+        "prk-hmac-opad",
+        "aws-lc-rs's HMAC keeps its states in a context it cleanses",
+    ),
+    (
+        "extract-inner",
+        "aws-lc-rs's HMAC keeps its inner digest in a context it cleanses",
+    ),
+];
+
+const NO_CONTROL_COPIES: &[(&str, &str)] = &[];
+const NO_CONTROL_DERIVE: &[(&str, &str)] = &HKDF_INTERMEDIATES;
+const NO_CONTROL_WRAP: &[(&str, &str)] = &[
+    RAW_GHASH,
+    (
+        "dek",
+        "the default shape seals its planted copy of the key in place and makes no other",
+    ),
+];
+const NO_CONTROL_UNWRAP: &[(&str, &str)] = &[RAW_GHASH];
+const NO_CONTROL_UNWRAP_WRONG: &[(&str, &str)] = &[
+    RAW_GHASH,
+    (
+        "dek",
+        "the key is sealed in place before the refused open, which writes no plaintext",
+    ),
+];
+const NO_CONTROL_KEY_TEXT: &[(&str, &str)] = &[(
+    "key",
+    "the default shape reads the key only from its planted copy; the copies path has the control",
+)];
+const NO_CONTROL_THREAD: &[(&str, &str)] = &[
+    RAW_GHASH,
+    (
+        "kek",
+        "on the worker thread no copy of the KEK but the planted one is left after the drop; the wrap path, on the main thread, has the control",
+    ),
+];
+
 fn path_patterns(name: &str, m: &Material, path: &Path) -> io::Result<PathPatterns> {
+    let parent = m.get(PARENT);
+    let prk = material::hkdf_prk(&parent);
+    let (ipad, opad) = material::hmac_states(&prk);
     Ok(match name {
         "copies" => PathPatterns {
             held: vec!["key"],
             all: vec![secret_pattern(m, "key", KEY)],
+            no_control: NO_CONTROL_COPIES,
         },
         "derive" => PathPatterns {
             held: vec!["parent", "child"],
             all: vec![
                 secret_pattern(m, "parent", PARENT),
                 pattern("child", m.derived(path)?),
-                pattern("parent-hkdf-prk", material::hkdf_prk(&m.get(PARENT))),
+                pattern("parent-hkdf-prk", &prk),
+                pattern("prk-hmac-ipad", ipad),
+                pattern("prk-hmac-opad", opad),
+                pattern("extract-inner", material::extract_inner(&parent)),
             ],
+            no_control: NO_CONTROL_DERIVE,
         },
-        "wrap" | "unwrap" => PathPatterns {
+        "wrap" => PathPatterns {
             held: vec!["kek", "dek"],
             all: wrap_patterns(m)?,
+            no_control: NO_CONTROL_WRAP,
+        },
+        "unwrap" => PathPatterns {
+            held: vec!["kek", "dek"],
+            all: wrap_patterns(m)?,
+            no_control: NO_CONTROL_UNWRAP,
         },
         "unwrap-wrong" => PathPatterns {
             held: vec!["kek"],
             all: wrap_patterns(m)?,
+            no_control: NO_CONTROL_UNWRAP_WRONG,
+        },
+        "key-text" => PathPatterns {
+            held: vec!["key"],
+            all: [
+                vec![secret_pattern(m, "key", KEY)],
+                material::key_text(&m.get(KEY)),
+            ]
+            .concat(),
+            no_control: NO_CONTROL_KEY_TEXT,
+        },
+        "thread" => PathPatterns {
+            held: vec![],
+            all: wrap_patterns(m)?,
+            no_control: NO_CONTROL_THREAD,
         },
         other => return Err(io::Error::other(format!("no patterns for {other}"))),
     })
 }
 
+/// The patterns the default shape left a copy of outside its planted input: a hit outside the
+/// pool at an address the subject did not report as planted for that pattern.
+fn controlled(scans: &[&Findings], planted: &[(String, usize)]) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    for scan in scans {
+        for (name, hits) in &scan.hits {
+            let made_by_the_operation = hits.iter().any(|(address, kind)| {
+                *kind != RegionKind::Pool
+                    && !planted
+                        .iter()
+                        .any(|(planted_name, at)| planted_name == name && at == address)
+            });
+            if made_by_the_operation {
+                found.insert(name.clone());
+            }
+        }
+    }
+    found
+}
+
+/// Review finding 2: every pattern the product shape is asserted not to leave is paired with a
+/// copy of that same pattern the default shape left on the same path, its planted input excluded,
+/// or is listed, with its reason, among the patterns without a control.
+fn control_check(
+    name: &str,
+    patterns: &PathPatterns,
+    controlled: &BTreeSet<String>,
+    report: &mut Report,
+) {
+    let listed: BTreeSet<&str> = patterns
+        .no_control
+        .iter()
+        .map(|(pattern, _)| *pattern)
+        .collect();
+    let without: BTreeSet<&str> = patterns
+        .all
+        .iter()
+        .map(|p| p.name.as_str())
+        .filter(|p| !controlled.contains(*p))
+        .collect();
+    let unlisted: Vec<&&str> = without.difference(&listed).collect();
+    let stale: Vec<&&str> = listed.difference(&without).collect();
+    let with: Vec<&String> = controlled.iter().collect();
+    report.check(
+        &format!("{name}-controls"),
+        unlisted.is_empty() && stale.is_empty(),
+        &format!(
+            "with a copy in the default shape, the planted input excluded: {with:?}; without, as listed: {:?}; without a control and not listed: {unlisted:?}; listed but controlled: {stale:?}",
+            listed.intersection(&without).collect::<Vec<_>>()
+        ),
+    );
+    for (pattern, reason) in patterns.no_control {
+        report.info(&format!("{name}-no-control-{pattern}"), reason);
+    }
+}
+
 fn main_group(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
+    report.check(
+        "pattern-recomputation",
+        material::sha256_compression_agrees_with_aws_lc(),
+        "the scanner's SHA-256 compression, which recomputes the HMAC states, agrees with aws-lc-rs's SHA-256",
+    );
     // The harness derives the child key of the derive path with the crate, in a pool of its own.
     vilicus_crypto::harden_process().map_err(io::Error::other)?;
     vilicus_crypto::lock_key_memory().map_err(io::Error::other)?;
     hygiene(m, path, report)?;
     capacity(path, report)?;
     unhardened(path, report)?;
-    for name in ["copies", "derive", "wrap", "unwrap", "unwrap-wrong"] {
+    for name in [
+        "copies",
+        "derive",
+        "wrap",
+        "unwrap",
+        "unwrap-wrong",
+        "key-text",
+    ] {
         code_path(name, m, path, report)?;
     }
     thread(m, path, report)?;
@@ -306,8 +476,9 @@ fn hygiene(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
             .unwrap_or_default()
     };
     let vmlck_kb: usize = field("VmLck:").trim_end_matches(" kB").parse().unwrap_or(0);
-    let cap_ipc_lock =
-        u64::from_str_radix(&field("CapEff:"), 16).map_or(true, |caps| caps & (1 << 14) != 0);
+    let cap_ipc_lock = ["CapEff:", "CapPrm:", "CapAmb:"]
+        .iter()
+        .any(|set| u64::from_str_radix(&field(set), 16).map_or(true, |caps| caps & (1 << 14) != 0));
     let smaps = fs::read_to_string(format!("/proc/{pid}/smaps"))?;
     let mut flags = BTreeSet::new();
     let mut lines = smaps.lines();
@@ -412,10 +583,11 @@ fn depth_checks(name: &str, stacks: &[StackDepth], report: &mut Report) {
 }
 
 /// One path, product shape then default shape: the held keys found in the pool while live and
-/// nowhere else, nothing after the drop, and the default shape's residue as the control.
+/// nowhere else, nothing after the drop, and each absent pattern paired with the default shape's
+/// copy of it (`control_check`).
 fn code_path(name: &str, m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
     let patterns = path_patterns(name, m, path)?;
-    let mut seen = BTreeSet::new();
+    let mut asis_controls = BTreeSet::new();
     for variant in ["core", "asis"] {
         let prefix = format!("{name}-{variant}");
         let Some(mut subject) = started(report, &format!("{prefix}-live"), name, variant, path)?
@@ -424,7 +596,6 @@ fn code_path(name: &str, m: &Material, path: &Path, report: &mut Report) -> io::
         };
         let (_, stacks) = subject.expect_with_stacks("LIVE")?;
         let live = subject.scan(&patterns.all)?;
-        seen.extend(live.names());
         if variant == "core" {
             depth_checks(&prefix, &stacks, report);
             let missing: Vec<&&str> = patterns
@@ -451,7 +622,6 @@ fn code_path(name: &str, m: &Material, path: &Path, report: &mut Report) -> io::
         subject.proceed()?;
         subject.expect("DROPPED")?;
         let dropped = subject.scan(&patterns.all)?;
-        seen.extend(dropped.names());
         if variant == "core" {
             report.check(
                 &format!("{prefix}-dropped"),
@@ -463,14 +633,8 @@ fn code_path(name: &str, m: &Material, path: &Path, report: &mut Report) -> io::
                 ),
             );
         } else {
-            report.check(
-                &format!("{prefix}-residue-control"),
-                dropped.outside_pool() > 0,
-                &format!(
-                    "the default shape leaves patterns behind on this path, so the scan sees its residue: {}",
-                    dropped.summary()
-                ),
-            );
+            report.info(&format!("{prefix}-dropped-scan"), &dropped.summary());
+            asis_controls = controlled(&[&live, &dropped], &subject.planted);
         }
         subject.proceed()?;
         let status = subject.finish()?;
@@ -478,30 +642,16 @@ fn code_path(name: &str, m: &Material, path: &Path, report: &mut Report) -> io::
             report.fail(&format!("{prefix}-exit"), &format!("{status}"));
         }
     }
-    let unseen: Vec<String> = patterns
-        .all
-        .iter()
-        .map(|p| p.name.clone())
-        .filter(|n| !seen.contains(n))
-        .collect();
-    report.info(
-        &format!("{name}-patterns-never-seen"),
-        &if unseen.is_empty() {
-            "none: every pattern was found in at least one scan".to_string()
-        } else {
-            format!(
-                "{} (their absence after drop has no positive control)",
-                unseen.join(",")
-            )
-        },
-    );
+    control_check(name, &patterns, &asis_controls, report);
     Ok(())
 }
 
-/// A wrap and an unwrap on a spawned thread: residue in that thread's stack mapping by default,
-/// nothing anywhere in the product shape.
+/// A wrap and an unwrap on a spawned thread: nothing anywhere in the product shape; in the
+/// default shape, residue in that thread's stack mapping, and each pattern paired with the
+/// default shape's copy of it.
 fn thread(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
-    let all = wrap_patterns(m)?;
+    let patterns = path_patterns("thread", m, path)?;
+    let mut asis_controls = BTreeSet::new();
     for variant in ["core", "asis"] {
         let prefix = format!("thread-{variant}");
         let Some(mut subject) = started(report, &prefix, "thread", variant, path)? else {
@@ -516,7 +666,7 @@ fn thread(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
         if variant == "core" {
             depth_checks(&prefix, &stacks, report);
         }
-        let dropped = subject.scan(&all)?;
+        let dropped = subject.scan(&patterns.all)?;
         let mapping = scan::regions(subject.pid(), subject.pool)?
             .into_iter()
             .find(|r| (r.start..r.end).contains(&marker));
@@ -534,7 +684,8 @@ fn thread(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
                 mapping.is_some() && dropped.hits.is_empty(),
             )
         } else {
-            (format!("{prefix}-residue-control"), in_thread > 0)
+            asis_controls = controlled(&[&dropped], &subject.planted);
+            (format!("{prefix}-residue-in-thread-stack"), in_thread > 0)
         };
         report.check(
             &name,
@@ -547,6 +698,7 @@ fn thread(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
         subject.proceed()?;
         subject.finish()?;
     }
+    control_check("thread", &patterns, &asis_controls, report);
     Ok(())
 }
 
@@ -640,41 +792,22 @@ fn sigterm(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether `/proc/<pid>/stat` shows a zombie: dead, its memory gone, not reaped yet.
-fn is_zombie(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            stat.rsplit_once(") ")
-                .map(|(_, rest)| rest.starts_with('Z'))
-        })
-        .unwrap_or(false)
-}
-
-/// SIGKILL while a key is held: no code runs, no dump, and the memory goes with the process.
+/// SIGKILL while a key is held: no code runs and no dump is written. Informational only (review
+/// finding 4): a zombie's memory reads as 0 bytes whether its pool was wiped or not, so the read
+/// shows nothing about the keys, and the absence of a dump is the `no-core-dump-*` checks' to
+/// show.
 fn killed(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> {
     let Some(mut subject) = started(report, "kill-while-held", "hold", "core", path)? else {
         return Ok(());
     };
     subject.expect("LIVE")?;
     let live = subject.scan(&[secret_pattern(m, "key", KEY)])?;
-    let memory = scan::open_memory(subject.pid())?;
     subject.signal(libc::SIGKILL)?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !is_zombie(subject.pid()) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let mut buffer = [0_u8; 32];
-    let read = std::os::unix::fs::FileExt::read_at(&memory, &mut buffer, subject.pool.0 as u64);
     let status = subject.finish()?;
-    report.check(
+    report.info(
         "kill-while-held",
-        live.count_in("key", RegionKind::Pool) == 1
-            && matches!(read, Ok(0))
-            && status.signal() == Some(libc::SIGKILL)
-            && !status.core_dumped(),
         &format!(
-            "live: {}; read of the pool after SIGKILL, before reaping: {read:?}; {status}, core dumped: {}",
+            "live: {}; {status}, core dumped: {} (no code runs on SIGKILL: the keys stay until the kernel frees the pages)",
             live.summary(),
             status.core_dumped()
         ),

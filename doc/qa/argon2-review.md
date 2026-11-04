@@ -79,7 +79,7 @@ Severity: **High** breaks the confidentiality or integrity of a Vilicus use; **M
 
 The rest of the contract holds, checked by the run: the crate writes only `[..block_count]` and nothing past it (`no_write_beyond_block_count`), writes every block below it before reading it, so prior content and reuse change nothing (`prior_buffer_content_does_not_matter`, `reused_buffer_same_output`), and on every error it returns before touching the buffer or the output (F5).
 
-Disposition: **partially closed** by U2 (the Core wipes every block on success, error and unwind, before freeing). The residue while a derivation runs, unlocked pages that the kernel may swap, is **accepted** under D131's condition (swap disabled or encrypted). Recommended to the owner: state in key management section 10 that the Argon2id buffer is KEK-equivalent, and have the Core warn at start when swap is active and unencrypted, which costs one check. Locking the buffer (up to 1 GiB of `LimitMEMLOCK` under the limiter) would close the residue at a memory cost D131 chose not to pay.
+Disposition: **closed by U2 and the locked buffer (owner decision, 2026-11-04)**. U2: the Core wipes every block on success, error and unwind, before freeing. The residue while a derivation runs, unlocked pages that the kernel may swap, is closed by locking the buffer, the owner's decision: Story 4.4 allocates each derivation's blocks in a locked mapping of their own, advised and framed as the key pool is, refuses a derivation whose memory `mlock` turns down instead of running it on unlocked memory, and sizes `LimitMEMLOCK` to the pool plus the Argon2id memory budget. Key management section 10 states the buffer is locked and why. The review's first recommendation, accepting the residue under D131's swap condition, is superseded.
 
 ### F2. Medium. `hash_password_into` frees its blocks without wiping them
 
@@ -97,7 +97,7 @@ Disposition: **closed** by U3, the derivation runs whole inside one guarded call
 
 Argon2id indexes the memory from the previous block's content from pass 0, slice 2 onward (`src/lib.rs` lines 395 to 398, 455 to 465): the access pattern, and the branch on `ref_lane == lane` (line 472), depend on the passphrase. This is the design of Argon2id (RFC 9106 s3.4.1.3), not a defect. For Vilicus: an attacker who shares the CPU caches with the Core during an unlock (a plugin or AI process on the same host, or a co-tenant VM) and records the access trace by cache timing can, once it also holds the wrapper's salt, reject a passphrase candidate after computing about half of the first pass instead of t passes, roughly a 2t = 6 fold saving at t = 3. It does not reveal the passphrase, and the salt sits in `wrappers.db`, which an attacker reaching it can already attack offline at full cost. The total derivation time does not depend on the passphrase's content. BlaMka's 32 x 32 multiplications and BLAKE2b's additions, XORs and rotations run in constant time on x86_64 (read, not measured).
 
-Disposition: **accepted**. The FR-110 strength threshold is the margin against it; Argon2i would remove it at the cost of the trade-off attacks RFC 9106 recommends Argon2id against.
+Disposition: **accepted (owner, 2026-11-04)**. The FR-110 strength threshold is the margin against it; Argon2i would remove it at the cost of the trade-off attacks RFC 9106 recommends Argon2id against.
 
 ### F5. Info. Hostile parameters return errors, never a panic or a write outside the buffer
 

@@ -323,6 +323,14 @@ const NO_CONTROL_KEY_TEXT: &[(&str, &str)] = &[(
     "key",
     "the default shape reads the key only from its planted copy; the copies path has the control",
 )];
+/// Story 4.4: H0 has no control. The argon2 crate's `zeroize` feature wipes the variable that
+/// holds it, and the copies BLAKE2b leaves on the stack while hashing it are overwritten by the
+/// fill of the blocks later in the same call, in the default shape as in the product's; the
+/// guard's scrub is what the product relies on for what would remain (review finding F3).
+const NO_CONTROL_PASSPHRASE: &[(&str, &str)] = &[(
+    "h0",
+    "the crate wipes its H0 variable and the fill of the blocks overwrites BLAKE2b's stack copies of it in the same call",
+)];
 /// The HKDF intermediates of the derivations of Story 4.3, without a control for the reason of
 /// [`HKDF_INTERMEDIATES`].
 const ROOT_INTERMEDIATES: [(&str, &str); 4] = [
@@ -455,6 +463,11 @@ fn path_patterns(name: &str, m: &Material, path: &Path) -> io::Result<PathPatter
                 no_control: NO_CONTROL_SET_MAC,
             }
         }
+        "passphrase" => PathPatterns {
+            held: vec!["kek"],
+            all: m.argon2id()?,
+            no_control: NO_CONTROL_PASSPHRASE,
+        },
         other => return Err(io::Error::other(format!("no patterns for {other}"))),
     })
 }
@@ -521,6 +534,11 @@ fn main_group(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> 
         material::sha256_compression_agrees_with_aws_lc(),
         "the scanner's SHA-256 compression, which recomputes the HMAC states, agrees with aws-lc-rs's SHA-256",
     );
+    report.check(
+        "pattern-recomputation-blake2b",
+        material::blake2b_agrees_with_argon2(m.passphrase().as_bytes())?,
+        "the harness's BLAKE2b, which recomputes H0, gives through H' the first block of every lane the argon2 crate writes",
+    );
     // The harness derives the child key of the derive path with the crate, in a pool of its own.
     vilicus_crypto::harden_process().map_err(io::Error::other)?;
     vilicus_crypto::lock_key_memory().map_err(io::Error::other)?;
@@ -537,9 +555,11 @@ fn main_group(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> 
         "file-key",
         "instance-key",
         "set-mac",
+        "passphrase",
     ] {
         code_path(name, m, path, report)?;
     }
+    argon2id_over_memlock(path, report)?;
     thread(m, path, report)?;
     panic_hook(m, path, report)?;
     sigterm(m, path, report)?;
@@ -742,6 +762,31 @@ fn code_path(name: &str, m: &Material, path: &Path, report: &mut Report) -> io::
         }
     }
     control_check(name, &patterns, &asis_controls, report);
+    Ok(())
+}
+
+/// Story 4.4, review finding F1 (owner decision): a derivation whose working memory is above the
+/// group's `RLIMIT_MEMLOCK` is refused with the typed error that names `LimitMEMLOCK`, and runs on
+/// no unlocked memory instead.
+fn argon2id_over_memlock(path: &Path, report: &mut Report) -> io::Result<()> {
+    let name = "argon2id-memlock-refused";
+    let Some(mut subject) = started(report, name, "passphrase-over-memlock", "core", path)? else {
+        return Ok(());
+    };
+    let line = loop {
+        let line = subject.expect("")?;
+        if line.starts_with("REFUSED") || line.starts_with("DERIVED") {
+            break line;
+        }
+    };
+    let status = subject.finish()?;
+    report.check(
+        name,
+        line.starts_with("REFUSED KeyMemory(WorkingMemoryLock")
+            && line.contains("LimitMEMLOCK")
+            && status.success(),
+        &format!("working memory above RLIMIT_MEMLOCK: {line}; {status}"),
+    );
     Ok(())
 }
 

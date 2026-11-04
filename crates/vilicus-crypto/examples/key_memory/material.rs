@@ -6,9 +6,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use aws_lc_rs::cipher::{AES_256, EncryptingKey, UnboundCipherKey};
 use aws_lc_rs::hmac;
-use vilicus_crypto::{InstanceKey, Label, PartitionRoot, SymmetricKey, label, testing};
+use vilicus_crypto::{
+    Argon2idParams, InstanceKey, Label, PartitionRoot, SymmetricKey, label, testing,
+};
 use vilicus_types::{Id, ModuleName};
 
 /// A secret of the material file: its byte offset; every secret is 32 bytes.
@@ -31,7 +34,10 @@ pub const ROOT: Field = Field(160);
 pub const HOUSEHOLD: Field = Field(192);
 /// The instance key, also written alone to [`credential_path`], as its systemd credential is.
 pub const INSTANCE: Field = Field(224);
-const FILE_LEN: usize = 256;
+/// A member's passphrase: 32 random bytes, which the subject writes out as 64 lowercase hex
+/// digits, the text it derives from (Story 4.4).
+pub const PASSPHRASE: Field = Field(256);
+const FILE_LEN: usize = 288;
 const SECRET_LEN: usize = 32;
 
 /// The label and context of the derivation the subject runs.
@@ -47,6 +53,25 @@ pub const HOUSEHOLD_VERSION: u32 = 1;
 /// The counter and the records of the set the set MAC path seals.
 pub const SET_COUNTER: u64 = 7;
 pub const SET_RECORDS: [&[u8]; 2] = [b"a wrapper record", b"a public key record"];
+
+/// The Argon2id cost of the passphrase path: below the floor, so that its working memory, locked,
+/// fits the main group's `RLIMIT_MEMLOCK` beside the pool; four lanes and three passes, as the
+/// version 1 cost has.
+pub const ARGON2ID_COST: Argon2idParams = Argon2idParams {
+    memory_kib: 1024,
+    passes: 3,
+    lanes: 4,
+};
+/// A cost whose working memory is above the main group's 8 MiB `RLIMIT_MEMLOCK`.
+pub const ARGON2ID_OVER_MEMLOCK: Argon2idParams = Argon2idParams {
+    memory_kib: 16 * 1024,
+    passes: 1,
+    lanes: 1,
+};
+/// The salt of the passphrase path.
+pub const ARGON2ID_SALT: [u8; 16] = *b"vilicus-km-salt!";
+/// Argon2id's type `y` in H0 (RFC 9106 section 3.2).
+const ARGON2ID_TYPE: u32 = 2;
 
 /// The member of [`MEMBER`].
 pub fn member() -> Id {
@@ -93,6 +118,37 @@ impl Material {
         self.bytes[start..start + SECRET_LEN]
             .try_into()
             .expect("32 bytes")
+    }
+
+    /// The passphrase of [`PASSPHRASE`]: its 64 lowercase hex digits.
+    pub fn passphrase(&self) -> String {
+        passphrase_text(&self.get(PASSPHRASE))
+    }
+
+    /// The patterns of the passphrase path: the passphrase, H0 recomputed from RFC 9106 section
+    /// 3.2, the KEK, and the first and last block of each lane once the derivation is done, the
+    /// last ones being what the KEK is hashed from (review finding F1). The KEK and the blocks come
+    /// from the argon2 crate run in the harness's own memory.
+    pub fn argon2id(&self) -> io::Result<Vec<Pattern>> {
+        let passphrase = self.passphrase();
+        let (kek, blocks) = argon2id_blocks(ARGON2ID_COST, passphrase.as_bytes(), &ARGON2ID_SALT)?;
+        let lanes = usize::try_from(ARGON2ID_COST.lanes).map_err(other)?;
+        let lane_len = blocks.len() / lanes;
+        let mut patterns = vec![
+            pattern("passphrase", passphrase.as_bytes()),
+            pattern(
+                "h0",
+                h0(ARGON2ID_COST, passphrase.as_bytes(), &ARGON2ID_SALT),
+            ),
+            pattern("kek", kek),
+        ];
+        for lane in 0..lanes {
+            for (place, index) in [("first", 0), ("last", lane_len - 1)] {
+                let block = &blocks[lane * lane_len + index];
+                patterns.push(pattern(format!("block-{lane}-{place}"), block_bytes(block)));
+            }
+        }
+        Ok(patterns)
     }
 
     /// The key `vilicus_crypto::testing::derive_key` derives from [`PARENT`], computed by the crate in the
@@ -419,4 +475,193 @@ pub fn extract_inner(ikm: &[u8; SECRET_LEN]) -> Vec<u8> {
     aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &data)
         .as_ref()
         .to_vec()
+}
+
+/// The passphrase text of `secret`: its lowercase hex digits, written into one allocation of their
+/// length, so that no reallocation leaves a partial copy behind.
+pub fn passphrase_text(secret: &[u8; SECRET_LEN]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(2 * SECRET_LEN);
+    for byte in secret {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    text
+}
+
+/// The crate's parameters of `cost`, with a 32-byte output.
+pub fn argon2id_params(cost: Argon2idParams) -> io::Result<Params> {
+    Params::new(cost.memory_kib, cost.passes, cost.lanes, Some(32)).map_err(other)
+}
+
+/// The KEK and the final blocks of Argon2id of `passphrase` and `salt` at `cost`, by the crate
+/// into ordinary memory.
+pub fn argon2id_blocks(
+    cost: Argon2idParams,
+    passphrase: &[u8],
+    salt: &[u8],
+) -> io::Result<([u8; SECRET_LEN], Vec<Block>)> {
+    let params = argon2id_params(cost)?;
+    let mut blocks = vec![Block::new(); params.block_count()];
+    let mut kek = [0; SECRET_LEN];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into_with_memory(passphrase, salt, &mut kek, &mut blocks)
+        .map_err(other)?;
+    Ok((kek, blocks))
+}
+
+/// The bytes of a block, its words little-endian, as it lies in memory on x86_64.
+pub fn block_bytes(block: &Block) -> Vec<u8> {
+    block
+        .as_ref()
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect()
+}
+
+/// H0 of RFC 9106 section 3.2 for Argon2id version 0x13 with no secret and no associated data.
+pub fn h0(cost: Argon2idParams, passphrase: &[u8], salt: &[u8]) -> [u8; 64] {
+    let mut input = Vec::new();
+    for value in [
+        cost.lanes,
+        32,
+        cost.memory_kib,
+        cost.passes,
+        0x13,
+        ARGON2ID_TYPE,
+    ] {
+        input.extend_from_slice(&value.to_le_bytes());
+    }
+    for part in [passphrase, salt, &[], &[]] {
+        let len = u32::try_from(part.len()).expect("a short input");
+        input.extend_from_slice(&len.to_le_bytes());
+        input.extend_from_slice(part);
+    }
+    blake2b_512(&input)
+}
+
+/// H' of RFC 9106 section 3.3 for a 1024-byte output, which makes the first two blocks of each
+/// lane: r = 1024 / 32 - 2 = 30 digests of which the first 32 bytes are kept, then the 64 bytes
+/// of the last.
+pub fn h_prime_1024(input: &[u8]) -> Vec<u8> {
+    let mut first = 1024_u32.to_le_bytes().to_vec();
+    first.extend_from_slice(input);
+    let mut digest = blake2b_512(&first);
+    let mut out = digest[..32].to_vec();
+    for _ in 2..=30 {
+        digest = blake2b_512(&digest);
+        out.extend_from_slice(&digest[..32]);
+    }
+    out.extend_from_slice(&blake2b_512(&digest));
+    out
+}
+
+/// Whether H0 and H' as recomputed here give the first block of each lane that the argon2 crate
+/// writes in one pass, which leaves those blocks as they were made: the check, on every run, that
+/// the harness's own BLAKE2b, which recomputes the H0 pattern, is BLAKE2b.
+pub fn blake2b_agrees_with_argon2(passphrase: &[u8]) -> io::Result<bool> {
+    let cost = Argon2idParams {
+        passes: 1,
+        ..ARGON2ID_COST
+    };
+    let (_, blocks) = argon2id_blocks(cost, passphrase, &ARGON2ID_SALT)?;
+    let lanes = usize::try_from(cost.lanes).map_err(other)?;
+    let lane_len = blocks.len() / lanes;
+    let h0 = h0(cost, passphrase, &ARGON2ID_SALT);
+    Ok((0..lanes).all(|lane| {
+        let mut input = h0.to_vec();
+        input.extend_from_slice(&0_u32.to_le_bytes());
+        input.extend_from_slice(&u32::try_from(lane).expect("lane").to_le_bytes());
+        h_prime_1024(&input) == block_bytes(&blocks[lane * lane_len])
+    }))
+}
+
+/// BLAKE2b's initialisation vector (RFC 7693 section 2.6).
+const BLAKE2B_IV: [u64; 8] = [
+    0x6a09_e667_f3bc_c908,
+    0xbb67_ae85_84ca_a73b,
+    0x3c6e_f372_fe94_f82b,
+    0xa54f_f53a_5f1d_36f1,
+    0x510e_527f_ade6_82d1,
+    0x9b05_688c_2b3e_6c1f,
+    0x1f83_d9ab_fb41_bd6b,
+    0x5be0_cd19_137e_2179,
+];
+
+/// BLAKE2b's message schedule (RFC 7693 section 2.7); rounds 10 and 11 reuse rows 0 and 1.
+const BLAKE2B_SIGMA: [[usize; 16]; 10] = [
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+    [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4],
+    [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
+    [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13],
+    [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
+    [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11],
+    [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
+    [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5],
+    [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
+];
+
+/// BLAKE2b's mixing function G (RFC 7693 section 3.1).
+fn blake2b_mix(v: &mut [u64; 16], [a, b, c, d]: [usize; 4], x: u64, y: u64) {
+    v[a] = v[a].wrapping_add(v[b]).wrapping_add(x);
+    v[d] = (v[d] ^ v[a]).rotate_right(32);
+    v[c] = v[c].wrapping_add(v[d]);
+    v[b] = (v[b] ^ v[c]).rotate_right(24);
+    v[a] = v[a].wrapping_add(v[b]).wrapping_add(y);
+    v[d] = (v[d] ^ v[a]).rotate_right(16);
+    v[c] = v[c].wrapping_add(v[d]);
+    v[b] = (v[b] ^ v[c]).rotate_right(63);
+}
+
+/// BLAKE2b's compression function F (RFC 7693 section 3.2), with a byte counter below 2^64.
+fn blake2b_compress(h: &mut [u64; 8], block: &[u8; 128], counter: u64, last: bool) {
+    let mut m = [0_u64; 16];
+    for (word, bytes) in m.iter_mut().zip(block.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*bytes);
+    }
+    let mut v = [0_u64; 16];
+    v[..8].copy_from_slice(h);
+    v[8..].copy_from_slice(&BLAKE2B_IV);
+    v[12] ^= counter;
+    if last {
+        v[14] = !v[14];
+    }
+    for round in 0..12 {
+        let s = &BLAKE2B_SIGMA[round % 10];
+        blake2b_mix(&mut v, [0, 4, 8, 12], m[s[0]], m[s[1]]);
+        blake2b_mix(&mut v, [1, 5, 9, 13], m[s[2]], m[s[3]]);
+        blake2b_mix(&mut v, [2, 6, 10, 14], m[s[4]], m[s[5]]);
+        blake2b_mix(&mut v, [3, 7, 11, 15], m[s[6]], m[s[7]]);
+        blake2b_mix(&mut v, [0, 5, 10, 15], m[s[8]], m[s[9]]);
+        blake2b_mix(&mut v, [1, 6, 11, 12], m[s[10]], m[s[11]]);
+        blake2b_mix(&mut v, [2, 7, 8, 13], m[s[12]], m[s[13]]);
+        blake2b_mix(&mut v, [3, 4, 9, 14], m[s[14]], m[s[15]]);
+    }
+    for (index, word) in h.iter_mut().enumerate() {
+        *word ^= v[index] ^ v[index + 8];
+    }
+}
+
+/// Unkeyed BLAKE2b with a 64-byte digest, the H of Argon2 (RFC 7693; RFC 9106 section 3.1). Test
+/// code of the harness only, which recomputes the H0 pattern with it: no crate names `blake2`
+/// (`doc/qa/argon2-review.md`, U1), and [`blake2b_agrees_with_argon2`] holds it to the argon2
+/// crate's own BLAKE2b on every run.
+pub fn blake2b_512(input: &[u8]) -> [u8; 64] {
+    let mut h = BLAKE2B_IV;
+    h[0] ^= 0x0101_0000 ^ 64;
+    let blocks = input.len().div_ceil(128).max(1);
+    for index in 0..blocks {
+        let start = index * 128;
+        let end = (start + 128).min(input.len());
+        let mut block = [0_u8; 128];
+        block[..end - start].copy_from_slice(&input[start..end]);
+        let counter = u64::try_from(end).expect("a short input");
+        blake2b_compress(&mut h, &block, counter, index + 1 == blocks);
+    }
+    let mut out = [0_u8; 64];
+    for (bytes, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(h) {
+        bytes.copy_from_slice(&word.to_le_bytes());
+    }
+    out
 }

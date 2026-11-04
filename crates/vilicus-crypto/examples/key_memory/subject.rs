@@ -24,10 +24,12 @@ use vilicus_crypto::{
     Wrapper, label, testing,
 };
 use vilicus_types::{Id, ModuleName, UtcMillis};
+use zeroize::Zeroize;
 
 use crate::material::{
-    self, DEK, DERIVE_CONTEXT, DERIVE_LABEL, Field, GENERATION, HOUSEHOLD, HOUSEHOLD_VERSION, KEK,
-    KEY, MARKER, MODULE, PARENT, ROOT, ROOT_VERSION, SET_COUNTER, SET_RECORDS,
+    self, ARGON2ID_COST, ARGON2ID_OVER_MEMLOCK, ARGON2ID_SALT, DEK, DERIVE_CONTEXT, DERIVE_LABEL,
+    Field, GENERATION, HOUSEHOLD, HOUSEHOLD_VERSION, KEK, KEY, MARKER, MODULE, PARENT, PASSPHRASE,
+    ROOT, ROOT_VERSION, SET_COUNTER, SET_RECORDS,
 };
 
 /// Exit status of a subject whose key memory was refused.
@@ -126,6 +128,8 @@ fn run_inner(scenario: &str, variant: &str, material: &Path) -> Result<()> {
         "file-key" => file_key(&file, core),
         "instance-key" => instance_key(material, core),
         "set-mac" => set_mac(&file, core),
+        "passphrase" => passphrase(&file, core),
+        "passphrase-over-memlock" => passphrase_over_memlock(&file),
         "thread" => thread(&file, core),
         "panic-hook" => panic_hook(&file),
         "fork" => fork(&file),
@@ -474,6 +478,64 @@ fn set_mac(file: &File, core: bool) -> Result<()> {
         drop((hk, prk, set_key, mac_key, tag));
     }
     pause("DROPPED");
+    Ok(())
+}
+
+/// The passphrase of the material, as the Core receives it: its text in one heap allocation,
+/// reported as planted, since the copy the Core is handed is not the derivation's to wipe.
+fn planted_passphrase(file: &File) -> Result<String> {
+    let mut secret = [0_u8; 32];
+    file.read_exact_at(&mut secret, PASSPHRASE.0)?;
+    let text = material::passphrase_text(&secret);
+    secret.zeroize();
+    say(&format!("PLANTED passphrase {:x}", text.as_ptr().addr()));
+    Ok(text)
+}
+
+/// Story 4.4: the passphrase KEK derived by Argon2id through the Core's derivation, its working
+/// memory locked and wiped, the KEK in a slot; the subject then wipes its own copy of the
+/// passphrase, as the Core wipes what it received. The default shape encodes the passphrase's
+/// characters into an ordinary `String`, as the product encodes them into its working memory, and
+/// runs the argon2 crate directly on it, into heap blocks and a heap KEK, all kept until the drop
+/// and never wiped.
+fn passphrase(file: &File, core: bool) -> Result<()> {
+    let mut text = planted_passphrase(file)?;
+    if core {
+        let kek = measured("argon2id", || {
+            testing::argon2id_below_the_floor(ARGON2ID_COST, &text, &ARGON2ID_SALT)
+        })?;
+        text.zeroize();
+        pause("LIVE");
+        drop(kek);
+    } else {
+        let encoded: String = text.chars().collect();
+        let params = material::argon2id_params(ARGON2ID_COST)?;
+        let mut blocks = vec![argon2::Block::new(); params.block_count()];
+        let mut kek = vec![0_u8; 32];
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+            .hash_password_into_with_memory(
+                encoded.as_bytes(),
+                &ARGON2ID_SALT,
+                &mut kek,
+                &mut blocks,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        pause("LIVE");
+        drop((encoded, blocks, kek));
+    }
+    drop(text);
+    pause("DROPPED");
+    Ok(())
+}
+
+/// Story 4.4: a derivation whose working memory `mlock` refuses, above the group's
+/// `RLIMIT_MEMLOCK`, is refused with its typed error, and no KEK is made.
+fn passphrase_over_memlock(file: &File) -> Result<()> {
+    let text = planted_passphrase(file)?;
+    match testing::argon2id_below_the_floor(ARGON2ID_OVER_MEMLOCK, &text, &ARGON2ID_SALT) {
+        Ok(_) => say("DERIVED"),
+        Err(error) => say(&format!("REFUSED {error:?}: {error}")),
+    }
     Ok(())
 }
 

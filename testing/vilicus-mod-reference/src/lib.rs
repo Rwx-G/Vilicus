@@ -31,6 +31,17 @@
 //! ```compile_fail,E0463
 //! extern crate vilicus_crypto;
 //! ```
+//!
+//! Nor can it name a file key or what keys a file: the key of each of its files and the text the
+//! Core lends to key a connection stay in the Core (Story 4.3, AC5).
+//!
+//! ```compile_fail,E0433
+//! fn holds(_key: vilicus_crypto::FileKey) {}
+//! ```
+//!
+//! ```compile_fail,E0433
+//! fn keys(_text: &dyn vilicus_storage::FileKeying) {}
+//! ```
 
 #![forbid(unsafe_code)]
 

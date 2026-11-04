@@ -23,7 +23,10 @@ fn params() -> WrapParams {
 /// Drops `key` and returns what the hook saw of its buffer: its address before the drop, and
 /// the buffer's bytes once wiped.
 fn dropped(key: SymmetricKey) -> (usize, Vec<(usize, [u8; KEY_LEN])>) {
-    let (address, bytes) = key.slot().with_key(|bytes| (bytes.as_ptr().addr(), *bytes));
+    let (address, bytes) = key
+        .slot()
+        .with_key(|bytes| (bytes.as_ptr().addr(), *bytes))
+        .expect("not wiped");
     assert_ne!(bytes, [0; KEY_LEN], "the key held bytes before the drop");
     crate::memory::wiped::take();
     drop(key);
@@ -68,4 +71,37 @@ fn the_buffers_of_a_wrap_and_of_a_failed_open_are_wiped() {
     let seen = crate::memory::wiped::take();
     assert_eq!(seen.len(), 1, "the buffer the refused open wrote into");
     assert_eq!(seen[0].1, [0; KEY_LEN]);
+}
+
+/// Review finding 12: the key text is SQLCipher's raw key form of the key, the format
+/// `vilicus-storage` keys files with today: `x'`, the 64 lowercase hex digits, `'`.
+#[test]
+fn the_sqlcipher_key_text_is_the_raw_key_form() {
+    let mut slot = Slot::new().expect("slot");
+    slot.with_key_mut(|bytes| {
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::try_from(index * 8 + 3).expect("small");
+        }
+    })
+    .expect("not wiped");
+    let key = SymmetricKey::from_slot(slot);
+    let expected: String = (0..KEY_LEN)
+        .map(|index| format!("{:02x}", index * 8 + 3))
+        .collect();
+    let text = key
+        .with_sqlcipher_key_text(<[u8]>::to_vec)
+        .expect("a text slot");
+    assert_eq!(text, format!("x'{expected}'").into_bytes());
+    assert_eq!(text.len(), crate::SQLCIPHER_KEY_TEXT_LEN);
+}
+
+#[test]
+fn hex_digits_are_lowercase_ascii() {
+    for nibble in 0..16_u8 {
+        assert_eq!(
+            char::from(hex_digit(nibble)),
+            char::from_digit(u32::from(nibble), 16).expect("digit"),
+            "{nibble}"
+        );
+    }
 }

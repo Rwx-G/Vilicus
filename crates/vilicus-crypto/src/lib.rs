@@ -108,12 +108,23 @@
 //! 4. [`install_panic_hook`], given the mark of a module handler's boundary: a panic outside one
 //!    wipes the pool and aborts.
 //!
+//! [`start_key_memory`] runs the four steps in that order:
+//!
 //! ```
-//! vilicus_crypto::harden_process()?;
-//! vilicus_crypto::lock_key_memory()?;
-//! vilicus_crypto::install_panic_hook(|| false);
+//! vilicus_crypto::start_key_memory(|| std::process::exit(0), || false)?;
 //! # Ok::<(), vilicus_crypto::KeyMemoryError>(())
 //! ```
+//!
+//! Once the panic hook or the SIGTERM thread has wiped the pool, every key operation fails with
+//! [`KeyMemoryError::Wiped`], one already running included: no key operation returns a result
+//! computed from keys being wiped. SQLCipher's key text of a key is built in the pool too
+//! ([`SymmetricKey::with_sqlcipher_key_text`]).
+//!
+//! Outside the claim of D131, and of this crate: the AVX-512 registers zmm16 to zmm31 and the mask
+//! registers, which the scrub's `vzeroall` does not clear, and every vector register on a CPU
+//! without AVX; and the stack depth of a key operation, which the tests measure with a canary
+//! (on a build that paints the stack, which the release build does not) but which nothing bounds
+//! at run time.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("vilicus-crypto locks its key memory with Linux system calls; build it on Linux");
@@ -135,8 +146,8 @@ pub use key::{KEY_LEN, SymmetricKey};
 #[cfg(feature = "testing")]
 pub use memory::testing;
 pub use memory::{
-    PLANNED_SLOTS, STACK_SCRUB_LEN, STACK_SCRUB_MARGIN, harden_process, install_panic_hook,
-    lock_key_memory, take_sigterm,
+    PLANNED_SLOTS, PLANNED_TEXT_SLOTS, SQLCIPHER_KEY_TEXT_LEN, STACK_SCRUB_LEN, STACK_SCRUB_MARGIN,
+    WIPE_WAIT, harden_process, install_panic_hook, lock_key_memory, start_key_memory, take_sigterm,
 };
 pub use wrapper::{
     ARGON2_VERSION, Aead, Argon2idParams, FORMAT_VERSION, Kdf, KekDerivation,

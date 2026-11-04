@@ -8,20 +8,25 @@ use std::io;
 use std::os::unix::fs::FileExt;
 
 use super::{PANIC_OBSERVER, POOL, Slot, canary};
+use crate::error::CryptoError;
 use crate::key::{KEY_LEN, SymmetricKey};
 
 /// A key read from `file` at `offset` straight into a slot, so that no other copy of it exists in
 /// the process: the harness plants the keys whose copies it then looks for.
 pub fn key_from_file(file: &File, offset: u64) -> io::Result<SymmetricKey> {
     let mut slot = Slot::new().map_err(io::Error::other)?;
-    slot.with_key_mut(|bytes| file.read_exact_at(bytes, offset))?;
+    slot.with_key_mut(|bytes| file.read_exact_at(bytes, offset))
+        .map_err(io::Error::other)??;
     Ok(SymmetricKey::from_slot(slot))
 }
 
 /// Lends `key`'s bytes to `operation` under the guard of a key operation, as the crate's own
-/// operations are.
-pub fn with_key<R>(key: &SymmetricKey, operation: impl FnOnce(&[u8; KEY_LEN]) -> R) -> R {
-    key.slot().with_key(operation)
+/// operations are; refused once the pool is wiped.
+pub fn with_key<R>(
+    key: &SymmetricKey,
+    operation: impl FnOnce(&[u8; KEY_LEN]) -> R,
+) -> Result<R, CryptoError> {
+    Ok(key.slot().with_key(operation)?)
 }
 
 /// The address and length of the pool's locked pages, once it is locked.
@@ -41,18 +46,19 @@ pub fn set_panic_observer(observe: fn()) {
 }
 
 /// `PR_GET_DUMPABLE` of this process.
-#[allow(unsafe_code)] // prctl, which std does not wrap.
+#[allow(unsafe_code)] // prctl, in tail position, where Rust takes no attribute on an expression.
 pub fn dumpable() -> i32 {
     // SAFETY: prctl with integer arguments only.
     unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0 as libc::c_ulong, 0, 0, 0) }
 }
 
 /// Sends `signal` to the process `pid`.
-#[allow(unsafe_code)] // kill(2), which std wraps for SIGKILL only.
 pub fn signal(pid: u32, signal: i32) -> io::Result<()> {
     let pid = i32::try_from(pid).map_err(io::Error::other)?;
+    #[allow(unsafe_code)] // kill(2), which std wraps for SIGKILL only.
     // SAFETY: kill(2) with integer arguments only.
-    if unsafe { libc::kill(pid, signal) } != 0 {
+    let sent = unsafe { libc::kill(pid, signal) };
+    if sent != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -69,10 +75,10 @@ pub struct ForkView {
 
 /// Forks; the child reads `key`'s slot and `control` and ends at once, and its exit status says
 /// what it read.
-#[allow(unsafe_code)] // fork, _exit and waitpid, which std does not wrap.
 pub fn fork_and_read(key: &SymmetricKey, control: &[u8]) -> io::Result<ForkView> {
     let slot = key.slot().start().cast_const();
     let expected = control.to_vec();
+    #[allow(unsafe_code)] // fork, which std does not wrap.
     // SAFETY: the child only reads memory and calls `_exit`, both async-signal-safe, as a forked
     // child of a threaded parent must.
     let pid = unsafe { libc::fork() };
@@ -80,18 +86,24 @@ pub fn fork_and_read(key: &SymmetricKey, control: &[u8]) -> io::Result<ForkView>
         return Err(io::Error::last_os_error());
     }
     if pid == 0 {
+        #[allow(unsafe_code)] // the slot as the child sees it.
         // SAFETY: the slot stays mapped in the child, where MADV_WIPEONFORK makes it zeroes.
         let slot_bytes = unsafe { std::slice::from_raw_parts(slot, KEY_LEN) };
         let slot_zero = slot_bytes.iter().all(|byte| *byte == 0);
         let control_kept = control == expected.as_slice() && control.iter().any(|byte| *byte != 0);
         let code = i32::from(slot_zero) | (i32::from(control_kept) << 1);
+        #[allow(unsafe_code)] // _exit, which std does not wrap.
         // SAFETY: `_exit` skips the atexit handlers a forked child of a threaded parent must not
         // run.
-        unsafe { libc::_exit(code) };
+        unsafe {
+            libc::_exit(code)
+        };
     }
     let mut status = 0;
+    #[allow(unsafe_code)] // waitpid, which std does not wrap.
     // SAFETY: `pid` is this process's child and `status` a valid out-pointer.
-    if unsafe { libc::waitpid(pid, &mut status, 0) } != pid {
+    let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+    if waited != pid {
         return Err(io::Error::last_os_error());
     }
     let code = libc::WEXITSTATUS(status);
@@ -103,8 +115,8 @@ pub fn fork_and_read(key: &SymmetricKey, control: &[u8]) -> io::Result<ForkView>
 
 /// Writes to a `PROT_NONE` page: a real memory fault, which a SIGSEGV sent with kill(2) is not,
 /// since the Rust runtime's stack overflow handler returns from that one.
-#[allow(unsafe_code)] // mmap and a faulting write, on purpose.
 pub fn fault() -> io::Result<()> {
+    #[allow(unsafe_code)] // mmap of a page with no access.
     // SAFETY: a new private anonymous mapping with no access and no address hint, compared with
     // MAP_FAILED before use.
     let page = unsafe {
@@ -120,9 +132,12 @@ pub fn fault() -> io::Result<()> {
     if page == libc::MAP_FAILED {
         return Err(io::Error::last_os_error());
     }
+    #[allow(unsafe_code)] // a faulting write, on purpose.
     // SAFETY: faults on purpose: the page has no access, and the default action of SIGSEGV
     // ends the process.
-    unsafe { page.cast::<u8>().write_volatile(1) };
+    unsafe {
+        page.cast::<u8>().write_volatile(1)
+    };
     Err(io::Error::other(
         "the write to a PROT_NONE page did not fault",
     ))

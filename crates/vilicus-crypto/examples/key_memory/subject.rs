@@ -191,7 +191,7 @@ fn copies(file: &File, core: bool) -> Result<()> {
         let key = material::planted(file, KEY)?;
         measured("copies", || {
             testing::with_key(&key, |bytes| copy_to_deep_stack(bytes))
-        });
+        })?;
         pause("LIVE");
         drop(key);
     } else {

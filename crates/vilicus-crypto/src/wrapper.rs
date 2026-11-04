@@ -227,16 +227,18 @@ impl Wrapper {
         // The key is copied into a buffer the crate wipes and sealed there, so a failed seal
         // leaves no plaintext copy behind.
         let mut sealed = Slot::new()?;
-        sealed.with_key_mut(|out| key.slot().with_key(|bytes| out.copy_from_slice(bytes)));
+        // Each guarded call fails once the pool is wiped (`CryptoError::KeyMemory`), so a KEK
+        // wiped during the seal never yields a wrapper.
+        sealed.with_key_mut(|out| key.slot().with_key(|bytes| out.copy_from_slice(bytes)))??;
         let tag = kek
             .slot()
             .with_key(|kek| {
                 sealed.with_key_mut(|in_out| {
                     aws_lc::seal_aes_256_gcm(kek, nonce, &additional_data, in_out)
                 })
-            })
+            })??
             .map_err(|_| CryptoError::Seal)?;
-        sealed.with_key(|bytes| wrapper.ciphertext.copy_from_slice(bytes));
+        sealed.with_key(|bytes| wrapper.ciphertext.copy_from_slice(bytes))?;
         wrapper.tag = tag;
         Ok(wrapper)
     }
@@ -264,7 +266,7 @@ impl Wrapper {
                         out,
                     )
                 })
-            })
+            })??
             .map_err(|_| CryptoError::Open)?;
         Ok(SymmetricKey::from_slot(opened))
     }

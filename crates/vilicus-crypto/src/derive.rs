@@ -175,7 +175,7 @@ pub fn derive_key(
     let mut derived = Slot::new()?;
     parent
         .slot()
-        .with_key(|ikm| derived.with_key_mut(|out| aws_lc::hkdf_sha256(ikm, &info, out)))
+        .with_key(|ikm| derived.with_key_mut(|out| aws_lc::hkdf_sha256(ikm, &info, out)))??
         .map_err(|_| CryptoError::Derive)?;
     Ok(SymmetricKey::from_slot(derived))
 }

@@ -72,7 +72,7 @@ impl Material {
         let file = fs::File::open(path)?;
         let parent = testing::key_from_file(&file, PARENT.0)?;
         let child = derive_key(&parent, DERIVE_LABEL, &[DERIVE_CONTEXT]).map_err(other)?;
-        Ok(testing::with_key(&child, |bytes| *bytes))
+        testing::with_key(&child, |bytes| *bytes).map_err(other)
     }
 }
 

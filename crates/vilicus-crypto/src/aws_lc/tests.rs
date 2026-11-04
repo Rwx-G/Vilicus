@@ -110,6 +110,28 @@ fn hkdf_sha256_matches_known_answers() {
     );
 }
 
+/// HMAC-SHA-256 against two vectors computed with Python's `hmac` and `hashlib`, an
+/// implementation independent of aws-lc-rs: an empty message, and a message given in parts; a
+/// tag with one bit flipped, a tag of another message and another key are refused.
+#[test]
+fn hmac_sha256_matches_known_answers_and_verifies_only_its_tag() {
+    let key: [u8; KEY_LEN] = sequence(0x00);
+    let empty = hex("d38b42096d80f45f826b44a9d5607de72496a415d3f4a1a8c88e3bb9da8dc1cb");
+    assert_eq!(hmac_sha256(&key, &[]).to_vec(), empty);
+    let message: [&[u8]; 3] = [b"vilicus/v1/test/", b"member-0001", &7_u32.to_be_bytes()];
+    let tag = hmac_sha256(&key, &message);
+    assert_eq!(
+        tag.to_vec(),
+        hex("4146d45e92fc84454ad776b5c8b1684df029dcdfb540f5bdad0df0c9c428d22d")
+    );
+    assert_eq!(verify_hmac_sha256(&key, &message, &tag), Ok(()));
+    let mut flipped = tag;
+    flipped[HMAC_SHA256_LEN - 1] ^= 1;
+    assert!(verify_hmac_sha256(&key, &message, &flipped).is_err());
+    assert!(verify_hmac_sha256(&key, &message[..2], &tag).is_err());
+    assert!(verify_hmac_sha256(&sequence(0x01), &message, &tag).is_err());
+}
+
 #[test]
 fn the_csprng_fills_what_it_is_given() {
     let mut first = [0; 32];
@@ -119,7 +141,8 @@ fn the_csprng_fills_what_it_is_given() {
     assert_ne!(first, second);
 }
 
-/// The aws-lc-rs types that hold a key, an HKDF input or a key schedule once built.
+/// The aws-lc-rs types that hold a key, an HKDF input, a key schedule or an HMAC state once built
+/// (`hmac::Key` and `hmac::Context` are named `Key` and `Context`).
 const KEY_OBJECTS: &[&str] = &[
     "LessSafeKey",
     "UnboundKey",
@@ -131,6 +154,8 @@ const KEY_OBJECTS: &[&str] = &[
     "Prk",
     "Okm",
     "Salt",
+    "Key",
+    "Context",
 ];
 
 fn names_a_key_object(text: &str) -> Option<&'static str> {

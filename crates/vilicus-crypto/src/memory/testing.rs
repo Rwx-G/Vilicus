@@ -7,8 +7,11 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 
+use vilicus_types::Id;
+
 use super::{PANIC_OBSERVER, POOL, Slot, canary};
 use crate::error::CryptoError;
+use crate::hierarchy::{HouseholdKey, Key, MemberDek};
 use crate::key::{KEY_LEN, SymmetricKey};
 
 /// A key read from `file` at `offset` straight into a slot, so that no other copy of it exists in
@@ -20,13 +23,44 @@ pub fn key_from_file(file: &File, offset: u64) -> io::Result<SymmetricKey> {
     Ok(SymmetricKey::from_slot(slot))
 }
 
-/// Lends `key`'s bytes to `operation` under the guard of a key operation, as the crate's own
-/// operations are; refused once the pool is wiped.
-pub fn with_key<R>(
-    key: &SymmetricKey,
+/// A member DEK of `member` and `version` read from `file` at `offset` straight into a slot, as
+/// [`key_from_file`] reads a key.
+pub fn member_dek_from_file(
+    file: &File,
+    offset: u64,
+    member: Id,
+    version: u32,
+) -> io::Result<MemberDek> {
+    Ok(MemberDek::from_key(
+        key_from_file(file, offset)?,
+        member,
+        version,
+    ))
+}
+
+/// A household key of `version` read from `file` at `offset` straight into a slot, as
+/// [`key_from_file`] reads a key. The household key's own creation is story 4.6's; this stands in
+/// for it in the harness and in the Core's tests only.
+pub fn household_key_from_file(file: &File, offset: u64, version: u32) -> io::Result<HouseholdKey> {
+    Ok(HouseholdKey::from_key(
+        key_from_file(file, offset)?,
+        version,
+    ))
+}
+
+/// A random household key of `version`, for the Core's tests of what derives from it; its own
+/// creation and HPKE wrap are story 4.6's.
+pub fn household_key(version: u32) -> Result<HouseholdKey, CryptoError> {
+    Ok(HouseholdKey::from_key(SymmetricKey::generate()?, version))
+}
+
+/// Lends the bytes of `key`, a key of any role, to `operation` under the guard of a key
+/// operation, as the crate's own operations are; refused once the pool is wiped.
+pub fn with_key<K: Key, R>(
+    key: &K,
     operation: impl FnOnce(&[u8; KEY_LEN]) -> R,
 ) -> Result<R, CryptoError> {
-    Ok(key.slot().with_key(operation)?)
+    Ok(key.symmetric().slot().with_key(operation)?)
 }
 
 /// The address and length of the pool's locked pages, once it is locked.

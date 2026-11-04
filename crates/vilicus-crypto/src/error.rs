@@ -34,6 +34,29 @@ pub enum CryptoError {
     },
     /// The key pool gave no slot for the key or for a working buffer of the operation.
     KeyMemory(KeyMemoryError),
+    /// A key's credential file could not be opened or read.
+    Credential {
+        /// The `errno` of the failed call, 0 when the system gave none.
+        errno: i32,
+    },
+    /// A key's credential file does not hold exactly one 256-bit key.
+    CredentialLength,
+    /// A record of a MAC's input is longer than `u32::MAX` bytes, or the input holds more than
+    /// `u32::MAX` records: the most their `u32` length or count holds.
+    MacInputTooLong {
+        /// The length or the count.
+        len: usize,
+    },
+    /// A MAC did not verify: the authenticated bytes, the key or the tag differ from those it was
+    /// computed with. The check does not tell these apart, and neither does this error.
+    Mac,
+    /// A MAC states another household key version than the key it is checked with.
+    HouseholdKeyVersion {
+        /// The version the MAC states.
+        stated: u32,
+        /// The version of the key it is checked with.
+        held: u32,
+    },
 }
 
 impl From<KeyMemoryError> for CryptoError {
@@ -63,6 +86,26 @@ impl fmt::Display for CryptoError {
                 )
             }
             Self::KeyMemory(error) => write!(formatter, "{error}"),
+            Self::Credential { errno } => {
+                write!(
+                    formatter,
+                    "the key's credential could not be read (errno {errno})"
+                )
+            }
+            Self::CredentialLength => {
+                formatter.write_str("the key's credential does not hold exactly one 256-bit key")
+            }
+            Self::MacInputTooLong { len } => {
+                write!(
+                    formatter,
+                    "MAC input part or record count of {len} is too long"
+                )
+            }
+            Self::Mac => formatter.write_str("the MAC did not verify"),
+            Self::HouseholdKeyVersion { stated, held } => write!(
+                formatter,
+                "the MAC states household key version {stated}, the key is version {held}"
+            ),
         }
     }
 }
@@ -182,8 +225,9 @@ impl fmt::Display for KeyMemoryError {
 
 impl std::error::Error for KeyMemoryError {}
 
-/// A refused wrapper encoding. A refused wrapper is never repaired, read under another version or
-/// opened with other algorithms than it names.
+/// A refused encoding of a stored value of the crate, a wrapper or a wrapper set MAC. A refused
+/// value is never repaired, read under another version or checked with other algorithms than it
+/// names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WrapperError {
@@ -232,6 +276,11 @@ pub enum WrapperError {
     InvalidCreationTime,
     /// The wrapper id is not a UUIDv7.
     InvalidId,
+    /// The MAC algorithm identifier of a stored MAC names no algorithm of its format version.
+    UnknownMacAlgorithm {
+        /// The identifier the bytes state.
+        id: u16,
+    },
 }
 
 impl fmt::Display for WrapperError {
@@ -264,6 +313,9 @@ impl fmt::Display for WrapperError {
             }
             Self::InvalidCreationTime => formatter.write_str("wrapper creation time out of range"),
             Self::InvalidId => formatter.write_str("wrapper id is not a UUIDv7"),
+            Self::UnknownMacAlgorithm { id } => {
+                write!(formatter, "unknown MAC algorithm identifier {id:#06x}")
+            }
         }
     }
 }

@@ -15,6 +15,8 @@
 //! - **Key derivation**: HKDF-SHA-256 from aws-lc-rs, with no salt, a 32-byte output and an
 //!   `info` made of a versioned [`Label`] and its end byte, then each context part preceded by
 //!   its length ([`derive_key`]), so that no two derivations share an `info`.
+//! - **Message authentication**: HMAC-SHA-256 from aws-lc-rs, for the MAC of the `wrappers.db`
+//!   record set ([`WrapperSetKey`]), its tags compared in constant time.
 //! - **Hashing**: SHA-256 from aws-lc-rs ([`sha256`]).
 //!
 //! The rest of the suite is not in this crate yet. Argon2id, for the passphrase and backup
@@ -85,9 +87,26 @@
 //!
 //! # Key types
 //!
-//! Every key type of Vilicus is defined here ([`SymmetricKey`]): none implements `Clone`,
-//! `Debug` or `Display`, and each wipes its buffer when dropped. The crate never hands out key
-//! bytes.
+//! Every key type of Vilicus is defined here: [`SymmetricKey`], and one type per role of the key
+//! hierarchy (`doc/key-management.md` section 2). None implements `Clone`, `Debug` or `Display`,
+//! and each wipes its buffer when dropped. The crate never hands out key bytes.
+//!
+//! | Role | Type | Derived from, under |
+//! |---|---|---|
+//! | instance key | [`InstanceKey`] | its systemd credential, read straight into the pool |
+//! | audit key | [`AuditKey`] | the audit writer's credential, read the same way |
+//! | member DEK | [`MemberDek`] | the CSPRNG; wrapped once per KEK in `wrappers.db` |
+//! | household key | [`HouseholdKey`] | its own path (HPKE, story 4.6) |
+//! | home partition root | [`HomePartitionRoot`] | the instance key, `vilicus/v1/partition/home` |
+//! | `core.db` key | [`DatabaseKey`] | the instance key, `vilicus/v1/core/db` |
+//! | `audit.db` key | [`DatabaseKey`] | the audit key, `vilicus/v1/audit/db` |
+//! | module file key | [`FileKey`] | its partition's root ([`PartitionRoot`]), `vilicus/v1/db/` |
+//! | `wrappers.db` set MAC key | [`WrapperSetKey`] | the household key, `vilicus/v1/hk/wrappers-set-mac/` |
+//!
+//! A module file key's context is the module, the partition and the key epoch (the root's
+//! version, the file's generation), so one file's key opens no other file, and the partition comes
+//! from the root, so no root derives the key of another partition's file: nothing the instance key
+//! reaches opens a personal or household file (D9).
 //!
 //! Each AES-256-GCM or HKDF operation builds the aws-lc-rs objects it needs from the key's
 //! buffer and drops them before it returns, because a live aws-lc-rs key object keeps the key,
@@ -132,14 +151,20 @@ compile_error!("vilicus-crypto locks its key memory with Linux system calls; bui
 mod aws_lc;
 mod derive;
 mod error;
+mod hierarchy;
 mod key;
 mod memory;
 mod wrapper;
+mod wrapper_set;
 
 use vilicus_types::SHA256_LEN;
 
 pub use derive::{Label, LabelError, derive_key};
 pub use error::{CryptoError, KeyMemoryError, WrapperError};
+pub use hierarchy::{
+    AuditKey, Database, DatabaseKey, FileKey, HomePartitionRoot, HouseholdKey, InstanceKey, Key,
+    MemberDek, PartitionRoot,
+};
 pub use key::{KEY_LEN, SymmetricKey};
 /// What the key memory regression harness needs of the crate (Story 4.2, AC10), compiled with
 /// the `testing` feature only, which `ci/check_packaging.py` refuses in a release artefact.
@@ -153,6 +178,7 @@ pub use wrapper::{
     ARGON2_VERSION, Aead, Argon2idParams, FORMAT_VERSION, Kdf, KekDerivation,
     MAX_KEK_REFERENCE_LEN, OLDEST_ACCEPTED_FORMAT_VERSION, WrapParams, Wrapper,
 };
+pub use wrapper_set::{WRAPPER_SET_MAC_LEN, WRAPPER_SET_MAC_VERSION, WrapperSetKey, WrapperSetMac};
 
 /// The SHA-256 digest of `data`: the hash the Core compares with each migration's frozen hash
 /// before the migration runs (spine AD-23, D21).

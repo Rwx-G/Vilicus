@@ -13,7 +13,8 @@
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use aws_lc_rs::error::Unspecified;
 use aws_lc_rs::hkdf::{HKDF_SHA256, Salt};
-use aws_lc_rs::{aead, digest, rand};
+use aws_lc_rs::hmac::{Context, HMAC_SHA256, Key};
+use aws_lc_rs::{aead, constant_time, digest, rand};
 use vilicus_types::SHA256_LEN;
 
 use crate::KEY_LEN;
@@ -23,6 +24,9 @@ pub(crate) const NONCE_LEN: usize = aead::NONCE_LEN;
 
 /// Bytes of an AES-256-GCM tag: 128 bits.
 pub(crate) const TAG_LEN: usize = aead::MAX_TAG_LEN;
+
+/// Bytes of an HMAC-SHA-256 tag: 256 bits.
+pub(crate) const HMAC_SHA256_LEN: usize = digest::SHA256_OUTPUT_LEN;
 
 #[cfg(test)]
 mod tests;
@@ -93,4 +97,33 @@ pub(crate) fn hkdf_sha256(
 ) -> Result<(), Unspecified> {
     let prk = Salt::new(HKDF_SHA256, &[]).extract(ikm);
     prk.expand(info, HKDF_SHA256)?.fill(out)
+}
+
+/// HMAC-SHA-256 under `key` of the concatenation of `message`, given in parts.
+#[inline(never)]
+pub(crate) fn hmac_sha256(key: &[u8; KEY_LEN], message: &[&[u8]]) -> [u8; HMAC_SHA256_LEN] {
+    let key = Key::new(HMAC_SHA256, key);
+    let mut context = Context::with_key(&key);
+    for part in message {
+        context.update(part);
+    }
+    let mut tag = [0; HMAC_SHA256_LEN];
+    tag.copy_from_slice(context.sign().as_ref());
+    tag
+}
+
+/// Whether `tag` is the HMAC-SHA-256 under `key` of the concatenation of `message`, compared in
+/// constant time.
+#[inline(never)]
+pub(crate) fn verify_hmac_sha256(
+    key: &[u8; KEY_LEN],
+    message: &[&[u8]],
+    tag: &[u8; HMAC_SHA256_LEN],
+) -> Result<(), Unspecified> {
+    let key = Key::new(HMAC_SHA256, key);
+    let mut context = Context::with_key(&key);
+    for part in message {
+        context.update(part);
+    }
+    constant_time::verify_slices_are_equal(context.sign().as_ref(), tag)
 }

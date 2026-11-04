@@ -453,6 +453,24 @@ pub(crate) fn install(connection: &Connection, policy: Policy) -> rusqlite::Resu
     }))
 }
 
+/// The decision of [`authorize`] for an action of top-level SQL; any action a trigger body or a
+/// view carries out (the context's accessor is set) is denied, whatever the policy.
+pub(crate) fn authorize_direct(policy: Policy, context: &AuthContext<'_>) -> Authorization {
+    if context.accessor.is_some() {
+        Authorization::Deny
+    } else {
+        authorize(policy, context)
+    }
+}
+
+/// Installs `policy` as the authorizer of `connection`, denying every action a trigger or a view
+/// carries out ([`authorize_direct`]): the connection of `wrappers.db`, where none may run.
+pub(crate) fn install_direct(connection: &Connection, policy: Policy) -> rusqlite::Result<()> {
+    connection.authorizer(Some(move |context: AuthContext<'_>| {
+        authorize_direct(policy, &context)
+    }))
+}
+
 /// Removes the authorizer; only the migration runner does, around its own transaction control.
 /// The Core's own writes to `_meta` swap to [`Policy::Core`] instead, so even its statements stay
 /// confined.
@@ -528,6 +546,48 @@ mod tests {
                     "{policy:?} {label}"
                 );
             }
+        }
+    }
+
+    /// Story 4.3 review, H1: every action a trigger body or a view carries out is denied on a
+    /// connection installed with `install_direct`, whatever the policy allows of top-level SQL.
+    #[test]
+    fn an_action_of_a_trigger_or_a_view_is_denied() {
+        let actions = [
+            AuthAction::Insert {
+                table_name: "member_dek_wrappers",
+            },
+            AuthAction::Update {
+                table_name: "wrapper_set",
+                column_name: "counter",
+            },
+            AuthAction::Read {
+                table_name: "member_dek_wrappers",
+                column_name: "wrapper",
+            },
+            AuthAction::Select,
+        ];
+        for action in actions {
+            for accessor in ["a_trigger", "a_view"] {
+                let nested = AuthContext {
+                    action,
+                    database_name: Some("main"),
+                    accessor: Some(accessor),
+                };
+                assert_eq!(
+                    authorize_direct(Policy::Write, &nested),
+                    Authorization::Deny
+                );
+            }
+            let direct = AuthContext {
+                action,
+                database_name: Some("main"),
+                accessor: None,
+            };
+            assert_eq!(
+                authorize_direct(Policy::Write, &direct),
+                Authorization::Allow
+            );
         }
     }
 

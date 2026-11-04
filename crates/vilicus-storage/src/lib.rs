@@ -71,9 +71,9 @@ pub use schema::{
     ColumnInfo, ForeignKey, IndexColumn, IndexInfo, Schema, SchemaObject, TableInfo, TableKind,
 };
 pub use wrappers::{
-    DekWrapperRow, KekKind, PublicKeyKind, PublicKeyRow, RECORD_TABLES, WRAPPERS_FILE_NAME,
-    WRAPPERS_SCHEMA_VERSION, WrapperChange, WrapperSet, WrapperStore, create_wrappers,
-    open_wrappers,
+    DekWrapperRow, KekKind, PublicKeyKind, PublicKeyRow, RECORD_TABLES, RecordTable, SCHEMA_TABLE,
+    WRAPPERS_FILE_NAME, WRAPPERS_SCHEMA_VERSION, WrapperChange, WrapperSet, WrapperSnapshot,
+    WrapperStore, WrapperWrite, create_wrappers, open_wrappers,
 };
 
 /// The partition a module file belongs to, which names the file (AD-5).

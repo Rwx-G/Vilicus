@@ -202,12 +202,7 @@ mod with_the_household_key {
         (created_at, Id::new_v7(created_at, [seed; 10]).expect("id"))
     }
 
-    fn passphrase_wrapper(
-        dek: &MemberDek,
-        kind: KekKind,
-        kek: &SymmetricKey,
-        seed: u8,
-    ) -> WrapperChange {
+    fn dek_wrapper(dek: &MemberDek, kind: KekKind, kek: &SymmetricKey, seed: u8) -> WrapperChange {
         let (created_at, id) = wrap_params(seed);
         Wrappers::dek_wrapper_change(
             dek,
@@ -226,10 +221,22 @@ mod with_the_household_key {
         testing::with_key(dek, |bytes| *bytes).expect("read")
     }
 
+    fn raw(dir: &Path) -> Connection {
+        Connection::open(dir.join(WRAPPERS_FILE_NAME)).expect("open with no key")
+    }
+
+    /// Writes `changes`, verified and sealed under the one `set_key`, and returns the counter.
+    fn write(wrappers: &mut Wrappers, set_key: &WrapperSetKey, changes: &[WrapperChange]) -> u64 {
+        let written = wrappers.write(set_key, set_key, changes).expect("write");
+        assert!(written.checkpoint.is_none(), "{:?}", written.checkpoint);
+        written.counter
+    }
+
     /// AC4 (D4, AD-4): `wrappers.db` holds a member's DEK wrapper under each KEK in a file of its
     /// own, beside no `core.db`, and the DEK unwraps from it with the KEK alone: with `core.db`
-    /// and the instance key lost, the counter is unchecked, the DEK comes back, and it derives
-    /// the key that opens the member's personal file.
+    /// and the instance key lost, the counter is unchecked, the DEK comes back, before the set is
+    /// verified for the unlocking member's own wrapper and through the verified set afterwards,
+    /// and it derives the key that opens the member's personal file.
     #[test]
     fn a_member_dek_unwraps_without_core_db_or_the_instance_key() {
         key_memory();
@@ -245,53 +252,51 @@ mod with_the_household_key {
             .close()
             .expect("close");
         let mut wrappers = Wrappers::create(&dir).expect("create wrappers.db");
-        let counter = wrappers
-            .write(
-                &set_key,
-                &[
-                    passphrase_wrapper(&dek, KekKind::Passphrase, &passphrase_kek, 1),
-                    passphrase_wrapper(&dek, KekKind::Recovery, &recovery_kek, 2),
-                ],
-            )
-            .expect("write");
-        assert_eq!(counter, 1);
+        let changes = [
+            dek_wrapper(&dek, KekKind::Passphrase, &passphrase_kek, 1),
+            dek_wrapper(&dek, KekKind::Recovery, &recovery_kek, 2),
+        ];
+        assert_eq!(write(&mut wrappers, &set_key, &changes), 1);
         wrappers.close().expect("close");
         let original = key_bytes(&dek);
-        drop((dek, hk, set_key));
+        drop(dek);
 
         assert!(!dir.join("core.db").exists());
         let wrappers = Wrappers::open(&dir).expect("open wrappers.db");
-        assert_eq!(
-            wrappers.check_counter(None).expect("check"),
-            CounterCheck::Unchecked
-        );
         for (kind, kek) in [
             (KekKind::Passphrase, &passphrase_kek),
             (KekKind::Recovery, &recovery_kek),
         ] {
-            let dek = wrappers
-                .unwrap_member_dek(member(1), kind, kek)
+            let own = wrappers
+                .unwrap_own_dek(member(1), kind, kek)
                 .expect("unwrap")
                 .expect("a wrapper of that kind");
-            assert_eq!(key_bytes(&dek), original);
-            open_file::<Read>(&file, &file_key(&dek, &file).expect("file key"))
+            assert_eq!(key_bytes(&own), original);
+            open_file::<Read>(&file, &file_key(&own, &file).expect("file key"))
                 .expect("the member's file opens")
                 .close()
                 .expect("close");
         }
+        let verified = wrappers.open_verified(&set_key, None).expect("verified");
+        assert_eq!(verified.counter_check(), CounterCheck::Unchecked);
+        let dek = verified
+            .unwrap_member_dek(member(1), KekKind::Recovery, &recovery_kek)
+            .expect("unwrap")
+            .expect("the wrapper");
+        assert_eq!(key_bytes(&dek), original);
         assert!(matches!(
-            wrappers.unwrap_member_dek(member(1), KekKind::Passphrase, &recovery_kek),
+            wrappers.unwrap_own_dek(member(1), KekKind::Passphrase, &recovery_kek),
             Err(KeyError::Crypto(CryptoError::Open))
         ));
         assert!(
-            wrappers
+            verified
                 .unwrap_member_dek(member(2), KekKind::Passphrase, &passphrase_kek)
                 .expect("read")
                 .is_none()
         );
         let row = vilicus_storage::open_wrappers(&dir)
             .expect("open")
-            .dek_wrapper(member(1), KekKind::Passphrase)
+            .own_dek_wrapper(member(1), KekKind::Passphrase)
             .expect("read")
             .expect("row");
         let stored = Wrapper::from_bytes(&row.wrapper).expect("a versioned wrapper");
@@ -300,10 +305,6 @@ mod with_the_household_key {
             (vilicus_crypto::FORMAT_VERSION, Kdf::None, 0x0001)
         );
         assert_eq!(row.dek_version, 1);
-    }
-
-    fn raw(dir: &Path) -> Connection {
-        Connection::open(dir.join(WRAPPERS_FILE_NAME)).expect("open with no key")
     }
 
     /// The decision task (gate AD36-1): what an attacker who writes `wrappers.db` but holds no
@@ -321,38 +322,39 @@ mod with_the_household_key {
         let first = MemberDek::generate(member(1), 1).expect("dek");
         let second = MemberDek::generate(member(2), 1).expect("dek");
         let mut wrappers = Wrappers::create(&dir).expect("create");
-        assert_eq!(wrappers.verify(&set_key).expect("a fresh file"), 0);
-        wrappers
-            .write(
-                &set_key,
-                &[
-                    passphrase_wrapper(&first, KekKind::Passphrase, &kek, 1),
-                    WrapperChange::PutPublicKey(PublicKeyRow {
-                        member: member(1),
-                        kind: PublicKeyKind::Member,
-                        generation: 0,
-                        public_key: vec![0x00, 0x01, 0x00, 0x20, 0x07],
-                    }),
-                ],
-            )
-            .expect("first write");
+        assert_eq!(
+            wrappers
+                .open_verified(&set_key, Some(0))
+                .expect("a fresh file")
+                .counter(),
+            0
+        );
+        let changes = [
+            dek_wrapper(&first, KekKind::Passphrase, &kek, 1),
+            WrapperChange::PutPublicKey(PublicKeyRow {
+                member: member(1),
+                kind: PublicKeyKind::Member,
+                generation: 0,
+                public_key: vec![0x00, 0x01, 0x00, 0x20, 0x07],
+            }),
+        ];
+        write(&mut wrappers, &set_key, &changes);
         wrappers.close().expect("close");
         let older = fs::read(dir.join(WRAPPERS_FILE_NAME)).expect("copy of the file at counter 1");
         let mut wrappers = Wrappers::open(&dir).expect("open");
-        let counter = wrappers
-            .write(
-                &set_key,
-                &[passphrase_wrapper(&second, KekKind::Passphrase, &kek, 2)],
-            )
-            .expect("second write");
-        assert_eq!(counter, 2);
-        assert_eq!(wrappers.verify(&set_key).expect("verifies"), 2);
+        let second_wrapper = [dek_wrapper(&second, KekKind::Passphrase, &kek, 2)];
+        assert_eq!(write(&mut wrappers, &set_key, &second_wrapper), 2);
+        let verified = wrappers.open_verified(&set_key, Some(2)).expect("verifies");
         assert_eq!(
-            wrappers.check_counter(Some(2)).expect("check"),
-            CounterCheck::Matches
+            (verified.counter(), verified.counter_check()),
+            (2, CounterCheck::Matches)
         );
+        assert_eq!(verified.public_keys().len(), 1);
         assert_eq!(
-            wrappers.check_counter(Some(1)).expect("check"),
+            wrappers
+                .open_verified(&set_key, Some(1))
+                .expect("verifies")
+                .counter_check(),
             CounterCheck::Ahead { by: 1 }
         );
         wrappers.close().expect("close");
@@ -360,7 +362,7 @@ mod with_the_household_key {
         let other_hk = testing::household_key(1).expect("another household key");
         let wrappers = Wrappers::open(&dir).expect("open");
         assert!(matches!(
-            wrappers.verify(&other_hk.wrapper_set_key().expect("set key")),
+            wrappers.open_verified(&other_hk.wrapper_set_key().expect("set key"), Some(2)),
             Err(KeyError::SetMac(CryptoError::Mac))
         ));
         drop(wrappers);
@@ -372,13 +374,14 @@ mod with_the_household_key {
             .expect("delete a record");
         let mut wrappers = Wrappers::open(&dir).expect("open");
         assert!(matches!(
-            wrappers.verify(&set_key),
+            wrappers.open_verified(&set_key, Some(2)),
             Err(KeyError::SetMac(CryptoError::Mac))
         ));
         assert!(matches!(
             wrappers.write(
                 &set_key,
-                &[passphrase_wrapper(&second, KekKind::Recovery, &kek, 3)]
+                &set_key,
+                &[dek_wrapper(&second, KekKind::Recovery, &kek, 3)]
             ),
             Err(KeyError::SetMac(CryptoError::Mac))
         ));
@@ -394,9 +397,15 @@ mod with_the_household_key {
 
         fs::write(dir.join(WRAPPERS_FILE_NAME), &older).expect("restore the older file");
         let wrappers = Wrappers::open(&dir).expect("open");
-        assert_eq!(wrappers.verify(&set_key).expect("its own MAC holds"), 1);
+        assert_eq!(
+            wrappers
+                .open_verified(&set_key, None)
+                .expect("its own MAC holds")
+                .counter(),
+            1
+        );
         assert!(matches!(
-            wrappers.check_counter(Some(2)),
+            wrappers.open_verified(&set_key, Some(2)),
             Err(KeyError::RolledBack {
                 wrappers: 1,
                 core: 2
@@ -407,12 +416,8 @@ mod with_the_household_key {
             .execute_batch("UPDATE wrapper_set SET counter = 2")
             .expect("raise the counter to core.db's copy");
         let wrappers = Wrappers::open(&dir).expect("open");
-        assert_eq!(
-            wrappers.check_counter(Some(2)).expect("check"),
-            CounterCheck::Matches
-        );
         assert!(matches!(
-            wrappers.verify(&set_key),
+            wrappers.open_verified(&set_key, Some(2)),
             Err(KeyError::SetMac(CryptoError::Mac))
         ));
         drop(wrappers);
@@ -420,46 +425,147 @@ mod with_the_household_key {
             .execute_batch("UPDATE wrapper_set SET mac = NULL")
             .expect("remove the MAC");
         let wrappers = Wrappers::open(&dir).expect("open");
-        assert!(matches!(wrappers.verify(&set_key), Err(KeyError::Unsealed)));
+        assert!(matches!(
+            wrappers.open_verified(&set_key, Some(2)),
+            Err(KeyError::Unsealed)
+        ));
         drop(wrappers);
         raw(&dir)
             .execute_batch("UPDATE wrapper_set SET counter = 0")
             .expect("make it look fresh");
         let wrappers = Wrappers::open(&dir).expect("open");
-        assert!(matches!(wrappers.verify(&set_key), Err(KeyError::Unsealed)));
         assert!(matches!(
-            wrappers.check_counter(Some(2)),
-            Err(KeyError::RolledBack {
-                wrappers: 0,
-                core: 2
-            })
+            wrappers.open_verified(&set_key, None),
+            Err(KeyError::Unsealed)
         ));
     }
 
-    /// A MAC computed under one household key version does not verify under the next: a
-    /// rotation rewrites it (key management section 5), and the error says which version it
-    /// states.
+    /// Story 4.3 review, H1, as the reviewer ran it: a victim rotates their recovery wrapper, an
+    /// attacker who writes the disk plants a trigger that puts the old wrapper back when the Core
+    /// next writes a passphrase wrapper. The planted file is refused at open and inside the next
+    /// write, so the Core never seals the trigger's work: the new recovery KEK still opens the DEK
+    /// and the old one does not.
     #[test]
-    fn the_set_mac_is_bound_to_its_household_key_version() {
+    fn a_planted_trigger_never_runs_inside_a_sealed_write() {
+        key_memory();
+        let dir = scratch("h1-trigger");
+        let hk = testing::household_key(1).expect("household key");
+        let set_key = hk.wrapper_set_key().expect("set key");
+        let dek = MemberDek::generate(member(1), 1).expect("dek");
+        let passphrase = SymmetricKey::generate().expect("kek");
+        let old_recovery = SymmetricKey::generate().expect("kek");
+        let new_recovery = SymmetricKey::generate().expect("kek");
+        let mut wrappers = Wrappers::create(&dir).expect("create");
+        let first = [
+            dek_wrapper(&dek, KekKind::Passphrase, &passphrase, 1),
+            dek_wrapper(&dek, KekKind::Recovery, &old_recovery, 2),
+        ];
+        write(&mut wrappers, &set_key, &first);
+        let old_row = vilicus_storage::open_wrappers(&dir)
+            .expect("open")
+            .own_dek_wrapper(member(1), KekKind::Recovery)
+            .expect("read")
+            .expect("row");
+        let rotated = [dek_wrapper(&dek, KekKind::Recovery, &new_recovery, 3)];
+        assert_eq!(write(&mut wrappers, &set_key, &rotated), 2);
+        let mut old_hex = String::new();
+        for byte in &old_row.wrapper {
+            old_hex.push_str(&format!("{byte:02x}"));
+        }
+        let mut member_hex = String::new();
+        for byte in member(1).to_bytes() {
+            member_hex.push_str(&format!("{byte:02x}"));
+        }
+        raw(&dir)
+            .execute_batch(&format!(
+                "CREATE TRIGGER t AFTER INSERT ON member_dek_wrappers WHEN NEW.kek_kind = 1 \
+                 BEGIN INSERT OR REPLACE INTO member_dek_wrappers \
+                 VALUES (x'{member_hex}', 2, 1, x'{old_hex}'); END;"
+            ))
+            .expect("plant the trigger");
+        assert!(matches!(
+            wrappers.open_verified(&set_key, Some(2)),
+            Err(KeyError::Storage(
+                vilicus_storage::Error::WrappersSchemaChanged
+            ))
+        ));
+        let next = [dek_wrapper(&dek, KekKind::Passphrase, &passphrase, 4)];
+        assert!(matches!(
+            wrappers.write(&set_key, &set_key, &next),
+            Err(KeyError::Storage(
+                vilicus_storage::Error::WrappersSchemaChanged
+            ))
+        ));
+        drop(wrappers);
+        assert!(matches!(
+            Wrappers::open(&dir),
+            Err(KeyError::Storage(
+                vilicus_storage::Error::WrappersSchemaChanged
+            ))
+        ));
+        raw(&dir)
+            .execute_batch("DROP TRIGGER t;")
+            .expect("drop the trigger");
+        let wrappers = Wrappers::open(&dir).expect("open");
+        let verified = wrappers.open_verified(&set_key, Some(2)).expect("verified");
+        assert!(
+            verified
+                .unwrap_member_dek(member(1), KekKind::Recovery, &new_recovery)
+                .expect("the new recovery KEK opens it")
+                .is_some()
+        );
+        assert!(matches!(
+            verified.unwrap_member_dek(member(1), KekKind::Recovery, &old_recovery),
+            Err(KeyError::Crypto(CryptoError::Open))
+        ));
+    }
+
+    /// A MAC computed under one household key version does not verify under the next, and a
+    /// write verified under one key and sealed under the next re-seals the set for the next: the
+    /// rewrite of a rotation (key management section 5).
+    #[test]
+    fn a_rotation_re_seals_the_set_under_the_next_household_key() {
         key_memory();
         let dir = scratch("ad36-1-version");
         let hk = testing::household_key(1).expect("household key");
         let next = testing::household_key(2).expect("next version");
+        let (key, next_key) = (
+            hk.wrapper_set_key().expect("set key"),
+            next.wrapper_set_key().expect("set key"),
+        );
         let kek = SymmetricKey::generate().expect("kek");
         let dek = MemberDek::generate(member(1), 1).expect("dek");
         let mut wrappers = Wrappers::create(&dir).expect("create");
-        wrappers
-            .write(
-                &hk.wrapper_set_key().expect("set key"),
-                &[passphrase_wrapper(&dek, KekKind::Passphrase, &kek, 1)],
-            )
-            .expect("write");
+        write(
+            &mut wrappers,
+            &key,
+            &[dek_wrapper(&dek, KekKind::Passphrase, &kek, 1)],
+        );
         assert!(matches!(
-            wrappers.verify(&next.wrapper_set_key().expect("set key")),
+            wrappers.open_verified(&next_key, Some(1)),
             Err(KeyError::SetMac(CryptoError::HouseholdKeyVersion {
                 stated: 1,
                 held: 2
             }))
+        ));
+        let rewritten = wrappers
+            .write(
+                &key,
+                &next_key,
+                &[dek_wrapper(&dek, KekKind::Passphrase, &kek, 2)],
+            )
+            .expect("re-seal");
+        assert_eq!(rewritten.counter, 2);
+        assert_eq!(
+            wrappers
+                .open_verified(&next_key, Some(2))
+                .expect("verifies under the next version")
+                .counter(),
+            2
+        );
+        assert!(matches!(
+            wrappers.open_verified(&key, Some(2)),
+            Err(KeyError::SetMac(CryptoError::HouseholdKeyVersion { .. }))
         ));
     }
 }

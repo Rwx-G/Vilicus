@@ -11,11 +11,17 @@
 //! one transaction that checks the set as it is, applies its changes, raises the counter and
 //! stores the MAC of the new set, so a record deleted, edited or restored from an older file no
 //! longer matches the MAC, and an older file carries an older counter. This crate computes no MAC:
-//! [`WrapperStore::write`] hands the set to the caller's closures.
+//! [`WrapperStore::write`] hands the set to the caller's closures, and [`WrapperStore::snapshot`]
+//! reads the set and its rows in one transaction, for the caller to check before it reads them.
 //!
-//! The connection is set up like a module file's writer, without a key, and runs under the write
-//! policy of the authorizer, which allows the rows of its tables and no schema change, `ATTACH` or
-//! extension; only the fixed statements of this module run on it.
+//! The schema is part of what is authenticated: a trigger planted in the file would run inside the
+//! Core's own write, before the new set is read and sealed, and the Core would seal what it wrote
+//! (story 4.3 review, H1). So at open, at each snapshot and inside each write's transaction, the
+//! file's `sqlite_master` must be exactly what [`SCHEMA`] makes, nothing more; its rows are
+//! records of the set too; each record names its columns, never `SELECT *`; and the connection
+//! runs under the write policy of the authorizer, which allows the rows of its tables and no
+//! schema change, `ATTACH` or extension, with every action a trigger or a view would take denied.
+//! Only the fixed statements of this module run on it.
 
 use std::path::{Path, PathBuf};
 
@@ -66,10 +72,45 @@ const SCHEMA: &str = "
     INSERT INTO wrapper_set (id, counter, mac) VALUES (1, 0, NULL);
 ";
 
+/// One table whose rows are records of the set: its name, its columns in the order a record
+/// encodes them, and the columns its rows are read in the order of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordTable {
+    /// The table.
+    pub name: &'static str,
+    /// Its columns, as each record encodes them.
+    pub columns: &'static [&'static str],
+    /// The `ORDER BY` of its rows: its primary key.
+    pub order_by: &'static str,
+}
+
 /// The tables whose rows make the authenticated record set, in the order they are read; every
 /// other table of the file is `wrapper_set`, which holds the counter and the MAC of the set
-/// (`every_table_is_a_record_table_or_the_set_state` holds the schema to this).
-pub const RECORD_TABLES: [&str; 3] = ["_meta", "member_dek_wrappers", "member_public_keys"];
+/// (`every_table_is_a_record_table_or_the_set_state` holds the schema to this, columns included).
+pub const RECORD_TABLES: [RecordTable; 3] = [
+    RecordTable {
+        name: "_meta",
+        columns: &["key", "value"],
+        order_by: "key",
+    },
+    RecordTable {
+        name: "member_dek_wrappers",
+        columns: &["member_id", "kek_kind", "dek_version", "wrapper"],
+        order_by: "member_id, kek_kind",
+    },
+    RecordTable {
+        name: "member_public_keys",
+        columns: &["member_id", "key_kind", "generation", "public_key"],
+        order_by: "member_id, key_kind",
+    },
+];
+
+/// The schema itself, whose rows are records of the set before those of [`RECORD_TABLES`].
+pub const SCHEMA_TABLE: RecordTable = RecordTable {
+    name: "sqlite_master",
+    columns: &["type", "name", "tbl_name", "sql"],
+    order_by: "type, name",
+};
 
 /// The KEK a member DEK wrapper is sealed under (`doc/key-management.md` sections 2 and 3). A
 /// passkey KEK comes after V0.1, with a format of its own (D153).
@@ -91,6 +132,13 @@ impl KekKind {
             Self::Passphrase => 1,
             Self::Recovery => 2,
         }
+    }
+
+    fn from_id(id: i64) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.id() == id)
+            .ok_or(Error::MalformedWrapperRow)
     }
 }
 
@@ -175,17 +223,20 @@ pub enum WrapperChange {
 }
 
 /// The record set as one transaction read it: the counter, the stored MAC (none before the first
-/// write) and the encoding of every record, in the order of [`RECORD_TABLES`] and of each table's
-/// primary key.
+/// write) and the encoding of every record: first the rows of `sqlite_master`, the schema, then
+/// the rows of each table of [`RECORD_TABLES`], each table's rows in its primary key's order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WrapperSet {
     /// The monotonic counter of the writes.
     pub counter: u64,
     /// The stored MAC of the set at `counter`; `None` while no write has run.
     pub mac: Option<Vec<u8>>,
-    /// The encoding of each record: its table's name and each column, in the column order of the
-    /// schema, each preceded by a type tag and, for a blob or a text, its length.
+    /// The encoding of each record: its table's name, then each of its columns as
+    /// [`RECORD_TABLES`] names them, each preceded by a type tag and, for a blob or a text, its
+    /// length.
     pub records: Vec<Vec<u8>>,
+    /// Whether the set holds a DEK wrapper or a public key: a fresh file holds neither.
+    pub holds_member_records: bool,
 }
 
 impl WrapperSet {
@@ -193,6 +244,29 @@ impl WrapperSet {
     pub fn record_slices(&self) -> Vec<&[u8]> {
         self.records.iter().map(Vec::as_slice).collect()
     }
+}
+
+/// The record set with the rows it encodes, all read in one transaction: what the caller checks,
+/// and what it reads once the check passed, so that it never reads a row the check did not cover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrapperSnapshot {
+    /// The record set, its counter and its MAC.
+    pub set: WrapperSet,
+    /// Every member DEK wrapper, by member then KEK kind.
+    pub dek_wrappers: Vec<DekWrapperRow>,
+    /// Every member public key, by member then kind.
+    pub public_keys: Vec<PublicKeyRow>,
+}
+
+/// The outcome of a committed write: the new counter, which the caller copies into `core.db`, and
+/// the failure of the TRUNCATE checkpoint that followed the commit, if it failed. The write is
+/// durable either way; only a removed wrapper may still sit in the WAL until the next checkpoint.
+#[derive(Debug)]
+pub struct WrapperWrite {
+    /// The counter the write committed.
+    pub counter: u64,
+    /// Why the checkpoint after the commit did not empty the WAL, if it did not.
+    pub checkpoint: Option<Error>,
 }
 
 /// An open `wrappers.db`.
@@ -228,6 +302,43 @@ fn connect(path: &Path, create: bool) -> Result<(Connection, Settings)> {
     Ok((connection, settings))
 }
 
+/// One row of `sqlite_master`: type, name, table name, SQL text.
+type SchemaRow = (String, String, String, Option<String>);
+
+/// The rows of `connection`'s `sqlite_master`, by type then name.
+fn schema_rows(connection: &Connection) -> Result<Vec<SchemaRow>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {} FROM {} ORDER BY {}",
+        SCHEMA_TABLE.columns.join(", "),
+        SCHEMA_TABLE.name,
+        SCHEMA_TABLE.order_by
+    ))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The rows of `sqlite_master` that [`SCHEMA`] makes, read from an in-memory database it built:
+/// the one schema a `wrappers.db` of this version holds, so the comparison is derived from the
+/// schema's own text.
+fn expected_schema() -> Result<Vec<SchemaRow>> {
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(SCHEMA)?;
+    schema_rows(&connection)
+}
+
+/// Refuses a file whose `sqlite_master` is not exactly the one [`SCHEMA`] makes
+/// ([`Error::WrappersSchemaChanged`]): a trigger, which would run inside the Core's own write; a
+/// view; a table rebuilt with other columns or constraints, or in another order; any other object.
+fn check_schema(connection: &Connection) -> Result<()> {
+    if schema_rows(connection)? == expected_schema()? {
+        Ok(())
+    } else {
+        Err(Error::WrappersSchemaChanged)
+    }
+}
+
 /// Creates `wrappers.db` in `directory` with the schema of [`WRAPPERS_SCHEMA_VERSION`], its
 /// counter at 0 and no MAC, and opens it. The file is built under `wrappers.db.create`, closed,
 /// synced, then renamed into place, so the final name exists only once its schema is durable; a
@@ -254,7 +365,10 @@ pub fn create_wrappers(directory: &Path) -> Result<WrapperStore> {
 }
 
 /// Opens `wrappers.db` in `directory`: [`Error::NotAWrapperFile`] for a file that is not a
-/// database, [`Error::WrappersSchemaVersion`] for a schema version this Core does not know.
+/// database, [`Error::WrappersSchemaVersion`] for a schema version this Core does not know, and
+/// [`Error::WrappersSchemaChanged`] for a schema other than the one its version makes. The
+/// connection then runs under the write policy, every action a trigger or a view would take
+/// denied ([`authorizer::install_direct`]).
 pub fn open_wrappers(directory: &Path) -> Result<WrapperStore> {
     let path = directory.join(WRAPPERS_FILE_NAME);
     if !path.exists() {
@@ -274,7 +388,8 @@ pub fn open_wrappers(directory: &Path) -> Result<WrapperStore> {
     if version != Some(WRAPPERS_SCHEMA_VERSION) {
         return Err(Error::WrappersSchemaVersion { found: version });
     }
-    authorizer::install(&connection, Policy::Write)?;
+    check_schema(&connection)?;
+    authorizer::install_direct(&connection, Policy::Write)?;
     Ok(WrapperStore {
         connection,
         path,
@@ -306,24 +421,40 @@ fn encode_column(encoded: &mut Vec<u8>, value: ValueRef<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The encoding of every record of [`RECORD_TABLES`]: the table's name with its `u16` big-endian
-/// length, then each column of the row in schema order ([`encode_column`]).
+/// The encoding of every row of `table`: the table's name with its `u16` big-endian length, then
+/// each of its named columns, in that order ([`encode_column`]); never `SELECT *`, so a table
+/// whose columns sit in another order encodes the same rows the same way.
+fn read_table(
+    connection: &Connection,
+    table: &RecordTable,
+    records: &mut Vec<Vec<u8>>,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {} FROM {} ORDER BY {}",
+        table.columns.join(", "),
+        table.name,
+        table.order_by
+    ))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let mut encoded = Vec::new();
+        let name = u16::try_from(table.name.len()).map_err(|_| Error::MalformedWrapperRow)?;
+        encoded.extend_from_slice(&name.to_be_bytes());
+        encoded.extend_from_slice(table.name.as_bytes());
+        for index in 0..table.columns.len() {
+            encode_column(&mut encoded, row.get_ref(index)?)?;
+        }
+        records.push(encoded);
+    }
+    Ok(())
+}
+
+/// The encoding of every record: the schema's rows, then those of [`RECORD_TABLES`].
 fn read_records(connection: &Connection) -> Result<Vec<Vec<u8>>> {
     let mut records = Vec::new();
-    for table in RECORD_TABLES {
-        let mut statement = connection.prepare(&format!("SELECT * FROM {table} ORDER BY 1, 2"))?;
-        let columns = statement.column_count();
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let mut encoded = Vec::new();
-            let name = u16::try_from(table.len()).map_err(|_| Error::MalformedWrapperRow)?;
-            encoded.extend_from_slice(&name.to_be_bytes());
-            encoded.extend_from_slice(table.as_bytes());
-            for index in 0..columns {
-                encode_column(&mut encoded, row.get_ref(index)?)?;
-            }
-            records.push(encoded);
-        }
+    read_table(connection, &SCHEMA_TABLE, &mut records)?;
+    for table in &RECORD_TABLES {
+        read_table(connection, table, &mut records)?;
     }
     Ok(records)
 }
@@ -334,10 +465,16 @@ fn read_set(connection: &Connection) -> Result<WrapperSet> {
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let member_records: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM member_dek_wrappers) + (SELECT count(*) FROM member_public_keys)",
+        [],
+        |row| row.get(0),
+    )?;
     Ok(WrapperSet {
         counter: u64::try_from(counter).map_err(|_| Error::MalformedWrapperRow)?,
         mac,
         records: read_records(connection)?,
+        holds_member_records: member_records > 0,
     })
 }
 
@@ -348,6 +485,56 @@ fn member_of(bytes: Vec<u8>) -> Result<Id> {
 
 fn u32_of(value: i64) -> Result<u32> {
     u32::try_from(value).map_err(|_| Error::MalformedWrapperRow)
+}
+
+fn read_dek_wrappers(connection: &Connection) -> Result<Vec<DekWrapperRow>> {
+    let mut statement = connection.prepare(
+        "SELECT member_id, kek_kind, dek_version, wrapper FROM member_dek_wrappers \
+         ORDER BY member_id, kek_kind",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (member, kek, dek_version, wrapper) = row?;
+        Ok(DekWrapperRow {
+            member: member_of(member)?,
+            kek: KekKind::from_id(kek)?,
+            dek_version: u32_of(dek_version)?,
+            wrapper,
+        })
+    })
+    .collect()
+}
+
+fn read_public_keys(connection: &Connection) -> Result<Vec<PublicKeyRow>> {
+    let mut statement = connection.prepare(
+        "SELECT member_id, key_kind, generation, public_key FROM member_public_keys \
+         ORDER BY member_id, key_kind",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (member, kind, generation, public_key) = row?;
+        Ok(PublicKeyRow {
+            member: member_of(member)?,
+            kind: PublicKeyKind::from_id(kind)?,
+            generation: u32_of(generation)?,
+            public_key,
+        })
+    })
+    .collect()
 }
 
 fn apply(connection: &Connection, change: &WrapperChange) -> Result<()> {
@@ -398,20 +585,27 @@ impl WrapperStore {
         &self.settings
     }
 
-    /// The record set, its counter and its stored MAC, read in one transaction.
-    pub fn set(&self) -> Result<WrapperSet> {
-        let mut set = None;
+    /// The record set and its rows, read in one transaction after the schema is checked again:
+    /// what the caller verifies, then reads.
+    pub fn snapshot(&self) -> Result<WrapperSnapshot> {
+        let mut snapshot = None;
         handle::in_transaction(&self.connection, || {
-            set = Some(read_set(&self.connection)?);
+            check_schema(&self.connection)?;
+            snapshot = Some(WrapperSnapshot {
+                set: read_set(&self.connection)?,
+                dek_wrappers: read_dek_wrappers(&self.connection)?,
+                public_keys: read_public_keys(&self.connection)?,
+            });
             Ok(())
         })?;
-        set.ok_or(Error::MalformedWrapperRow)
+        snapshot.ok_or(Error::MalformedWrapperRow)
     }
 
-    /// The member's DEK wrapper under `kek`, if there is one. The record set is not checked here:
-    /// a member's own wrapper is read before any key that checks the set is at hand, and the
-    /// caller checks the set once it holds the household key.
-    pub fn dek_wrapper(&self, member: Id, kek: KekKind) -> Result<Option<DekWrapperRow>> {
+    /// The member's own DEK wrapper under `kek`, if there is one, read before the set is checked:
+    /// the one read the unlock path makes before it holds the household key, which it reaches
+    /// only through this wrapper (`doc/key-management.md` section 4). Every other read goes
+    /// through [`snapshot`](Self::snapshot), once the caller can check the set.
+    pub fn own_dek_wrapper(&self, member: Id, kek: KekKind) -> Result<Option<DekWrapperRow>> {
         let row: Option<(i64, Vec<u8>)> = self
             .connection
             .query_row(
@@ -432,49 +626,26 @@ impl WrapperStore {
         .transpose()
     }
 
-    /// Every member public key, by member then kind.
-    pub fn public_keys(&self) -> Result<Vec<PublicKeyRow>> {
-        let mut statement = self.connection.prepare(
-            "SELECT member_id, key_kind, generation, public_key FROM member_public_keys \
-             ORDER BY member_id, key_kind",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (member, kind, generation, public_key) = row?;
-            Ok(PublicKeyRow {
-                member: member_of(member)?,
-                kind: PublicKeyKind::from_id(kind)?,
-                generation: u32_of(generation)?,
-                public_key,
-            })
-        })
-        .collect()
-    }
-
-    /// Applies `changes` to the record set in one `BEGIN IMMEDIATE` transaction: `check` is given
-    /// the set as it is, before any change, and refuses to go on with its error; the changes are
-    /// applied in order ([`Error::WrapperRecordMissing`] for a removal of a record that is not
-    /// there); the counter is raised by one; `seal` is given the new counter and the new set's
-    /// records, and returns the MAC stored with them. Any failure rolls the whole write back.
-    /// Once committed, the WAL is checkpointed empty, so a removed wrapper does not stay in it
-    /// (D132). Returns the new counter.
+    /// Applies `changes` to the record set in one `BEGIN IMMEDIATE` transaction: the schema is
+    /// checked again under the write lock, so no trigger or view can run inside the write;
+    /// `check` is given the set as it is, before any change, and refuses to go on with its error;
+    /// the changes are applied in order ([`Error::WrapperRecordMissing`] for a removal of a
+    /// record that is not there); the counter is raised by one; `seal` is given the new counter
+    /// and the new set's records, and returns the MAC stored with them. Any failure before the
+    /// commit rolls the whole write back. Once committed, the WAL is checkpointed empty, so a
+    /// removed wrapper does not stay in it (D132); a checkpoint that fails does not undo the
+    /// committed write, and is returned beside its counter ([`WrapperWrite`]).
     pub fn write<E: From<Error>>(
         &mut self,
         changes: &[WrapperChange],
         check: impl FnOnce(&WrapperSet) -> core::result::Result<(), E>,
         seal: impl FnOnce(u64, &[&[u8]]) -> core::result::Result<Vec<u8>, E>,
-    ) -> core::result::Result<u64, E> {
+    ) -> core::result::Result<WrapperWrite, E> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(Error::from)?;
+        check_schema(&transaction)?;
         let current = read_set(&transaction)?;
         check(&current)?;
         for change in changes {
@@ -495,8 +666,12 @@ impl WrapperStore {
             )
             .map_err(Error::from)?;
         transaction.commit().map_err(Error::from)?;
-        handle::checkpoint_wal_until_empty(&self.wal_path(), &self.connection, None)?;
-        Ok(counter)
+        let checkpoint =
+            handle::checkpoint_wal_until_empty(&self.wal_path(), &self.connection, None).err();
+        Ok(WrapperWrite {
+            counter,
+            checkpoint,
+        })
     }
 
     fn wal_path(&self) -> PathBuf {

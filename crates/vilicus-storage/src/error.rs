@@ -215,6 +215,9 @@ pub enum Error {
         /// The version its `_meta` states, if any.
         found: Option<i64>,
     },
+    /// The schema of `wrappers.db` is not exactly the one its version makes: a trigger, a view, a
+    /// rebuilt table or any other object was added or changed.
+    WrappersSchemaChanged,
     /// A row of `wrappers.db` is outside the shape its schema and its types give it.
     MalformedWrapperRow,
     /// A write to `wrappers.db` removes a record that is not there.
@@ -440,6 +443,9 @@ impl fmt::Display for Error {
                     "wrappers.db schema version {found:?} is not this Core's"
                 )
             }
+            Self::WrappersSchemaChanged => {
+                formatter.write_str("the schema of wrappers.db is not the one its version makes")
+            }
             Self::MalformedWrapperRow => formatter.write_str("a row of wrappers.db is malformed"),
             Self::WrapperRecordMissing => {
                 formatter.write_str("the wrappers.db record to remove is not there")
@@ -493,6 +499,7 @@ impl fmt::Debug for Error {
             Self::MalformedFailureMark(_) => "MalformedFailureMark",
             Self::NotAWrapperFile(_) => "NotAWrapperFile",
             Self::WrappersSchemaVersion { .. } => "WrappersSchemaVersion",
+            Self::WrappersSchemaChanged => "WrappersSchemaChanged",
             Self::MalformedWrapperRow => "MalformedWrapperRow",
             Self::WrapperRecordMissing => "WrapperRecordMissing",
             Self::Sqlite(_) => "Sqlite",

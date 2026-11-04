@@ -6,6 +6,7 @@
 //! A module receives none of this: its code is handed the record port of its call, over a handle
 //! the Core opened in the module's own partition, never a key, a key text or a path to one.
 
+
 use core::fmt;
 use std::path::Path;
 
@@ -14,8 +15,8 @@ use vilicus_crypto::{
     Wrapper, WrapperError, WrapperSetKey, WrapperSetMac,
 };
 use vilicus_storage::{
-    DekWrapperRow, FileKeying, Handle, KekKind, KeyEpoch, ModuleFile, Role, WrapperChange,
-    WrapperSet, WrapperStore, Write,
+    DekWrapperRow, FileKeying, Handle, KekKind, KeyEpoch, ModuleFile, PublicKeyRow, Role,
+    WrapperChange, WrapperSet, WrapperSnapshot, WrapperStore, WrapperWrite, Write,
 };
 use vilicus_types::{Id, Partition, UtcMillis};
 
@@ -207,27 +208,35 @@ pub enum CounterCheck {
     /// The counters agree.
     Matches,
     /// `core.db` keeps no copy: it, or the instance key that opens it, is lost. Member DEKs still
-    /// unwrap from `wrappers.db` (AD-4); the set MAC, checked once the household key is at hand,
-    /// is then the only check of the set.
+    /// unwrap from `wrappers.db` (AD-4); the set MAC is then the only check of the set.
     Unchecked,
-    /// `wrappers.db` is ahead of the copy: by one, a write whose copy a crash kept from `core.db`;
-    /// by more, a `core.db` rolled back. The Core updates its copy only once the set MAC verifies.
+    /// `wrappers.db` is ahead of the copy, its set MAC verified: by one, a write whose copy a
+    /// crash kept from `core.db`; by more, a `core.db` rolled back. The Core then updates its copy.
     Ahead {
         /// By how many writes.
         by: u64,
     },
 }
 
-/// The records of a set that no write of the Core has sealed yet: a fresh file's schema version.
-fn is_schema_record(record: &[u8]) -> bool {
-    record.starts_with(b"\x00\x05_meta")
+/// The cross-check of `counter`, the one of `wrappers.db`, with `core_copy`, `core.db`'s copy.
+fn counter_check(counter: u64, core_copy: Option<u64>) -> Result<CounterCheck, KeyError> {
+    match core_copy {
+        None => Ok(CounterCheck::Unchecked),
+        Some(core) if counter < core => Err(KeyError::RolledBack {
+            wrappers: counter,
+            core,
+        }),
+        Some(core) if counter == core => Ok(CounterCheck::Matches),
+        Some(core) => Ok(CounterCheck::Ahead { by: counter - core }),
+    }
 }
 
-/// Checks `set`'s MAC under `set_key`: a fresh file, at counter 0 with no MAC, holds its schema
-/// record only; any other state holds a MAC that verifies over its counter and every record.
+/// Checks `set`'s MAC under `set_key`: a fresh file, at counter 0 with no MAC, holds no DEK
+/// wrapper and no public key; any other state holds a MAC that verifies over its counter and every
+/// record, the schema's included.
 fn verify_set(set: &WrapperSet, set_key: &WrapperSetKey) -> Result<(), KeyError> {
     match (set.counter, &set.mac) {
-        (0, None) if set.records.iter().all(|record| is_schema_record(record)) => Ok(()),
+        (0, None) if !set.holds_member_records => Ok(()),
         (0, _) | (_, None) => Err(KeyError::Unsealed),
         (counter, Some(stored)) => {
             let mac = WrapperSetMac::from_bytes(stored).map_err(KeyError::Format)?;
@@ -238,9 +247,26 @@ fn verify_set(set: &WrapperSet, set_key: &WrapperSetKey) -> Result<(), KeyError>
     }
 }
 
+/// Opens `row`'s wrapper with `kek` as its member's DEK of its version.
+fn unwrap_row(row: &DekWrapperRow, kek: &SymmetricKey) -> Result<MemberDek, KeyError> {
+    let wrapper = Wrapper::from_bytes(&row.wrapper).map_err(KeyError::Format)?;
+    Ok(MemberDek::unwrap(
+        &wrapper,
+        kek,
+        row.member,
+        row.dek_version,
+    )?)
+}
+
 /// `wrappers.db`, opened by the Core: its record set authenticated by a monotonic counter, the MAC
 /// of the set under a key derived from the household key, and the cross-check of the counter with
 /// `core.db` (gate AD36-1, owner approval).
+///
+/// Its records are read through [`Verified`] only, once the set's MAC and counter are checked,
+/// with one exception: the unlocking member's own DEK wrapper
+/// ([`unwrap_own_dek`](Self::unwrap_own_dek)), read before the Core holds the household key that
+/// checks the set, since the household key is reached only through that DEK. Nothing the Core
+/// does with that DEK before the check reaches another record of the set.
 pub struct Wrappers {
     store: WrapperStore,
 }
@@ -251,6 +277,47 @@ impl fmt::Debug for Wrappers {
             .debug_struct("Wrappers")
             .field("store", &self.store)
             .finish()
+    }
+}
+
+/// `wrappers.db`'s record set, its MAC verified and its counter cross-checked, all read in one
+/// transaction: the records the Core reads, which are those the check covered.
+#[derive(Debug)]
+pub struct Verified {
+    snapshot: WrapperSnapshot,
+    counter_check: CounterCheck,
+}
+
+impl Verified {
+    /// The counter the set verified at.
+    pub fn counter(&self) -> u64 {
+        self.snapshot.set.counter
+    }
+
+    /// What the cross-check with `core.db`'s copy found.
+    pub fn counter_check(&self) -> CounterCheck {
+        self.counter_check
+    }
+
+    /// Unwraps `member`'s DEK from its wrapper under `kind` with `kek`; `None` when the member
+    /// has no wrapper of that kind.
+    pub fn unwrap_member_dek(
+        &self,
+        member: Id,
+        kind: KekKind,
+        kek: &SymmetricKey,
+    ) -> Result<Option<MemberDek>, KeyError> {
+        self.snapshot
+            .dek_wrappers
+            .iter()
+            .find(|row| row.member == member && row.kek == kind)
+            .map(|row| unwrap_row(row, kek))
+            .transpose()
+    }
+
+    /// Every member public key of the set.
+    pub fn public_keys(&self) -> &[PublicKeyRow] {
+        &self.snapshot.public_keys
     }
 }
 
@@ -269,43 +336,56 @@ impl Wrappers {
         })
     }
 
-    /// Cross-checks the counter with `core_copy`, the copy `core.db` keeps (`None` when `core.db`
-    /// or the instance key is lost): an older counter is [`KeyError::RolledBack`].
-    pub fn check_counter(&self, core_copy: Option<u64>) -> Result<CounterCheck, KeyError> {
-        let counter = self.store.set()?.counter;
-        match core_copy {
-            None => Ok(CounterCheck::Unchecked),
-            Some(core) if counter < core => Err(KeyError::RolledBack {
-                wrappers: counter,
-                core,
-            }),
-            Some(core) if counter == core => Ok(CounterCheck::Matches),
-            Some(core) => Ok(CounterCheck::Ahead { by: counter - core }),
-        }
+    /// The set and its rows, read in one transaction, its MAC verified under `set_key`, the
+    /// household key's, then its counter cross-checked with `core_copy`, the copy `core.db` keeps
+    /// (`None` when `core.db` or the instance key is lost): an older counter is
+    /// [`KeyError::RolledBack`], even under a MAC that holds for it.
+    pub fn open_verified(
+        &self,
+        set_key: &WrapperSetKey,
+        core_copy: Option<u64>,
+    ) -> Result<Verified, KeyError> {
+        let snapshot = self.store.snapshot()?;
+        verify_set(&snapshot.set, set_key)?;
+        let counter_check = counter_check(snapshot.set.counter, core_copy)?;
+        Ok(Verified {
+            snapshot,
+            counter_check,
+        })
     }
 
-    /// Verifies the record set's MAC under `set_key`, the household key's, and returns the counter
-    /// it verified at: before any record but the unlocking member's own DEK wrapper is used, the
-    /// Core checks the set this way once it holds the household key.
-    pub fn verify(&self, set_key: &WrapperSetKey) -> Result<u64, KeyError> {
-        let set = self.store.set()?;
-        verify_set(&set, set_key)?;
-        Ok(set.counter)
+    /// Unwraps the unlocking member's own DEK from its wrapper under `kind` with `kek`, before the
+    /// set is verified: no key of the instance and nothing of `core.db` is needed (AD-4,
+    /// `doc/architecture.md` section 5.2). The one read outside [`Verified`] (the type's
+    /// documentation); `None` when the member has no wrapper of that kind.
+    pub fn unwrap_own_dek(
+        &self,
+        member: Id,
+        kind: KekKind,
+        kek: &SymmetricKey,
+    ) -> Result<Option<MemberDek>, KeyError> {
+        self.store
+            .own_dek_wrapper(member, kind)?
+            .map(|row| unwrap_row(&row, kek))
+            .transpose()
     }
 
-    /// Applies `changes` in one transaction that first verifies the set as it is under `set_key`,
-    /// so a write never seals a set changed behind the Core's back, then raises the counter and
-    /// stores the MAC of the new set. Returns the new counter, which the Core then copies into
-    /// `core.db`.
+    /// Applies `changes` in one transaction that first verifies the set as it is under
+    /// `verify_key`, so a write never seals a set changed behind the Core's back, then raises the
+    /// counter and seals the new set under `seal_key`: the same key for a write, the next household
+    /// key version's for the rewrite of a rotation. Returns the new counter, which the Core then
+    /// copies into `core.db`, with the failure of the checkpoint after the commit, if any: the
+    /// write is durable either way.
     pub fn write(
         &mut self,
-        set_key: &WrapperSetKey,
+        verify_key: &WrapperSetKey,
+        seal_key: &WrapperSetKey,
         changes: &[WrapperChange],
-    ) -> Result<u64, KeyError> {
+    ) -> Result<WrapperWrite, KeyError> {
         self.store.write(
             changes,
-            |set| verify_set(set, set_key),
-            |counter, records| Ok(set_key.seal(counter, records)?.to_bytes().to_vec()),
+            |set| verify_set(set, verify_key),
+            |counter, records| Ok(seal_key.seal(counter, records)?.to_bytes().to_vec()),
         )
     }
 
@@ -330,27 +410,6 @@ impl Wrappers {
             dek_version: dek.version(),
             wrapper: dek.wrap(kek, params)?.to_bytes(),
         }))
-    }
-
-    /// Unwraps `member`'s DEK from its wrapper under `kind` with `kek`: no key of the instance and
-    /// nothing of `core.db` is needed (AD-4, `doc/architecture.md` section 5.2). `None` when the
-    /// member has no wrapper of that kind.
-    pub fn unwrap_member_dek(
-        &self,
-        member: Id,
-        kind: KekKind,
-        kek: &SymmetricKey,
-    ) -> Result<Option<MemberDek>, KeyError> {
-        let Some(row) = self.store.dek_wrapper(member, kind)? else {
-            return Ok(None);
-        };
-        let wrapper = Wrapper::from_bytes(&row.wrapper).map_err(KeyError::Format)?;
-        Ok(Some(MemberDek::unwrap(
-            &wrapper,
-            kek,
-            member,
-            row.dek_version,
-        )?))
     }
 
     /// Closes `wrappers.db`.

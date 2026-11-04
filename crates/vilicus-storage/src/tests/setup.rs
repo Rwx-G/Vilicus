@@ -822,7 +822,14 @@ fn no_product_source_keys_through_sql_text() {
 ",
                 )
                 .to_ascii_lowercase();
-            let pragma = ["pragma key", "pragma rekey", "\"key\"", "\"rekey\""];
+            // The SQL of `PRAGMA key` and `rekey`, and their pragma name in rusqlite's
+            // `pragma_update(None, "key", ..)`; a column named `key` is no keying.
+            let pragma = [
+                "pragma key",
+                "pragma rekey",
+                "none, \"key\"",
+                "none, \"rekey\"",
+            ];
             if pragma.iter().any(|text| code.contains(text)) {
                 offenders.push(path);
             }

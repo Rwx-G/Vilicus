@@ -159,3 +159,12 @@ vilicus-crypto = "the strength check of a candidate passphrase, which never leav
 [unsafe_code]
 allowed = ["vilicus-crypto", "vilicus-storage", "vilicus-core", "vilicus-gateway"]
 forbid_attribute = ["vilicus-mod-*", "vilicus-plugin-*", "vilicus-double-*"]
+
+# D140 and Story 4.2 AC3: in each crate of `allowed`, unsafe code lives in one module of FFI
+# wrappers that expose safe functions, the file `<module>.rs` and the files under `<module>/`
+# (paths relative to the crate's directory). Outside these modules the `unsafe` keyword appears
+# nowhere in the workspace, tests and examples included; a crate of `allowed` without an entry
+# holds none yet, and names its module here with the story that adds its first block.
+[unsafe_code.modules]
+vilicus-crypto = "src/memory"
+vilicus-storage = "src/ffi"

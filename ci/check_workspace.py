@@ -34,7 +34,10 @@
   inherits its lints, except the crates ci/crate_graph.toml allows, which repeat those lints with
   unsafe code denied and undocumented unsafe blocks denied, and never allow unsafe code for a
   whole module; module, plugin and test double crates also carry the forbid attribute in each
-  crate root; no Cargo configuration file can change lint levels for the workspace.
+  crate root; no Cargo configuration file can change lint levels for the workspace. The `unsafe`
+  keyword, outside comments and literals, appears only in the module `[unsafe_code.modules]`
+  names for its crate, a crate of `allowed` (Story 4.2, AC3): in no other file of any workspace
+  crate, tests and examples included.
 - Vendored sources (D28): ci/cargo-vendored.toml, the configuration CI passes to every workspace
   build with `--config`, exists and holds nothing but the replacement of crates.io by vendor/.
 
@@ -102,6 +105,14 @@ LINE_COMMENT = re.compile(r"//[^\n]*")
 INNER_ATTRIBUTE = re.compile(r"#!\[(.*?)\]", re.DOTALL)
 FORBID_LINTS = re.compile(r"^\s*forbid\s*\(([^)]*)\)\s*$", re.DOTALL)
 ALLOW_OR_EXPECT_LINTS = re.compile(r"\b(?:allow|expect)\s*\(([^)]*)\)")
+# Comments, string literals (raw and byte strings included) and character literals, removed
+# before a source is searched for the `unsafe` keyword, in one pass, so that a quote inside a
+# comment or a comment marker inside a literal is never read as the start of the other.
+SOURCE_NOISE = re.compile(
+    r"""//[^\n]*|/\*.*?\*/|b?r(#*)".*?"\1|b?"(?:[^"\\]|\\.)*"|b?'(?:[^'\\\n]|\\.[^'\n]*)'""",
+    re.DOTALL,
+)
+UNSAFE_KEYWORD = re.compile(r"\bunsafe\b")
 # `path = "..."` inside an attribute (`cfg_attr` included), and the `include!` family with its
 # argument when that is a single string literal; group 2 is None for a computed path.
 STRING_LITERAL = r'"(?:[^"\\]|\\.)*"'
@@ -608,6 +619,39 @@ def check_unsafe(config: dict, root_manifest: dict, crates: list[Crate]) -> list
     return violations
 
 
+def _uses_unsafe(path: Path) -> bool:
+    return UNSAFE_KEYWORD.search(SOURCE_NOISE.sub(" ", path.read_text(encoding="utf-8"))) is not None
+
+
+def check_unsafe_modules(config: dict, crates: list[Crate]) -> list[str]:
+    """The `unsafe` keyword appears only in the module of a crate of `allowed` that
+    `[unsafe_code.modules]` names: `<module>.rs` and the files under `<module>/`."""
+    policy = config["unsafe_code"]
+    modules = policy.get("modules", {})
+    violations = [
+        f"unsafe: [unsafe_code.modules] names {name}, which is not a crate D140 allows unsafe code in"
+        for name in sorted(modules)
+        if name not in policy["allowed"]
+    ]
+    for crate in crates:
+        crate_dir = crate.manifest_path.parent
+        module = modules.get(crate.name)
+        for source in sorted(crate_dir.rglob("*.rs")):
+            relative = source.relative_to(crate_dir).as_posix()
+            if relative.split("/", 1)[0] in WALK_SKIPPED_DIRECTORIES:
+                continue
+            if module is not None and (relative == f"{module}.rs" or relative.startswith(f"{module}/")):
+                continue
+            if _uses_unsafe(source):
+                where = (
+                    f"outside its unsafe module {module}"
+                    if module is not None
+                    else "and its crate has no unsafe module in [unsafe_code.modules] of ci/crate_graph.toml"
+                )
+                violations.append(f"unsafe: {source} of {crate.name} uses unsafe code {where} (D140)")
+    return violations
+
+
 def check_cargo_config(workspace_root: Path) -> list[str]:
     """Cargo configuration can pass rustflags such as `--cap-lints allow`, which would neutralise
     the lint levels the other checks rely on."""
@@ -753,6 +797,7 @@ def run_checks(
         *check_restricted_dependencies(config, metadata),
         *check_manifests(crates, workspace_root, toolchain_channel, files),
         *check_unsafe(config, root_manifest, crates),
+        *check_unsafe_modules(config, crates),
         *check_cargo_config(workspace_root),
         *check_vendored_config(workspace_root),
     ]

@@ -969,6 +969,61 @@ class UnsafeTest(WorkspaceTestCase):
                 self.workspace.add(name, directory, root_source=source)
                 self.assertEqual(self.workspace.check(), [])
 
+    UNSAFE_BLOCK = "fn read() {\n    // SAFETY: a sample.\n    unsafe { core::hint::unreachable_unchecked() }\n}\n"
+
+    def test_unsafe_code_outside_the_unsafe_module_fails(self) -> None:
+        modules = CONFIG["unsafe_code"]["modules"]
+        self.assertTrue(modules)
+        for name, directory in (sample_crate(node) for node in GRAPH.nodes.values()):
+            module = modules.get(name)
+            places = ["src/lib.rs", "src/other.rs", "tests/memory.rs", "examples/harness/main.rs"]
+            if module is not None:
+                places.append(f"{module}_more.rs")
+            for place in places:
+                with self.subTest(crate=name, place=place):
+                    self.setUp()
+                    self.full_graph()
+                    source = self.workspace.add(name, directory) / place
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    forbid = f"{cw.FORBID_ATTRIBUTE}\n" if needs_forbid_attribute(name) else ""
+                    source.write_text(f"//! Sample.\n{forbid}{self.UNSAFE_BLOCK}", encoding="utf-8")
+                    self.assert_single(self.workspace.check(), f"unsafe: {source} of {name} uses unsafe code")
+
+    def test_unsafe_code_inside_the_unsafe_module_passes(self) -> None:
+        for name, module in CONFIG["unsafe_code"]["modules"].items():
+            directory = next(d for n, d in (sample_crate(node) for node in GRAPH.nodes.values()) if n == name)
+            for place in (f"{module}.rs", f"{module}/tests.rs", f"{module}/deeper/calls.rs"):
+                with self.subTest(crate=name, place=place):
+                    self.setUp()
+                    self.full_graph()
+                    source = self.workspace.add(name, directory) / place
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(f"//! Sample.\n{self.UNSAFE_BLOCK}", encoding="utf-8")
+                    self.assertEqual(self.workspace.check(), [])
+
+    def test_the_word_unsafe_in_comments_literals_and_names_passes(self) -> None:
+        source = (
+            "//! Not unsafe.\n"
+            "/* unsafe { } */\n"
+            "#![deny(unsafe_code)]\n"
+            'const TEXT: &str = "unsafe { x }";\n'
+            'const RAW: &str = r#"unsafe "quoted" text"#;\n'
+            "const QUOTE: char = '\"';\n"
+            "fn borrowed<'a>(unsafe_name: &'a str) -> &'a str { unsafe_name }\n"
+        )
+        for name, directory in (sample_crate(node) for node in GRAPH.nodes.values()):
+            with self.subTest(crate=name):
+                self.setUp()
+                self.full_graph()
+                self.workspace.add(name, directory, root_source=source)
+                violations = [v for v in self.workspace.check() if "uses unsafe code" in v]
+                self.assertEqual(violations, [])
+
+    def test_an_unsafe_module_of_a_crate_outside_the_list_fails(self) -> None:
+        self.full_graph()
+        config = {**CONFIG, "unsafe_code": {**CONFIG["unsafe_code"], "modules": {"vilicus-types": "src/ffi"}}}
+        self.assert_single(self.workspace.check(config=config), "[unsafe_code.modules] names vilicus-types")
+
     def test_module_or_plugin_crate_without_forbid_attribute_fails(self) -> None:
         sources = {
             "absent": "//! Crate.\n",

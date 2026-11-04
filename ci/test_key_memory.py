@@ -48,6 +48,43 @@ class CoredumpTest(unittest.TestCase):
         self.assertEqual(km.harness_coredumps("[]"), [])
 
 
+class CoredumpWaitTest(unittest.TestCase):
+    """Review finding 8: the check polls for the control's entry instead of sleeping."""
+
+    @staticmethod
+    def listing(*answers: list[dict]):
+        queue = list(answers)
+        return lambda: queue.pop(0) if len(queue) > 1 else queue[0]
+
+    def test_it_waits_for_the_control_then_for_a_settled_count(self) -> None:
+        control = {"pid": 1}
+        slept = []
+        found = km.settled_entries(self.listing([], [], [control]), 1, sleep=slept.append)
+        self.assertEqual(found, [control])
+        self.assertEqual(len(slept), 2 + km.COREDUMP_SETTLE_POLLS)
+
+    def test_an_entry_after_the_control_is_still_counted(self) -> None:
+        control, hardened = {"pid": 1}, {"pid": 2}
+        found = km.settled_entries(self.listing([control], [control], [control, hardened]), 1, sleep=lambda _: None)
+        self.assertEqual(found, [control, hardened])
+
+    def test_the_wait_is_bounded(self) -> None:
+        slept = []
+        self.assertEqual(km.settled_entries(self.listing([]), 1, timeout=5, sleep=slept.append), [])
+        self.assertEqual(len(slept), 5)
+
+    def test_a_host_without_the_pipe_reports_skip(self) -> None:
+        line, failed = km.coredumpctl_check(0, "1", core_pattern="|/usr/share/apport/apport -p%p")
+        self.assertTrue(line.startswith("SKIP coredumpctl-no-entry-for-hardened-subjects: "), line)
+        self.assertIn("did not run here", line)
+        self.assertFalse(failed)
+
+    def test_only_a_systemd_coredump_pipe_runs_the_check(self) -> None:
+        self.assertTrue(km.pipes_to_systemd_coredump("|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h"))
+        for pattern in ("core", "|/usr/share/apport/apport -p%p", "|/wsl-capture-crash %t %E %p %s", ""):
+            self.assertFalse(km.pipes_to_systemd_coredump(pattern), pattern)
+
+
 class AgreementTest(unittest.TestCase):
     def test_the_groups_are_the_harness_groups(self) -> None:
         match = re.search(r"pub const GROUPS: \[&str; \d+\] = \[([^\]]*)\];", HARNESS_CHECKS.read_text(encoding="utf-8"))

@@ -22,8 +22,10 @@ line is printed. Under a systemd-coredump pipe `core_pattern` (a Debian 13 host)
 the host's `coredumpctl` entries for the harness with the dumpable crashes the `noptrace` group
 reports: a hardened subject must leave none (AC7, gate E16-2).
 
-Needs Docker only. The build output lives in a named Docker volume created for the run and
-removed at its end; the repository is mounted read-only and built offline from vendor/.
+Needs Docker, and network access once: the crates are built offline from vendor/, but rustup in
+the pinned image installs the toolchain rust-toolchain.toml names, which the image does not ship,
+into a volume made for the run. The build output lives in another such volume; both are removed
+at the end, and the repository is mounted read-only.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +56,10 @@ GROUPS: dict[str, list[str]] = {
     "swap": ["--ulimit", f"memlock={MEMLOCK}:{MEMLOCK}", "--memory", "256m", "--memory-swap", "1g"],
 }
 HARNESS_EXE_SUFFIX = "/examples/key_memory"
+# How long the coredumpctl check waits for systemd-coredump to store the control's crash, and
+# for how many one-second polls in a row the count must hold before it is read.
+COREDUMP_WAIT = 60.0
+COREDUMP_SETTLE_POLLS = 3
 
 
 def count(output: str, tag: str) -> int:
@@ -95,24 +102,67 @@ def docker(volume: str, rustup: str, options: list[str], command: list[str]) -> 
     )
 
 
-def coredumpctl_check(since: float, expected: str | None) -> tuple[str, bool]:
-    """The coredumpctl comparison as one report line and whether it failed; INFO when the host
-    does not pipe its core dumps to systemd-coredump."""
-    try:
-        core_pattern = Path("/proc/sys/kernel/core_pattern").read_text(encoding="utf-8").strip()
-    except OSError:
-        core_pattern = ""
-    if not (core_pattern.startswith("|") and "systemd-coredump" in core_pattern and shutil.which("coredumpctl")):
-        return f"INFO coredumpctl-check: not run here, core_pattern {core_pattern!r}", False
+def pipes_to_systemd_coredump(core_pattern: str) -> bool:
+    """Whether a `core_pattern` hands core dumps to systemd-coredump, the case AC7 tests."""
+    return core_pattern.startswith("|") and "systemd-coredump" in core_pattern.split()[0]
+
+
+def settled_entries(
+    listing: Callable[[], list[dict]],
+    expected: int,
+    timeout: float = COREDUMP_WAIT,
+    settle: int = COREDUMP_SETTLE_POLLS,
+    poll: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[dict]:
+    """The harness's coredumpctl entries once `systemd-coredump` has stored the expected control
+    crashes and the count has not changed for `settle` polls in a row, or when `timeout` seconds
+    have passed: an entry for a hardened subject, which would come after the control's, is then
+    in the listing too."""
+    found = listing()
+    stable = 0
+    waited = 0.0
+    while waited < timeout and (len(found) < expected or stable < settle):
+        sleep(poll)
+        waited += poll
+        again = listing()
+        stable = stable + 1 if len(again) == len(found) else 0
+        found = again
+    return found
+
+
+def coredumpctl_check(since: float, expected: str | None, core_pattern: str | None = None) -> tuple[str, bool]:
+    """The coredumpctl comparison as one report line and whether it failed; SKIP, with the reason,
+    when the host does not pipe its core dumps to systemd-coredump, so that a run shows that AC7's
+    pipe test did not happen."""
+    if core_pattern is None:
+        try:
+            core_pattern = Path("/proc/sys/kernel/core_pattern").read_text(encoding="utf-8").strip()
+        except OSError:
+            core_pattern = ""
+    if not (pipes_to_systemd_coredump(core_pattern) and shutil.which("coredumpctl")):
+        return (
+            f"SKIP coredumpctl-no-entry-for-hardened-subjects: the host does not pipe core dumps to "
+            f"systemd-coredump (core_pattern {core_pattern!r}), so AC7's pipe test did not run here",
+            False,
+        )
     command = ["coredumpctl", "--no-pager", "--json=short", "list", f"--since=@{int(since)}"]
     if hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
         command = ["sudo", "-n", *command]
-    time.sleep(2)
-    listed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if listed.returncode not in (0, 1):
-        return f"FAIL coredumpctl-check: {' '.join(command)} exited {listed.returncode}: {listed.stderr.strip()}", True
-    found = harness_coredumps(listed.stdout if listed.returncode == 0 else "")
-    ok = expected is not None and len(found) == int(expected)
+    failures: list[str] = []
+
+    def listing() -> list[dict]:
+        listed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if listed.returncode not in (0, 1):
+            failures.append(f"{' '.join(command)} exited {listed.returncode}: {listed.stderr.strip()}")
+            return []
+        return harness_coredumps(listed.stdout if listed.returncode == 0 else "")
+
+    wanted = int(expected) if expected is not None and expected.isdigit() else 0
+    found = settled_entries(listing, wanted)
+    if failures:
+        return f"FAIL coredumpctl-check: {failures[-1]}", True
+    ok = expected is not None and len(found) == wanted
     detail = ", ".join(f"pid {entry.get('pid')} signal {entry.get('sig')} corefile {entry.get('corefile')}" for entry in found)
     return (
         f"{'PASS' if ok else 'FAIL'} coredumpctl-no-entry-for-hardened-subjects: {len(found)} entr(ies) for the "

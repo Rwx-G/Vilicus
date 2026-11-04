@@ -10,7 +10,10 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 
 use vilicus_crypto::{PLANNED_SLOTS, STACK_SCRUB_LEN, STACK_SCRUB_MARGIN, testing};
 
-use crate::material::{self, DEK, Field, KEK, KEY, MARKER, Material, PARENT, Pattern, pattern};
+use crate::material::{
+    self, DEK, Field, HOUSEHOLD, INSTANCE, KEK, KEY, MARKER, Material, PARENT, Pattern, ROOT,
+    pattern,
+};
 use crate::scan::{self, Findings, RegionKind};
 use crate::subject::EXIT_REFUSED;
 
@@ -300,6 +303,29 @@ const NO_CONTROL_KEY_TEXT: &[(&str, &str)] = &[(
     "key",
     "the default shape reads the key only from its planted copy; the copies path has the control",
 )];
+/// The HKDF intermediates of the derivations of Story 4.3, without a control for the reason of
+/// [`HKDF_INTERMEDIATES`].
+const ROOT_INTERMEDIATES: [(&str, &str); 4] = [
+    ("root-hkdf-prk", HKDF_INTERMEDIATES[0].1),
+    ("root-prk-hmac-ipad", HKDF_INTERMEDIATES[1].1),
+    ("root-prk-hmac-opad", HKDF_INTERMEDIATES[2].1),
+    ("root-extract-inner", HKDF_INTERMEDIATES[3].1),
+];
+const INSTANCE_INTERMEDIATES: [(&str, &str); 4] = [
+    ("instance-hkdf-prk", HKDF_INTERMEDIATES[0].1),
+    ("instance-prk-hmac-ipad", HKDF_INTERMEDIATES[1].1),
+    ("instance-prk-hmac-opad", HKDF_INTERMEDIATES[2].1),
+    ("instance-extract-inner", HKDF_INTERMEDIATES[3].1),
+];
+const HK_INTERMEDIATES: [(&str, &str); 4] = [
+    ("hk-hkdf-prk", HKDF_INTERMEDIATES[0].1),
+    ("hk-prk-hmac-ipad", HKDF_INTERMEDIATES[1].1),
+    ("hk-prk-hmac-opad", HKDF_INTERMEDIATES[2].1),
+    ("hk-extract-inner", HKDF_INTERMEDIATES[3].1),
+];
+const NO_CONTROL_FILE_KEY: &[(&str, &str)] = &ROOT_INTERMEDIATES;
+const NO_CONTROL_INSTANCE_KEY: &[(&str, &str)] = &INSTANCE_INTERMEDIATES;
+const NO_CONTROL_SET_MAC: &[(&str, &str)] = &HK_INTERMEDIATES;
 const NO_CONTROL_THREAD: &[(&str, &str)] = &[
     RAW_GHASH,
     (
@@ -359,6 +385,56 @@ fn path_patterns(name: &str, m: &Material, path: &Path) -> io::Result<PathPatter
             all: wrap_patterns(m)?,
             no_control: NO_CONTROL_THREAD,
         },
+        "file-key" => {
+            let file_key = m.file_key(path)?;
+            PathPatterns {
+                held: vec!["root", "file-key"],
+                all: [
+                    vec![
+                        secret_pattern(m, "root", ROOT),
+                        pattern("file-key", file_key),
+                    ],
+                    material::key_text_named("file-key", &file_key),
+                    material::hkdf_intermediates("root", &m.get(ROOT)),
+                ]
+                .concat(),
+                no_control: NO_CONTROL_FILE_KEY,
+            }
+        }
+        "instance-key" => {
+            let (home, core_db) = m.instance_children(path)?;
+            PathPatterns {
+                held: vec!["instance", "home-root", "core-db-key"],
+                all: [
+                    vec![
+                        secret_pattern(m, "instance", INSTANCE),
+                        pattern("home-root", home),
+                        pattern("core-db-key", core_db),
+                    ],
+                    material::hkdf_intermediates("instance", &m.get(INSTANCE)),
+                ]
+                .concat(),
+                no_control: NO_CONTROL_INSTANCE_KEY,
+            }
+        }
+        "set-mac" => {
+            let set_key = m.set_key(path)?;
+            let (ipad, opad) = material::hmac_states(&set_key);
+            PathPatterns {
+                held: vec!["hk", "set-key"],
+                all: [
+                    vec![
+                        secret_pattern(m, "hk", HOUSEHOLD),
+                        pattern("set-key", set_key),
+                        pattern("set-key-hmac-ipad", ipad),
+                        pattern("set-key-hmac-opad", opad),
+                    ],
+                    material::hkdf_intermediates("hk", &m.get(HOUSEHOLD)),
+                ]
+                .concat(),
+                no_control: NO_CONTROL_SET_MAC,
+            }
+        }
         other => return Err(io::Error::other(format!("no patterns for {other}"))),
     })
 }
@@ -438,6 +514,9 @@ fn main_group(m: &Material, path: &Path, report: &mut Report) -> io::Result<()> 
         "unwrap",
         "unwrap-wrong",
         "key-text",
+        "file-key",
+        "instance-key",
+        "set-mac",
     ] {
         code_path(name, m, path, report)?;
     }

@@ -8,7 +8,8 @@ use std::path::Path;
 
 use aws_lc_rs::cipher::{AES_256, EncryptingKey, UnboundCipherKey};
 use aws_lc_rs::hmac;
-use vilicus_crypto::{Label, SymmetricKey, derive_key, label, testing};
+use vilicus_crypto::{InstanceKey, Label, PartitionRoot, SymmetricKey, derive_key, label, testing};
+use vilicus_types::{Id, ModuleName};
 
 /// A secret of the material file: its byte offset; every secret is 32 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,12 +25,38 @@ pub const DEK: Field = Field(64);
 pub const PARENT: Field = Field(96);
 /// Bytes kept in ordinary heap memory as the control of the fork and core dump checks; not a key.
 pub const MARKER: Field = Field(128);
-const FILE_LEN: usize = 160;
+/// A partition root, a member DEK, whose module file key is derived (Story 4.3).
+pub const ROOT: Field = Field(160);
+/// A household key, whose `wrappers.db` set MAC key is derived (Story 4.3).
+pub const HOUSEHOLD: Field = Field(192);
+/// The instance key, also written alone to [`credential_path`], as its systemd credential is.
+pub const INSTANCE: Field = Field(224);
+const FILE_LEN: usize = 256;
 const SECRET_LEN: usize = 32;
 
 /// The label and context of the derivation the subject runs.
 pub const DERIVE_LABEL: Label = label!("vilicus/v1/test/key-memory");
 pub const DERIVE_CONTEXT: &[u8] = b"key-memory";
+
+/// The member whose DEK the file key path plants, the module of its file, the versions.
+pub const MEMBER: &str = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f";
+pub const MODULE: &str = "tasks";
+pub const ROOT_VERSION: u32 = 1;
+pub const GENERATION: u32 = 0;
+pub const HOUSEHOLD_VERSION: u32 = 1;
+/// The counter and the records of the set the set MAC path seals.
+pub const SET_COUNTER: u64 = 7;
+pub const SET_RECORDS: [&[u8]; 2] = [b"a wrapper record", b"a public key record"];
+
+/// The member of [`MEMBER`].
+pub fn member() -> Id {
+    MEMBER.parse().expect("the harness's member id")
+}
+
+/// The instance key's credential beside the material file at `material`.
+pub fn credential_path(material: &Path) -> std::path::PathBuf {
+    material.with_file_name("instance.credential")
+}
 
 /// One pattern: a name for the report and the bytes to look for.
 #[derive(Clone, PartialEq, Eq)]
@@ -56,7 +83,9 @@ impl Material {
         let mut bytes = vec![0_u8; FILE_LEN];
         aws_lc_rs::rand::fill(&mut bytes).map_err(other)?;
         fs::write(path, &bytes)?;
-        Ok(Material { bytes })
+        let material = Material { bytes };
+        fs::write(credential_path(path), material.get(INSTANCE))?;
+        Ok(material)
     }
 
     pub fn get(&self, field: Field) -> [u8; SECRET_LEN] {
@@ -74,6 +103,91 @@ impl Material {
         let child = derive_key(&parent, DERIVE_LABEL, &[DERIVE_CONTEXT]).map_err(other)?;
         testing::with_key(&child, |bytes| *bytes).map_err(other)
     }
+
+    /// The module file key `vilicus_crypto` derives from the DEK of [`ROOT`], computed by the
+    /// crate in the harness's own pool.
+    pub fn file_key(&self, path: &Path) -> io::Result<[u8; SECRET_LEN]> {
+        let file = fs::File::open(path)?;
+        let dek = testing::member_dek_from_file(&file, ROOT.0, member(), ROOT_VERSION)?;
+        let key = dek
+            .file_key(&ModuleName::from_static(MODULE), GENERATION)
+            .map_err(other)?;
+        testing::with_key(&key, |bytes| *bytes).map_err(other)
+    }
+
+    /// The home partition root and the `core.db` key the instance key of [`INSTANCE`] derives,
+    /// read from its credential by the crate in the harness's own pool.
+    pub fn instance_children(
+        &self,
+        path: &Path,
+    ) -> io::Result<([u8; SECRET_LEN], [u8; SECRET_LEN])> {
+        let instance = InstanceKey::from_credential(&credential_path(path), 1).map_err(other)?;
+        let home = instance.home_partition_root().map_err(other)?;
+        let core = instance.core_metadata_key().map_err(other)?;
+        Ok((
+            testing::with_key(&home, |bytes| *bytes).map_err(other)?,
+            testing::with_key(&core, |bytes| *bytes).map_err(other)?,
+        ))
+    }
+
+    /// The `wrappers.db` set MAC key the household key of [`HOUSEHOLD`] derives.
+    pub fn set_key(&self, path: &Path) -> io::Result<[u8; SECRET_LEN]> {
+        let file = fs::File::open(path)?;
+        let hk = testing::household_key_from_file(&file, HOUSEHOLD.0, HOUSEHOLD_VERSION)?;
+        let key = hk.wrapper_set_key().map_err(other)?;
+        testing::with_key(&key, |bytes| *bytes).map_err(other)
+    }
+}
+
+/// The HKDF `info` of `label` and `parts` as `vilicus_crypto` builds it (D153): the label, its 0x00
+/// end byte, then each part with its length as a `u16` big-endian.
+pub fn hkdf_info(label: &str, parts: &[&[u8]]) -> Vec<u8> {
+    let mut info = label.as_bytes().to_vec();
+    info.push(0x00);
+    for part in parts {
+        let len = u16::try_from(part.len()).expect("a short part");
+        info.extend_from_slice(&len.to_be_bytes());
+        info.extend_from_slice(part);
+    }
+    info
+}
+
+/// The HKDF `info` of the module file key of the file key path: `vilicus/v1/db/`, the module, the
+/// partition (0x03 then the member id), the root version and the generation.
+pub fn file_key_info() -> Vec<u8> {
+    let mut partition = vec![0x03];
+    partition.extend_from_slice(&member().to_bytes());
+    hkdf_info(
+        "vilicus/v1/db/",
+        &[
+            MODULE.as_bytes(),
+            &partition,
+            &ROOT_VERSION.to_be_bytes(),
+            &GENERATION.to_be_bytes(),
+        ],
+    )
+}
+
+/// The HKDF `info` of the set MAC key: `vilicus/v1/hk/wrappers-set-mac/` and the household key
+/// version.
+pub fn set_key_info() -> Vec<u8> {
+    hkdf_info(
+        "vilicus/v1/hk/wrappers-set-mac/",
+        &[&HOUSEHOLD_VERSION.to_be_bytes()],
+    )
+}
+
+/// The patterns of an HKDF-SHA-256 derivation from `ikm` named `name`: the PRK, the two HMAC
+/// states it keys, and the inner digest of the extract.
+pub fn hkdf_intermediates(name: &str, ikm: &[u8; SECRET_LEN]) -> Vec<Pattern> {
+    let prk = hkdf_prk(ikm);
+    let (ipad, opad) = hmac_states(&prk);
+    vec![
+        pattern(format!("{name}-hkdf-prk"), &prk),
+        pattern(format!("{name}-prk-hmac-ipad"), ipad),
+        pattern(format!("{name}-prk-hmac-opad"), opad),
+        pattern(format!("{name}-extract-inner"), extract_inner(ikm)),
+    ]
 }
 
 /// The patterns of an AES-256-GCM key `name`: the key, and its GHASH key H = AES-256(key, 0^128),
@@ -124,10 +238,15 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// The patterns of SQLCipher's raw key text of `key`: its 64 hex digits, and the whole text.
 pub fn key_text(key: &[u8; SECRET_LEN]) -> Vec<Pattern> {
+    key_text_named("key", key)
+}
+
+/// [`key_text`] with the patterns named after `name`.
+pub fn key_text_named(name: &str, key: &[u8; SECRET_LEN]) -> Vec<Pattern> {
     let digits = hex(key);
     vec![
-        pattern("key-hex", digits.as_bytes()),
-        pattern("key-text", format!("x'{digits}'").as_bytes()),
+        pattern(format!("{name}-hex"), digits.as_bytes()),
+        pattern(format!("{name}-text"), format!("x'{digits}'").as_bytes()),
     ]
 }
 

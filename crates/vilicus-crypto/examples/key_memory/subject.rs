@@ -18,13 +18,17 @@ use std::path::Path;
 
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use aws_lc_rs::hkdf::{HKDF_SHA256, Salt};
+use aws_lc_rs::hmac;
 use vilicus_crypto::{
-    CryptoError, Kdf, KekDerivation, Label, SymmetricKey, WrapParams, Wrapper, derive_key, label,
-    testing,
+    CryptoError, InstanceKey, Kdf, KekDerivation, Label, PartitionRoot, SymmetricKey, WrapParams,
+    Wrapper, derive_key, label, testing,
 };
-use vilicus_types::{Id, UtcMillis};
+use vilicus_types::{Id, ModuleName, UtcMillis};
 
-use crate::material::{self, DEK, DERIVE_CONTEXT, DERIVE_LABEL, Field, KEK, KEY, MARKER, PARENT};
+use crate::material::{
+    self, DEK, DERIVE_CONTEXT, DERIVE_LABEL, Field, GENERATION, HOUSEHOLD, HOUSEHOLD_VERSION, KEK,
+    KEY, MARKER, MODULE, PARENT, ROOT, ROOT_VERSION, SET_COUNTER, SET_RECORDS,
+};
 
 /// Exit status of a subject whose key memory was refused.
 pub const EXIT_REFUSED: i32 = 3;
@@ -119,6 +123,9 @@ fn run_inner(scenario: &str, variant: &str, material: &Path) -> Result<()> {
         "unwrap" => unwrap(&file, core, CONTEXT),
         "unwrap-wrong" => unwrap(&file, core, OTHER_CONTEXT),
         "key-text" => key_text(&file, core),
+        "file-key" => file_key(&file, core),
+        "instance-key" => instance_key(material, core),
+        "set-mac" => set_mac(&file, core),
         "thread" => thread(&file, core),
         "panic-hook" => panic_hook(&file),
         "fork" => fork(&file),
@@ -350,6 +357,121 @@ fn key_text(file: &File, core: bool) -> Result<()> {
         std::hint::black_box(&text);
         pause("LIVE");
         drop((key, text));
+    }
+    pause("DROPPED");
+    Ok(())
+}
+
+/// The default shape of an HKDF-SHA-256 derivation from `ikm` under `info`: the PRK object and the
+/// child kept in heap memory until the drop.
+fn asis_derive(ikm: &[u8], info: &[u8]) -> Result<(aws_lc_rs::hkdf::Prk, Vec<u8>)> {
+    let prk = Salt::new(HKDF_SHA256, &[]).extract(ikm);
+    let mut child = vec![0_u8; 32];
+    prk.expand(&[info], HKDF_SHA256)
+        .map_err(material::other)?
+        .fill(&mut child)
+        .map_err(material::other)?;
+    Ok((prk, child))
+}
+
+/// SQLCipher's key text of `key` as a heap buffer, the default shape.
+fn asis_key_text(key: &[u8]) -> Vec<u8> {
+    let mut text = Vec::with_capacity(vilicus_crypto::SQLCIPHER_KEY_TEXT_LEN);
+    text.extend_from_slice(b"x'");
+    text.extend_from_slice(material::hex(key).as_bytes());
+    text.push(b'\'');
+    text
+}
+
+/// Story 4.3: a member DEK planted in a slot derives the key of one of its module files, whose
+/// SQLCipher key text is then lent, as the Core keys a file with it. The default shape derives
+/// the same key on aws-lc-rs directly and builds the text in a heap buffer.
+fn file_key(file: &File, core: bool) -> Result<()> {
+    if core {
+        let dek = testing::member_dek_from_file(file, ROOT.0, material::member(), ROOT_VERSION)?;
+        let key = measured("file-key", || {
+            dek.file_key(&ModuleName::from_static(MODULE), GENERATION)
+        })?;
+        let len = measured("file-key-text", || {
+            key.with_sqlcipher_key_text(|text| std::hint::black_box(text).len())
+        })?;
+        say(&format!("TEXT {len}"));
+        pause("LIVE");
+        drop((dek, key));
+    } else {
+        let root = planted_plain(file, ROOT, "root")?;
+        let (prk, child) = asis_derive(&root[32..], &material::file_key_info())?;
+        let text = asis_key_text(&child);
+        std::hint::black_box(&text);
+        pause("LIVE");
+        drop((root, prk, child, text));
+    }
+    pause("DROPPED");
+    Ok(())
+}
+
+/// Story 4.3: the instance key read from its credential straight into a slot, then the home
+/// partition root and the `core.db` key derived from it. The default shape reads the credential
+/// into a heap buffer, reported as its planted input, and derives on aws-lc-rs directly.
+fn instance_key(material_path: &Path, core: bool) -> Result<()> {
+    let credential = material::credential_path(material_path);
+    if core {
+        let instance = measured("instance-key", || {
+            InstanceKey::from_credential(&credential, 1)
+        })?;
+        let home = measured("home-root", || instance.home_partition_root())?;
+        let core_db = measured("core-db-key", || instance.core_metadata_key())?;
+        pause("LIVE");
+        drop((instance, home, core_db));
+    } else {
+        let read = std::fs::read(&credential)?;
+        let mut instance = vec![0_u8; 64];
+        instance[32..].copy_from_slice(&read);
+        drop(read);
+        say(&format!(
+            "PLANTED instance {:x}",
+            instance[32..].as_ptr().addr()
+        ));
+        let home = asis_derive(
+            &instance[32..],
+            &material::hkdf_info("vilicus/v1/partition/home", &[]),
+        )?;
+        let core_db = asis_derive(
+            &instance[32..],
+            &material::hkdf_info("vilicus/v1/core/db", &[]),
+        )?;
+        pause("LIVE");
+        drop((instance, home, core_db));
+    }
+    pause("DROPPED");
+    Ok(())
+}
+
+/// Story 4.3, gate AD36-1: a household key planted in a slot derives the `wrappers.db` set MAC
+/// key, which seals a record set and verifies it. The default shape derives the same key on
+/// aws-lc-rs directly and keeps its HMAC key object until the drop.
+fn set_mac(file: &File, core: bool) -> Result<()> {
+    if core {
+        let hk = testing::household_key_from_file(file, HOUSEHOLD.0, HOUSEHOLD_VERSION)?;
+        let set_key = measured("set-key", || hk.wrapper_set_key())?;
+        let mac = measured("set-mac-seal", || set_key.seal(SET_COUNTER, &SET_RECORDS))?;
+        measured("set-mac-verify", || {
+            set_key.verify(&mac, SET_COUNTER, &SET_RECORDS)
+        })?;
+        pause("LIVE");
+        drop((hk, set_key, mac));
+    } else {
+        let hk = planted_plain(file, HOUSEHOLD, "hk")?;
+        let (prk, set_key) = asis_derive(&hk[32..], &material::set_key_info())?;
+        let mac_key = hmac::Key::new(hmac::HMAC_SHA256, &set_key);
+        let mut context = hmac::Context::with_key(&mac_key);
+        for record in SET_RECORDS {
+            context.update(record);
+        }
+        let tag = context.sign();
+        std::hint::black_box(&tag);
+        pause("LIVE");
+        drop((hk, prk, set_key, mac_key, tag));
     }
     pause("DROPPED");
     Ok(())

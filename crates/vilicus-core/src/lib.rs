@@ -17,7 +17,8 @@
 //! partition's files up once its keys are derived: re-key, migration, then outbox delivery
 //! (FR-11). [`keys`] derives each module file's key from its partition root at the file's key
 //! epoch, lends its key text to the storage layer for each connection, and authenticates
-//! `wrappers.db` as a whole (AD-4, AD-5).
+//! `wrappers.db` as a whole (AD-4, AD-5); [`unlock`] opens a member's DEK with their passphrase,
+//! after their first factor and through the Argon2id limiter (FR-11, AD-9, D128).
 
 // AD-9, D131: a module's panic is caught at the boundary of its call and never unwinds into the
 // Core, which needs unwinding; a build that aborts on panic would take the Core down with any
@@ -35,6 +36,7 @@ pub mod keys;
 pub mod record;
 pub mod registry;
 pub mod startup;
+pub mod unlock;
 // The test builds of the Core compile it too, for the key text of their test files.
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

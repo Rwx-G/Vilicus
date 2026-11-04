@@ -396,6 +396,18 @@ impl Wrappers {
             .transpose()
     }
 
+    /// The unlocking member's own DEK wrapper under `kind`, as stored, before the set is verified:
+    /// the same one read as [`unwrap_own_dek`](Self::unwrap_own_dek)'s, for a passphrase unlock
+    /// that checks its header's cost before it derives the KEK (story 4.4). `None` when the member
+    /// has no wrapper of that kind.
+    pub fn own_dek_wrapper(
+        &self,
+        member: Id,
+        kind: KekKind,
+    ) -> Result<Option<DekWrapperRow>, KeyError> {
+        Ok(self.store.own_dek_wrapper(member, kind)?)
+    }
+
     /// Applies `changes` in one transaction that first verifies the set as it is under
     /// `verify_key`, so a write never seals a set changed behind the Core's back, then raises the
     /// counter and seals the new set under `seal_key`: the same key for a write, the next household

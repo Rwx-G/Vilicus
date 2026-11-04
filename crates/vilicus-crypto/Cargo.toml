@@ -37,6 +37,10 @@ zeroize.workspace = true
 # setrlimit, the SIGTERM signalfd), at the version and features the workspace pins (owner
 # approval): a new edge to a package Cargo.lock already holds.
 libc.workspace = true
+# Argon2id of the passphrase KEK (Story 4.4, D128, D129), at the version and features the
+# workspace pins (owner approval, usage rule U1 of doc/qa/argon2-review.md). No crate names
+# `blake2`, which it brings.
+argon2.workspace = true
 
 # The key memory regression harness of Story 4.2 (AC2, AC9, AC10), run by ci/key_memory.py in
 # containers given the capabilities and limits each check needs; never a test of `cargo test`,

@@ -33,12 +33,16 @@ record = "HPKE of the household key wraps and sealed inbox rows, under the usage
 # D129 covers argon2 and the blake2 crate it depends on; the RustCrypto crates blake2 brings
 # (digest, block-buffer, crypto-common and their helpers) are covered only where argon2 alone
 # reaches them, the scope the D153 draft of Story 4.1 records as an amendment of D129.
+# The forbidden features are usage rule U1 of doc/qa/argon2-review.md: `parallel` would bring
+# rayon (F10), `alloc` compiles `hash_password_into`, which frees its blocks unwiped (F2), and
+# `password-hash`, `kdf`, `getrandom` and `rand_core` compile APIs and crates the Core does not
+# use; the build of U1 resolves `zeroize` alone.
 [source.argon2]
 version = "0.6.0"
 exception = ["D129"]
 brings_primitives = true
-forbidden_features = ["parallel"]
-record = "Argon2id of the passphrase, backup secret and admin recovery code KEKs, without its parallel feature; inside Argon2id, BLAKE2b from blake2 and the crates it brings"
+forbidden_features = ["parallel", "alloc", "password-hash", "kdf", "getrandom", "rand_core"]
+record = "Argon2id of the passphrase, backup secret and admin recovery code KEKs, with its zeroize feature only (doc/qa/argon2-review.md, U1); inside Argon2id, BLAKE2b from blake2 and the crates it brings"
 
 [source.opaque-ke]
 version = "4.0.1"

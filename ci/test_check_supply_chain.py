@@ -317,9 +317,18 @@ class PrimitiveSourceTest(unittest.TestCase):
         self.assertIn("digest 0.10.7", hpke)
         self.assertNotIn("digest 0.11.3", hpke)
 
-        violations, _ = check(tree, {ids[("argon2", "0.6.0")]: ["alloc", "parallel", "zeroize"]})
-        self.assertEqual(len(violations), 1, violations)
-        self.assertIn("argon2 0.6.0 has the feature `parallel`", violations[0])
+        # Usage rule U1 of doc/qa/argon2-review.md: `zeroize` alone passes, and each feature the
+        # record forbids fails on its own, whatever else is enabled.
+        argon2_id = ids[("argon2", "0.6.0")]
+        violations, _ = check(tree, {argon2_id: ["zeroize"]})
+        self.assertEqual(violations, [])
+        forbidden = config["source"]["argon2"]["forbidden_features"]
+        self.assertTrue({"parallel", "alloc"} <= set(forbidden), forbidden)
+        for feature in forbidden:
+            with self.subTest(feature=feature):
+                violations, _ = check(tree, {argon2_id: ["zeroize", feature]})
+                self.assertEqual(len(violations), 1, violations)
+                self.assertIn(f"argon2 0.6.0 has the feature `{feature}`", violations[0])
 
         # The Core reaching argon2's digest directly loses the coverage.
         tree.depend(crypto, ids[("digest", "0.11.3")])
@@ -401,6 +410,8 @@ class PrimitiveSourceTest(unittest.TestCase):
             line = next(line for line in listing if line.startswith(f"primitive source: {name} "))
             self.assertIn("with the primitive crates it depends on", line)
         argon2 = next(line for line in listing if line.startswith("primitive source: argon2 "))
+        for feature in config["source"]["argon2"]["forbidden_features"]:
+            self.assertIn(f"`{feature}`", argon2)
         self.assertIn("without `parallel`", argon2)
         self.assertIn("blake2", argon2)
 

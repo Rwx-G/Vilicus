@@ -154,17 +154,10 @@ fn info_parts<'a>(
 /// is `label` and its end byte, then each part of `context` preceded by its length as a `u16`
 /// big-endian; a part longer than `u16::MAX` bytes is refused.
 ///
-/// ```
-/// use vilicus_crypto::{Label, SymmetricKey, derive_key, label};
-///
-/// const FILE_KEY: Label = label!("vilicus/v1/db/");
-/// # vilicus_crypto::harden_process()?;
-/// # vilicus_crypto::lock_key_memory()?;
-/// let root = SymmetricKey::generate()?;
-/// let file_key = derive_key(&root, FILE_KEY, &[b"tasks", b"household", &1_u32.to_be_bytes()])?;
-/// # drop(file_key);
-/// # Ok::<(), vilicus_crypto::CryptoError>(())
-/// ```
+/// Not exported from the crate root: the crate's own derivations each name their registry entry
+/// (`hierarchy`), and only the `testing` feature re-exports it, for the key memory harness; a
+/// caller that could derive from any key under any label could derive another role's key
+/// (story 4.3 review, M1).
 pub fn derive_key(
     parent: &SymmetricKey,
     label: Label,

@@ -8,8 +8,9 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::derive::derive_key;
 use crate::test_support::key_memory;
-use crate::{Kdf, KekDerivation, Label, SymmetricKey, WrapParams, Wrapper, derive_key};
+use crate::{Kdf, KekDerivation, Label, SymmetricKey, WrapParams, Wrapper};
 
 const LABEL: Label = crate::label!("vilicus/v1/test/");
 const PURPOSE: Label = crate::label!("vilicus/v1/wrap/test");

@@ -12,7 +12,7 @@ pub const KEY_LEN: usize = 32;
 /// A 256-bit symmetric key: a member DEK, the household key, a key encryption key, a derived
 /// file key, any key of the suite.
 ///
-/// It is created by [`generate`](Self::generate), [`derive_key`](crate::derive_key) or
+/// It is created by [`generate`](Self::generate), a derivation of the key hierarchy or
 /// [`Wrapper::unwrap_key`](crate::Wrapper::unwrap_key), in a slot of the locked key pool
 /// ([`lock_key_memory`](crate::lock_key_memory)), and its bytes never leave the crate. It does
 /// not implement `Clone`, `Copy`, `Debug` or `Display`, and its slot is wiped when it is dropped.

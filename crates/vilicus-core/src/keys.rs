@@ -5,7 +5,33 @@
 //!
 //! A module receives none of this: its code is handed the record port of its call, over a handle
 //! the Core opened in the module's own partition, never a key, a key text or a path to one.
-
+//!
+//! The Core itself names a role key only as the type it is: `vilicus_crypto::Key` reaches no key
+//! bytes, and no derivation from an arbitrary key is exported, so the Core cannot derive one
+//! role's key from another's (story 4.3 review, M1). Each check below is a pair, so that the
+//! failing half can fail for one reason only: the first compiles, the second differs from it by
+//! the one call or name that must not exist outside `vilicus-crypto`. Rustdoc does not check the
+//! error code of a `compile_fail` test on stable; the pair is what pins the reason.
+//!
+//! ```
+//! fn leak<K: vilicus_crypto::Key>(_key: &K) -> &vilicus_crypto::SymmetricKey {
+//!     todo!()
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! fn leak<K: vilicus_crypto::Key>(key: &K) -> &vilicus_crypto::SymmetricKey {
+//!     key.symmetric()
+//! }
+//! ```
+//!
+//! ```
+//! use vilicus_crypto::Label as _;
+//! ```
+//!
+//! ```compile_fail
+//! use vilicus_crypto::derive_key as _;
+//! ```
 
 use core::fmt;
 use std::path::Path;

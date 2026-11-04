@@ -10,6 +10,7 @@ use vilicus_types::{Id, ModuleName, Partition, UtcMillis};
 use super::*;
 use crate::test_support::hex;
 use crate::wrapper::{Kdf, KekDerivation};
+use crate::wrapper_set::WrapperSetKey;
 
 /// A key holding `bytes`, planted in a slot of the pool.
 fn key_of(bytes: [u8; 32]) -> SymmetricKey {
@@ -19,7 +20,7 @@ fn key_of(bytes: [u8; 32]) -> SymmetricKey {
 }
 
 fn bytes_of(key: &impl HoldsKey) -> [u8; 32] {
-    key.symmetric()
+    key.symmetric(token())
         .slot()
         .with_key(|bytes| *bytes)
         .expect("read")
@@ -420,4 +421,60 @@ fn a_member_dek_wrapper_opens_only_as_its_member_and_version() {
             .err(),
         Some(CryptoError::Open)
     );
+}
+
+/// The role of the key a derivation produced, read from the key's own type and state.
+fn produced_role(derivation: &Derivation) -> Role {
+    let root = sequence();
+    let instance = InstanceKey {
+        key: key_of(root),
+        version: 1,
+    };
+    let audit = AuditKey { key: key_of(root) };
+    let database_role = |key: DatabaseKey| match key.database() {
+        Database::CoreMetadata => Role::CoreMetadataKey,
+        Database::Audit => Role::AuditDatabaseKey,
+    };
+    let module = ModuleName::from_static("tasks");
+    let label = derivation.label.as_str();
+    match derivation.parent {
+        Role::InstanceKey if label == HOME_PARTITION_ROOT.label.as_str() => {
+            instance.home_partition_root().expect("home root");
+            <HomePartitionRoot as HoldsKey>::ROLE.expect("a role")
+        }
+        Role::InstanceKey if label == CORE_METADATA_KEY.label.as_str() => {
+            database_role(instance.core_metadata_key().expect("core.db key"))
+        }
+        Role::AuditKey => database_role(audit.database_key().expect("audit.db key")),
+        Role::MemberDek => dek(root, member(), 1)
+            .file_key(&module, 0)
+            .expect("file key")
+            .role(),
+        Role::HouseholdKey if label == FILE_KEY_LABEL.as_str() => household(root, 1)
+            .file_key(&module, 0)
+            .expect("file key")
+            .role(),
+        Role::HouseholdKey if label == WRAPPER_SET_KEY.label.as_str() => {
+            household(root, 1).wrapper_set_key().expect("set key");
+            <WrapperSetKey as HoldsKey>::ROLE.expect("a role")
+        }
+        Role::HomePartitionRoot => home(root, 1).file_key(&module, 0).expect("file key").role(),
+        other => panic!("no derivation of the code from {other:?} under {label}"),
+    }
+}
+
+/// Story 4.3 review, L1: every entry of the registry names the child its derivation produces, read
+/// from the produced key, not from the call site; an entry no code path runs fails here too.
+#[test]
+fn every_derivation_produces_its_child() {
+    for derivation in DERIVATIONS {
+        assert!(
+            produced_role(&derivation).is(derivation.child),
+            "{} from {:?} produces {:?}, the registry names {:?}",
+            derivation.label.as_str(),
+            derivation.parent,
+            produced_role(&derivation),
+            derivation.child
+        );
+    }
 }

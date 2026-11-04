@@ -10,7 +10,11 @@ use std::os::unix::fs::FileExt;
 use vilicus_types::Id;
 
 use super::{PANIC_OBSERVER, POOL, Slot, canary};
+/// The derivation of the crate, which only the harness calls outside it: it plants and recomputes
+/// derived keys (story 4.3 review, M1).
+pub use crate::derive::derive_key;
 use crate::error::CryptoError;
+use crate::hierarchy::sealed::token;
 use crate::hierarchy::{HouseholdKey, Key, MemberDek};
 use crate::key::{KEY_LEN, SymmetricKey};
 
@@ -60,7 +64,7 @@ pub fn with_key<K: Key, R>(
     key: &K,
     operation: impl FnOnce(&[u8; KEY_LEN]) -> R,
 ) -> Result<R, CryptoError> {
-    Ok(key.symmetric().slot().with_key(operation)?)
+    Ok(key.symmetric(token()).slot().with_key(operation)?)
 }
 
 /// The address and length of the pool's locked pages, once it is locked.

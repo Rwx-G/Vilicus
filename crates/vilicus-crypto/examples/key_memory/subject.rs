@@ -21,7 +21,7 @@ use aws_lc_rs::hkdf::{HKDF_SHA256, Salt};
 use aws_lc_rs::hmac;
 use vilicus_crypto::{
     CryptoError, InstanceKey, Kdf, KekDerivation, Label, PartitionRoot, SymmetricKey, WrapParams,
-    Wrapper, derive_key, label, testing,
+    Wrapper, label, testing,
 };
 use vilicus_types::{Id, ModuleName, UtcMillis};
 
@@ -226,7 +226,7 @@ fn copies(file: &File, core: bool) -> Result<()> {
     Ok(())
 }
 
-/// The HKDF `info` of the derivation, as `vilicus_crypto::derive_key` builds it: the label, its
+/// The HKDF `info` of the derivation, as `vilicus_crypto::testing::derive_key` builds it: the label, its
 /// 0x00 end byte, then the context with its length as a `u16` big-endian (D153).
 fn derive_info() -> Result<Vec<u8>> {
     let len = u16::try_from(DERIVE_CONTEXT.len())?;
@@ -243,7 +243,7 @@ fn derive(file: &File, core: bool) -> Result<()> {
     if core {
         let parent = material::planted(file, PARENT)?;
         let child = measured("derive", || {
-            derive_key(&parent, DERIVE_LABEL, &[DERIVE_CONTEXT])
+            testing::derive_key(&parent, DERIVE_LABEL, &[DERIVE_CONTEXT])
         })?;
         pause("LIVE");
         drop((parent, child));

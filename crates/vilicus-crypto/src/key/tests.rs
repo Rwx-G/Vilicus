@@ -4,7 +4,8 @@
 use vilicus_types::{Id, UtcMillis};
 
 use super::*;
-use crate::{Kdf, KekDerivation, Label, WrapParams, Wrapper, derive_key};
+use crate::derive::derive_key;
+use crate::{Kdf, KekDerivation, Label, WrapParams, Wrapper};
 
 const LABEL: Label = crate::label!("vilicus/v1/test/");
 const PURPOSE: Label = crate::label!("vilicus/v1/wrap/test");

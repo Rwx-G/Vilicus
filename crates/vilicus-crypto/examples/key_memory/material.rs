@@ -8,7 +8,7 @@ use std::path::Path;
 
 use aws_lc_rs::cipher::{AES_256, EncryptingKey, UnboundCipherKey};
 use aws_lc_rs::hmac;
-use vilicus_crypto::{InstanceKey, Label, PartitionRoot, SymmetricKey, derive_key, label, testing};
+use vilicus_crypto::{InstanceKey, Label, PartitionRoot, SymmetricKey, label, testing};
 use vilicus_types::{Id, ModuleName};
 
 /// A secret of the material file: its byte offset; every secret is 32 bytes.
@@ -95,12 +95,12 @@ impl Material {
             .expect("32 bytes")
     }
 
-    /// The key `vilicus_crypto::derive_key` derives from [`PARENT`], computed by the crate in the
+    /// The key `vilicus_crypto::testing::derive_key` derives from [`PARENT`], computed by the crate in the
     /// harness's own pool, which the caller has locked.
     pub fn derived(&self, path: &Path) -> io::Result<[u8; SECRET_LEN]> {
         let file = fs::File::open(path)?;
         let parent = testing::key_from_file(&file, PARENT.0)?;
-        let child = derive_key(&parent, DERIVE_LABEL, &[DERIVE_CONTEXT]).map_err(other)?;
+        let child = testing::derive_key(&parent, DERIVE_LABEL, &[DERIVE_CONTEXT]).map_err(other)?;
         testing::with_key(&child, |bytes| *bytes).map_err(other)
     }
 

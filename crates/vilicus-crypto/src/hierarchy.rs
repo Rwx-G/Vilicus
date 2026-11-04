@@ -2,8 +2,11 @@
 //! a key plays, and every derivation from one role to another, each under its versioned label.
 //!
 //! The roles and their derivations are declared once, in [`DERIVATIONS`]; each derivation of the
-//! code is made through [`derive_child!`], which refuses at build time a parent or a child that
-//! its registry entry does not name. A module file's key derives from its partition's root only,
+//! code is made through [`derive_child!`], which refuses at build time a parent whose role its
+//! registry entry does not name. The child role an entry names is checked by the tests, which run
+//! every entry and read the role of the key it produced (`every_derivation_produces_its_child`).
+//! A key's bytes never leave the crate: [`Key`] names a key type, and its key is reachable only
+//! with a [`Token`](sealed::Token) that the crate alone can make. A module file's key derives from its partition's root only,
 //! with the module, the partition and the key epoch in its context, so no key of one file opens
 //! another, and no key the instance key reaches opens a personal or household file (D3, D9).
 
@@ -98,6 +101,13 @@ impl Role {
 pub(crate) struct Derivation {
     pub(crate) label: Label,
     pub(crate) parent: Role,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the child role is the tests' to check against the produced key"
+        )
+    )]
     pub(crate) child: Role,
 }
 
@@ -182,20 +192,32 @@ pub(crate) mod sealed {
     use super::Role;
     use crate::key::SymmetricKey;
 
+    /// What a call to [`HoldsKey::symmetric`] needs: a value only this crate makes, so that a key
+    /// type's key is unreachable outside it, even through a generic bound on [`Key`](super::Key)
+    /// (story 4.3 review, M1).
+    pub struct Token(());
+
+    /// The token of the crate's own calls.
+    pub(crate) const fn token() -> Token {
+        Token(())
+    }
+
     /// A key type of the hierarchy: its role and the key it holds, private to the crate.
     pub trait HoldsKey {
         /// The role of every key of this type, as a parent of [`DERIVATIONS`](super::DERIVATIONS);
         /// `None` for a type that is no parent there.
         const ROLE: Option<Role>;
 
-        fn symmetric(&self) -> &SymmetricKey;
+        /// The key, for the crate's own operations.
+        fn symmetric(&self, token: Token) -> &SymmetricKey;
     }
 }
 
-use sealed::HoldsKey;
+use sealed::{HoldsKey, Token, token};
 
 /// A key type of the crate: [`SymmetricKey`] and every role of the hierarchy. Sealed: only this
-/// crate defines key types (spine AD-4).
+/// crate defines key types (spine AD-4), and only it reaches the key a type holds, so a role key
+/// cannot be handed to an operation of another role outside the crate.
 pub trait Key: HoldsKey {}
 
 impl<K: HoldsKey> Key for K {}
@@ -203,7 +225,7 @@ impl<K: HoldsKey> Key for K {}
 impl HoldsKey for SymmetricKey {
     const ROLE: Option<Role> = None;
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         self
     }
 }
@@ -215,21 +237,22 @@ const fn has_role(declared: Option<Role>, role: Role) -> bool {
     }
 }
 
-/// The key derived from `$parent`, a `$parent_type`, under `$derivation` and `$context`, into a key
-/// of role `$child`. The build fails when `$derivation` names another parent or child role.
+/// The key derived from `$parent`, a `$parent_type`, under `$derivation` and `$context`. The build
+/// fails when `$derivation` names another parent role than `$parent_type`'s; the child role the
+/// entry names is the tests' to check (the module documentation).
 macro_rules! derive_child {
-    ($parent:expr, $parent_type:ty, $derivation:expr, $child:expr, $context:expr) => {{
+    ($parent:expr, $parent_type:ty, $derivation:expr, $context:expr) => {{
         const {
             assert!(
                 has_role(<$parent_type as HoldsKey>::ROLE, $derivation.parent),
                 "a derivation from a parent role its registry entry does not name"
             );
-            assert!(
-                $derivation.child.is($child),
-                "a derivation into a child role its registry entry does not name"
-            );
         };
-        derive_key(HoldsKey::symmetric($parent), $derivation.label, $context)
+        derive_key(
+            HoldsKey::symmetric($parent, token()),
+            $derivation.label,
+            $context,
+        )
     }};
 }
 
@@ -265,7 +288,7 @@ pub struct InstanceKey {
 impl HoldsKey for InstanceKey {
     const ROLE: Option<Role> = Some(Role::InstanceKey);
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }
@@ -291,13 +314,7 @@ impl InstanceKey {
     /// The root of the home partition, `vilicus/v1/partition/home` (D53): it carries the instance
     /// key's version.
     pub fn home_partition_root(&self) -> Result<HomePartitionRoot, CryptoError> {
-        let key = derive_child!(
-            self,
-            Self,
-            HOME_PARTITION_ROOT,
-            Role::HomePartitionRoot,
-            &[]
-        )?;
+        let key = derive_child!(self, Self, HOME_PARTITION_ROOT, &[])?;
         Ok(HomePartitionRoot {
             key,
             version: self.version,
@@ -306,7 +323,7 @@ impl InstanceKey {
 
     /// The SQLCipher key of `core.db`, `vilicus/v1/core/db` (D9).
     pub fn core_metadata_key(&self) -> Result<DatabaseKey, CryptoError> {
-        let key = derive_child!(self, Self, CORE_METADATA_KEY, Role::CoreMetadataKey, &[])?;
+        let key = derive_child!(self, Self, CORE_METADATA_KEY, &[])?;
         Ok(DatabaseKey {
             key,
             database: Database::CoreMetadata,
@@ -323,7 +340,7 @@ pub struct AuditKey {
 impl HoldsKey for AuditKey {
     const ROLE: Option<Role> = Some(Role::AuditKey);
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }
@@ -339,7 +356,7 @@ impl AuditKey {
 
     /// The SQLCipher key of `audit.db`, `vilicus/v1/audit/db` (D114).
     pub fn database_key(&self) -> Result<DatabaseKey, CryptoError> {
-        let key = derive_child!(self, Self, AUDIT_DATABASE_KEY, Role::AuditDatabaseKey, &[])?;
+        let key = derive_child!(self, Self, AUDIT_DATABASE_KEY, &[])?;
         Ok(DatabaseKey {
             key,
             database: Database::Audit,
@@ -362,6 +379,19 @@ pub trait PartitionRoot: HoldsKey {
     /// kind byte, then the member id for a personal partition), this root's version and the
     /// generation, each a `u32` big-endian. No other module, partition, root version or generation
     /// derives the same key.
+    ///
+    /// ```
+    /// use vilicus_crypto::{MemberDek, PartitionRoot};
+    /// use vilicus_types::{ModuleName, Partition};
+    /// # vilicus_crypto::harden_process()?;
+    /// # vilicus_crypto::lock_key_memory()?;
+    /// let member = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f".parse()?;
+    /// let dek = MemberDek::generate(member, 1)?;
+    /// let key = dek.file_key(&ModuleName::from_static("tasks"), 0)?;
+    /// assert_eq!(key.partition(), Partition::Member(member));
+    /// assert_eq!((key.partition_root_version(), key.generation()), (1, 0));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn file_key(&self, module: &ModuleName, generation: u32) -> Result<FileKey, CryptoError>;
 }
 
@@ -399,7 +429,7 @@ fn file_key_context(
 
 /// The file key of `$root`, a `$root_type`, under `$derivation`, for `$module` at `$generation`.
 macro_rules! file_key_of {
-    ($root:expr, $root_type:ty, $derivation:expr, $kind:expr, $module:expr, $generation:expr) => {{
+    ($root:expr, $root_type:ty, $derivation:expr, $module:expr, $generation:expr) => {{
         let partition = $root.partition();
         let version = $root.version();
         let (encoded, len, version_bytes, generation_bytes) =
@@ -408,7 +438,6 @@ macro_rules! file_key_of {
             $root,
             $root_type,
             $derivation,
-            Role::FileKey($kind),
             &[
                 $module.as_str().as_bytes(),
                 &encoded[..len],
@@ -437,7 +466,7 @@ pub struct MemberDek {
 impl HoldsKey for MemberDek {
     const ROLE: Option<Role> = Some(Role::MemberDek);
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }
@@ -515,14 +544,7 @@ impl PartitionRoot for MemberDek {
     }
 
     fn file_key(&self, module: &ModuleName, generation: u32) -> Result<FileKey, CryptoError> {
-        file_key_of!(
-            self,
-            Self,
-            PERSONAL_FILE_KEY,
-            PartitionKind::Personal,
-            module,
-            generation
-        )
+        file_key_of!(self, Self, PERSONAL_FILE_KEY, module, generation)
     }
 }
 
@@ -538,7 +560,7 @@ pub struct HouseholdKey {
 impl HoldsKey for HouseholdKey {
     const ROLE: Option<Role> = Some(Role::HouseholdKey);
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }
@@ -553,13 +575,7 @@ impl HouseholdKey {
     /// `vilicus/v1/hk/wrappers-set-mac/` with the household key version in its context (gate
     /// AD36-1).
     pub fn wrapper_set_key(&self) -> Result<WrapperSetKey, CryptoError> {
-        let key = derive_child!(
-            self,
-            Self,
-            WRAPPER_SET_KEY,
-            Role::WrapperSetKey,
-            &[&self.version.to_be_bytes()]
-        )?;
+        let key = derive_child!(self, Self, WRAPPER_SET_KEY, &[&self.version.to_be_bytes()])?;
         Ok(WrapperSetKey::from_key(key, self.version))
     }
 }
@@ -574,14 +590,7 @@ impl PartitionRoot for HouseholdKey {
     }
 
     fn file_key(&self, module: &ModuleName, generation: u32) -> Result<FileKey, CryptoError> {
-        file_key_of!(
-            self,
-            Self,
-            HOUSEHOLD_FILE_KEY,
-            PartitionKind::Household,
-            module,
-            generation
-        )
+        file_key_of!(self, Self, HOUSEHOLD_FILE_KEY, module, generation)
     }
 }
 
@@ -595,7 +604,7 @@ pub struct HomePartitionRoot {
 impl HoldsKey for HomePartitionRoot {
     const ROLE: Option<Role> = Some(Role::HomePartitionRoot);
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }
@@ -610,14 +619,7 @@ impl PartitionRoot for HomePartitionRoot {
     }
 
     fn file_key(&self, module: &ModuleName, generation: u32) -> Result<FileKey, CryptoError> {
-        file_key_of!(
-            self,
-            Self,
-            HOME_FILE_KEY,
-            PartitionKind::Home,
-            module,
-            generation
-        )
+        file_key_of!(self, Self, HOME_FILE_KEY, module, generation)
     }
 }
 
@@ -636,7 +638,7 @@ pub struct FileKey {
 impl HoldsKey for FileKey {
     const ROLE: Option<Role> = None;
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }
@@ -697,7 +699,7 @@ pub struct DatabaseKey {
 impl HoldsKey for DatabaseKey {
     const ROLE: Option<Role> = None;
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }

@@ -71,7 +71,7 @@ pub enum KekDerivation {
     /// The KDF output, or the key, is the KEK.
     Direct,
     /// The KEK is derived by HKDF-SHA-256 under a versioned label (see
-    /// [`derive_key`](crate::derive_key)).
+    /// the derivations of the key hierarchy).
     HkdfSha256,
 }
 

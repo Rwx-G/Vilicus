@@ -7,7 +7,8 @@
 use crate::aws_lc::{self, HMAC_SHA256_LEN};
 use crate::derive::Label;
 use crate::error::{CryptoError, WrapperError};
-use crate::hierarchy::{Role, sealed::HoldsKey};
+use crate::hierarchy::Role;
+use crate::hierarchy::sealed::{HoldsKey, Token};
 use crate::key::SymmetricKey;
 
 /// The format version of a stored wrapper set MAC this Core writes and reads.
@@ -34,7 +35,7 @@ pub struct WrapperSetKey {
 impl HoldsKey for WrapperSetKey {
     const ROLE: Option<Role> = Some(Role::WrapperSetKey);
 
-    fn symmetric(&self) -> &SymmetricKey {
+    fn symmetric(&self, _: Token) -> &SymmetricKey {
         &self.key
     }
 }

@@ -14,7 +14,8 @@
 //!   aws-lc-rs for each wrap ([`Wrapper::wrap_key`]).
 //! - **Key derivation**: HKDF-SHA-256 from aws-lc-rs, with no salt, a 32-byte output and an
 //!   `info` made of a versioned [`Label`] and its end byte, then each context part preceded by
-//!   its length ([`derive_key`]), so that no two derivations share an `info`.
+//!   its length, so that no two derivations share an `info`; each derivation is one of the key
+//!   hierarchy ([`PartitionRoot::file_key`] and the other role methods).
 //! - **Message authentication**: HMAC-SHA-256 from aws-lc-rs, for the MAC of the `wrappers.db`
 //!   record set ([`WrapperSetKey`]), its tags compared in constant time.
 //! - **Hashing**: SHA-256 from aws-lc-rs ([`sha256`]).
@@ -159,7 +160,7 @@ mod wrapper_set;
 
 use vilicus_types::SHA256_LEN;
 
-pub use derive::{Label, LabelError, derive_key};
+pub use derive::{Label, LabelError};
 pub use error::{CryptoError, KeyMemoryError, WrapperError};
 pub use hierarchy::{
     AuditKey, Database, DatabaseKey, FileKey, HomePartitionRoot, HouseholdKey, InstanceKey, Key,

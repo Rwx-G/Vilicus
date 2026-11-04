@@ -1,5 +1,5 @@
 //! AC3 of Story 4.1: every key buffer is wiped when it is dropped, read through the test-only
-//! hook [`wiped`].
+//! hook [`wiped`](crate::memory::wiped).
 
 use vilicus_types::{Id, UtcMillis};
 
@@ -23,13 +23,11 @@ fn params() -> WrapParams {
 /// Drops `key` and returns what the hook saw of its buffer: its address before the drop, and
 /// the buffer's bytes once wiped.
 fn dropped(key: SymmetricKey) -> (usize, Vec<(usize, [u8; KEY_LEN])>) {
-    let (address, bytes) = key
-        .slot()
-        .with_bytes(|bytes| (bytes.as_ptr().addr(), *bytes));
+    let (address, bytes) = key.slot().with_key(|bytes| (bytes.as_ptr().addr(), *bytes));
     assert_ne!(bytes, [0; KEY_LEN], "the key held bytes before the drop");
-    wiped::take();
+    crate::memory::wiped::take();
     drop(key);
-    (address, wiped::take())
+    (address, crate::memory::wiped::take())
 }
 
 #[test]
@@ -55,19 +53,19 @@ fn every_key_wipes_its_buffer_when_dropped() {
 fn the_buffers_of_a_wrap_and_of_a_failed_open_are_wiped() {
     let kek = SymmetricKey::generate().expect("generate");
     let key = SymmetricKey::generate().expect("generate");
-    wiped::take();
+    crate::memory::wiped::take();
     let wrapper = Wrapper::wrap_key(&kek, &key, PURPOSE, params(), b"context").expect("wrap");
-    let seen = wiped::take();
+    let seen = crate::memory::wiped::take();
     assert_eq!(seen.len(), 1, "the seal's working buffer");
     assert_eq!(seen[0].1, [0; KEY_LEN]);
 
     let other = SymmetricKey::generate().expect("generate");
-    wiped::take();
+    crate::memory::wiped::take();
     assert!(matches!(
         wrapper.unwrap_key(&other, PURPOSE, b"context"),
         Err(CryptoError::Open)
     ));
-    let seen = wiped::take();
+    let seen = crate::memory::wiped::take();
     assert_eq!(seen.len(), 1, "the buffer the refused open wrote into");
     assert_eq!(seen[0].1, [0; KEY_LEN]);
 }

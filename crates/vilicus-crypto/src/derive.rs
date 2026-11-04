@@ -158,6 +158,8 @@ fn info_parts<'a>(
 /// use vilicus_crypto::{Label, SymmetricKey, derive_key, label};
 ///
 /// const FILE_KEY: Label = label!("vilicus/v1/db/");
+/// # vilicus_crypto::harden_process()?;
+/// # vilicus_crypto::lock_key_memory()?;
 /// let root = SymmetricKey::generate()?;
 /// let file_key = derive_key(&root, FILE_KEY, &[b"tasks", b"household", &1_u32.to_be_bytes()])?;
 /// # drop(file_key);
@@ -170,10 +172,10 @@ pub fn derive_key(
 ) -> Result<SymmetricKey, CryptoError> {
     let mut lengths = Vec::with_capacity(context.len());
     let info = info_parts(label, context, &mut lengths)?;
-    let mut derived = Slot::zeroed();
+    let mut derived = Slot::new()?;
     parent
         .slot()
-        .with_bytes(|ikm| derived.with_bytes_mut(|out| aws_lc::hkdf_sha256(ikm, &info, out)))
+        .with_key(|ikm| derived.with_key_mut(|out| aws_lc::hkdf_sha256(ikm, &info, out)))
         .map_err(|_| CryptoError::Derive)?;
     Ok(SymmetricKey::from_slot(derived))
 }

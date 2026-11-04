@@ -5,14 +5,14 @@ use super::*;
 use crate::test_support::hex;
 
 fn key_from(bytes: [u8; crate::KEY_LEN]) -> SymmetricKey {
-    let mut slot = Slot::zeroed();
-    slot.with_bytes_mut(|out| *out = bytes);
+    let mut slot = Slot::new().expect("slot");
+    slot.with_key_mut(|out| *out = bytes);
     SymmetricKey::from_slot(slot)
 }
 
 fn same_key(left: &SymmetricKey, right: &SymmetricKey) -> bool {
     left.slot()
-        .with_bytes(|left| right.slot().with_bytes(|right| left == right))
+        .with_key(|left| right.slot().with_key(|right| left == right))
 }
 
 fn info(label: Label, context: &[&[u8]]) -> Vec<u8> {
@@ -141,7 +141,7 @@ fn derive_key_matches_a_known_answer() {
         &[b"member-0001", &7_u32.to_be_bytes()],
     )
     .expect("derive");
-    derived.slot().with_bytes(|bytes| {
+    derived.slot().with_key(|bytes| {
         assert_eq!(
             bytes.to_vec(),
             hex("d5411e35d39fdbb3bb240a87df44e332aa1a960e32bca5814ba4b0a0ae3d9dd2")

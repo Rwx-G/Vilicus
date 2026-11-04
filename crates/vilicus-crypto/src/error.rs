@@ -1,4 +1,5 @@
-//! The errors of the crate: a refused key operation, and a refused wrapper encoding.
+//! The errors of the crate: a refused key operation, a refused wrapper encoding, and key memory
+//! that could not be set up or handed out.
 
 use core::fmt;
 
@@ -31,6 +32,14 @@ pub enum CryptoError {
         /// Its length in bytes.
         len: usize,
     },
+    /// The key pool gave no slot for the key or for a working buffer of the operation.
+    KeyMemory(KeyMemoryError),
+}
+
+impl From<KeyMemoryError> for CryptoError {
+    fn from(error: KeyMemoryError) -> Self {
+        Self::KeyMemory(error)
+    }
 }
 
 impl fmt::Display for CryptoError {
@@ -53,11 +62,125 @@ impl fmt::Display for CryptoError {
                     "salt or credential reference of {len} bytes is too long"
                 )
             }
+            Self::KeyMemory(error) => write!(formatter, "{error}"),
         }
     }
 }
 
 impl std::error::Error for CryptoError {}
+
+/// Key memory that could not be set up at the Core's start, or a slot the pool could not hand
+/// out (spine AD-4, D131). Each start error stops the Core: none is answered by keeping keys
+/// in unlocked memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeyMemoryError {
+    /// `PR_SET_DUMPABLE` 0, `RLIMIT_CORE` 0 or reading them back failed.
+    Harden {
+        /// The `errno` of the failed call.
+        errno: i32,
+    },
+    /// The key pool was asked for in a process that is still dumpable or may write a core file:
+    /// [`harden_process`](crate::harden_process) comes first.
+    NotHardened,
+    /// The process holds `CAP_IPC_LOCK`, which the Core's unit never grants: with it,
+    /// `LimitMEMLOCK` bounds nothing.
+    CapIpcLock,
+    /// `/proc/self/status` could not be read or did not hold the field asked for.
+    ProcessStatus {
+        /// The `errno` of the failed read, 0 for a missing or unreadable field.
+        errno: i32,
+    },
+    /// Mapping the pool or protecting its guard pages failed.
+    Map {
+        /// The `errno` of the failed call.
+        errno: i32,
+    },
+    /// An `madvise` of the pool failed.
+    Advise {
+        /// The advice refused.
+        advice: &'static str,
+        /// The `errno` of the failed call.
+        errno: i32,
+    },
+    /// `mlock` refused the pool: the Core's `LimitMEMLOCK` is below the pool's size.
+    Lock {
+        /// The pool's size in bytes, what `mlock` was asked to lock.
+        bytes: usize,
+        /// The `errno` of the failed call.
+        errno: i32,
+    },
+    /// The process already has its key pool.
+    AlreadyLocked,
+    /// Blocking SIGTERM, opening its signalfd or starting the thread that takes it failed.
+    Sigterm {
+        /// The error number of the failed call.
+        errno: i32,
+    },
+    /// SIGTERM was to be blocked while other threads run, which would still receive it.
+    ThreadsRunning {
+        /// The process's thread count.
+        threads: usize,
+    },
+    /// No key pool is locked yet, so no key can be created.
+    NotLocked,
+    /// Every slot of the pool is in use.
+    Exhausted,
+    /// The pool was wiped as the process ends; it hands out no slot.
+    Wiped,
+}
+
+impl fmt::Display for KeyMemoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Harden { errno } => {
+                write!(
+                    formatter,
+                    "the process could not be made non-dumpable (errno {errno})"
+                )
+            }
+            Self::NotHardened => formatter.write_str(
+                "the key pool needs a non-dumpable process with RLIMIT_CORE 0: harden it first",
+            ),
+            Self::CapIpcLock => formatter
+                .write_str("the process holds CAP_IPC_LOCK, which the Core's unit never grants"),
+            Self::ProcessStatus { errno } => {
+                write!(
+                    formatter,
+                    "/proc/self/status could not be read (errno {errno})"
+                )
+            }
+            Self::Map { errno } => write!(
+                formatter,
+                "the key pool could not be mapped (errno {errno})"
+            ),
+            Self::Advise { advice, errno } => {
+                write!(formatter, "{advice} of the key pool failed (errno {errno})")
+            }
+            Self::Lock { bytes, errno } => write!(
+                formatter,
+                "mlock refused the key pool of {bytes} bytes (errno {errno}): the Core's \
+                 LimitMEMLOCK must cover it, and it does not start on unlocked memory"
+            ),
+            Self::AlreadyLocked => formatter.write_str("the process already has its key pool"),
+            Self::Sigterm { errno } => {
+                write!(
+                    formatter,
+                    "SIGTERM could not be taken on a thread of its own (errno {errno})"
+                )
+            }
+            Self::ThreadsRunning { threads } => write!(
+                formatter,
+                "SIGTERM must be blocked while the process has one thread, not {threads}"
+            ),
+            Self::NotLocked => formatter.write_str("no key pool is locked"),
+            Self::Exhausted => formatter.write_str("every slot of the key pool is in use"),
+            Self::Wiped => formatter.write_str("the key pool was wiped"),
+        }
+    }
+}
+
+impl std::error::Error for KeyMemoryError {}
 
 /// A refused wrapper encoding. A refused wrapper is never repaired, read under another version or
 /// opened with other algorithms than it names.

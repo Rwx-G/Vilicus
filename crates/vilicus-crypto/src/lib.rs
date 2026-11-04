@@ -2,7 +2,8 @@
 //!
 //! A dependency of `vilicus-core` only, so no module, adapter or test crate can name a key type
 //! (`doc/architecture-spine.md`, AD-3 and AD-4). Unsafe code is allowed here for memory locking,
-//! per block and with a `// SAFETY:` comment (D140).
+//! per block and with a `// SAFETY:` comment, in one module (D140). Linux only: the key memory
+//! rests on Linux system calls.
 //!
 //! # Cryptographic suite, version 1
 //!
@@ -86,24 +87,57 @@
 //!
 //! Every key type of Vilicus is defined here ([`SymmetricKey`]): none implements `Clone`,
 //! `Debug` or `Display`, and each wipes its buffer when dropped. The crate never hands out key
-//! bytes. Key buffers are heap allocations wiped on drop; they are not yet in locked memory,
-//! which AD-4 and D131 require before keys are held in production.
+//! bytes.
 //!
 //! Each AES-256-GCM or HKDF operation builds the aws-lc-rs objects it needs from the key's
 //! buffer and drops them before it returns, because a live aws-lc-rs key object keeps the key,
 //! the HKDF input or the GHASH key in heap memory the Core neither wipes nor locks (D131).
+//!
+//! # Key memory
+//!
+//! Every key buffer is a slot of one locked pool per process, and every key operation runs under
+//! a guard that scrubs the stack it used (spine AD-4, D131). The Core sets the process up in this
+//! order, before it reads the instance key, and does not start if a step fails:
+//!
+//! 1. [`harden_process`]: non-dumpable, core size limit 0;
+//! 2. [`take_sigterm`], while the process still has one thread: SIGTERM taken on a thread that
+//!    wipes the pool before the orderly shutdown;
+//! 3. [`lock_key_memory`]: the pool, refused unless the process is hardened, holds no
+//!    `CAP_IPC_LOCK` and `mlock` accepts it, so a refused lock stops the Core instead of leaving
+//!    keys in swappable memory;
+//! 4. [`install_panic_hook`], given the mark of a module handler's boundary: a panic outside one
+//!    wipes the pool and aborts.
+//!
+//! ```
+//! vilicus_crypto::harden_process()?;
+//! vilicus_crypto::lock_key_memory()?;
+//! vilicus_crypto::install_panic_hook(|| false);
+//! # Ok::<(), vilicus_crypto::KeyMemoryError>(())
+//! ```
+
+#[cfg(not(target_os = "linux"))]
+compile_error!("vilicus-crypto locks its key memory with Linux system calls; build it on Linux");
 
 mod aws_lc;
 mod derive;
 mod error;
 mod key;
+mod memory;
 mod wrapper;
 
 use vilicus_types::SHA256_LEN;
 
 pub use derive::{Label, LabelError, derive_key};
-pub use error::{CryptoError, WrapperError};
+pub use error::{CryptoError, KeyMemoryError, WrapperError};
 pub use key::{KEY_LEN, SymmetricKey};
+/// What the key memory regression harness needs of the crate (Story 4.2, AC10), compiled with
+/// the `testing` feature only, which `ci/check_packaging.py` refuses in a release artefact.
+#[cfg(feature = "testing")]
+pub use memory::testing;
+pub use memory::{
+    PLANNED_SLOTS, STACK_SCRUB_LEN, STACK_SCRUB_MARGIN, harden_process, install_panic_hook,
+    lock_key_memory, take_sigterm,
+};
 pub use wrapper::{
     ARGON2_VERSION, Aead, Argon2idParams, FORMAT_VERSION, Kdf, KekDerivation,
     MAX_KEK_REFERENCE_LEN, OLDEST_ACCEPTED_FORMAT_VERSION, WrapParams, Wrapper,

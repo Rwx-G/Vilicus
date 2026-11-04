@@ -47,7 +47,7 @@ fn keys() -> (SymmetricKey, SymmetricKey) {
 
 fn same_key(left: &SymmetricKey, right: &SymmetricKey) -> bool {
     left.slot()
-        .with_bytes(|left| right.slot().with_bytes(|right| left == right))
+        .with_key(|left| right.slot().with_key(|right| left == right))
 }
 
 /// The rows of the encoding table of the crate documentation: each field's name and its width,
@@ -109,10 +109,10 @@ fn the_encoding_is_the_documented_layout() {
     additional_data.extend_from_slice(b"context");
     let mut ciphertext = [0; KEY_LEN];
     key.slot()
-        .with_bytes(|bytes| ciphertext.copy_from_slice(bytes));
+        .with_key(|bytes| ciphertext.copy_from_slice(bytes));
     let tag = kek
         .slot()
-        .with_bytes(|kek| aws_lc::seal_aes_256_gcm(kek, nonce, &additional_data, &mut ciphertext))
+        .with_key(|kek| aws_lc::seal_aes_256_gcm(kek, nonce, &additional_data, &mut ciphertext))
         .expect("seal");
     let fields: Vec<Vec<u8>> = [header, vec![ciphertext.to_vec(), tag.to_vec()]].concat();
 

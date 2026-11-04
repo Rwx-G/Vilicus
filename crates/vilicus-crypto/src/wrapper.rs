@@ -153,6 +153,8 @@ impl WrapParams {
 ///
 /// const MEMBER_PRIVATE_KEY: Label = label!("vilicus/v1/wrap/member-private-key");
 /// const INBOX_PRIVATE_KEY: Label = label!("vilicus/v1/wrap/inbox-private-key");
+/// # vilicus_crypto::harden_process()?;
+/// # vilicus_crypto::lock_key_memory()?;
 /// let kek = SymmetricKey::generate()?;
 /// let private_key = SymmetricKey::generate()?;
 /// let created_at = UtcMillis::from_millis(1_793_577_600_000)?;
@@ -224,17 +226,17 @@ impl Wrapper {
         let additional_data = wrapper.additional_data(purpose, context)?;
         // The key is copied into a buffer the crate wipes and sealed there, so a failed seal
         // leaves no plaintext copy behind.
-        let mut sealed = Slot::zeroed();
-        sealed.with_bytes_mut(|out| key.slot().with_bytes(|bytes| out.copy_from_slice(bytes)));
+        let mut sealed = Slot::new()?;
+        sealed.with_key_mut(|out| key.slot().with_key(|bytes| out.copy_from_slice(bytes)));
         let tag = kek
             .slot()
-            .with_bytes(|kek| {
-                sealed.with_bytes_mut(|in_out| {
+            .with_key(|kek| {
+                sealed.with_key_mut(|in_out| {
                     aws_lc::seal_aes_256_gcm(kek, nonce, &additional_data, in_out)
                 })
             })
             .map_err(|_| CryptoError::Seal)?;
-        sealed.with_bytes(|bytes| wrapper.ciphertext.copy_from_slice(bytes));
+        sealed.with_key(|bytes| wrapper.ciphertext.copy_from_slice(bytes));
         wrapper.tag = tag;
         Ok(wrapper)
     }
@@ -249,10 +251,10 @@ impl Wrapper {
         context: &[u8],
     ) -> Result<SymmetricKey, CryptoError> {
         let additional_data = self.additional_data(purpose, context)?;
-        let mut opened = Slot::zeroed();
+        let mut opened = Slot::new()?;
         kek.slot()
-            .with_bytes(|kek| {
-                opened.with_bytes_mut(|out| {
+            .with_key(|kek| {
+                opened.with_key_mut(|out| {
                     aws_lc::open_aes_256_gcm(
                         kek,
                         self.nonce,

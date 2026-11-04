@@ -18,6 +18,13 @@ missing_docs = "deny"
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 
+# `testing` compiles `vilicus_crypto::testing`, what the key memory regression harness needs (Story
+# 4.2, AC10): keys planted from a file, the stack canary of the guarded calls, and the fork, signal
+# and fault it inspects. Only test code enables it, through vilicus-core's `testing` feature;
+# ci/check_packaging.py refuses it in the normal or build dependencies of a release artefact.
+[features]
+testing = []
+
 [dependencies]
 vilicus-types.workspace = true
 # The cryptographic library of the spine's Stack (aws-lc-rs with its aws-lc-sys backend, D28),
@@ -26,3 +33,8 @@ vilicus-types.workspace = true
 aws-lc-rs.workspace = true
 # Key buffers wiped on drop (spine AD-4, Stack), at the version Cargo.lock already holds.
 zeroize.workspace = true
+# The system calls of the key memory (Story 4.2, D131: mmap, mprotect, madvise, mlock, prctl,
+# setrlimit, the SIGTERM signalfd), at the version and features the workspace pins (owner
+# approval): a new edge to a package Cargo.lock already holds.
+libc.workspace = true
+

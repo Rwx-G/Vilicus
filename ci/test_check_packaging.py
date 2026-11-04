@@ -161,6 +161,14 @@ class ArtefactTest(PackagingTestCase):
                 violations = self.check()
                 self.assertTrue(any(f"whose feature default enables {cp.TEST_FEATURE}" in v for v in violations), violations)
 
+    def test_test_feature_passed_on_by_the_test_feature_passes(self) -> None:
+        core = self.names["core"]
+        self.metadata.packages[core]["features"] = {cp.TEST_FEATURE: [f"vilicus-crypto/{cp.TEST_FEATURE}"]}
+        self.assertEqual(self.check(), [])
+        self.metadata.packages[core]["features"]["default"] = [cp.TEST_FEATURE]
+        violations = self.check()
+        self.assertTrue(any(f"whose feature default enables {cp.TEST_FEATURE}" in v for v in violations), violations)
+
     def test_test_feature_through_a_dev_dependency_passes(self) -> None:
         self.metadata.depend(self.shipped, self.names["core"], "dev", (cp.TEST_FEATURE,))
         self.assertEqual(self.check(), [])

@@ -19,6 +19,29 @@
 //!
 //! Its code, [`REFERENCE_CODE`], is bound to [`REFERENCE`] by name and checked in this crate's
 //! build, as every module's is.
+//!
+//! Like every module, it cannot name a key type: key types are defined in `vilicus-crypto`,
+//! which is a dependency of `vilicus-core` only (AD-3, AD-4, FR-13), so that crate is not even
+//! in scope here.
+//!
+//! ```compile_fail,E0433
+//! fn holds(_key: vilicus_crypto::SymmetricKey) {}
+//! ```
+//!
+//! ```compile_fail,E0463
+//! extern crate vilicus_crypto;
+//! ```
+//!
+//! Nor can it name a file key or what keys a file: the key of each of its files and the text the
+//! Core lends to key a connection stay in the Core (Story 4.3, AC5).
+//!
+//! ```compile_fail,E0433
+//! fn holds(_key: vilicus_crypto::FileKey) {}
+//! ```
+//!
+//! ```compile_fail,E0433
+//! fn keys(_text: &dyn vilicus_storage::FileKeying) {}
+//! ```
 
 #![forbid(unsafe_code)]
 

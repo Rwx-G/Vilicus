@@ -6,16 +6,20 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use super::{EPOCH, KEY, create_module_file, module_file, raw_connection, scratch_dir};
+use super::{
+    EPOCH, KEY, KEY_BYTES, KEY_TEXT, create_module_file, key_text, module_file, raw_connection,
+    scratch_dir,
+};
 use crate::authorizer::{self, Policy};
 use crate::error::Error;
-use crate::handle::{Setup, raw_key_text};
+use crate::handle::Setup;
 use crate::{
-    BUSY_TIMEOUT, Handle, JOURNAL_SIZE_LIMIT, KeyEpoch, Migration, Read, Role, RoleKind, Settings,
-    Write, create, open, read_epoch,
+    BUSY_TIMEOUT, FileKeying, Handle, JOURNAL_SIZE_LIMIT, KEY_TEXT_LEN, KeyEpoch, Migration, Read,
+    Role, RoleKind, Settings, Write, create, open, read_epoch,
 };
 
-const OTHER_KEY: [u8; 32] = [0xa5; 32];
+const OTHER_KEY_TEXT: [u8; KEY_TEXT_LEN] = key_text([0xa5; 32]);
+const OTHER_KEY: super::TestKey = super::TestKey(OTHER_KEY_TEXT);
 
 /// A value no page of a file holds unless it was written there, to look for in raw bytes.
 const MARKER: &str = "vilicus-storage-plaintext-marker-6d1f0c";
@@ -64,7 +68,7 @@ fn create_writes_an_encrypted_file_named_module_dot_partition() {
 fn the_file_is_keyed_with_the_raw_key_not_a_passphrase_kdf() {
     let dir = scratch_dir("ac1-raw");
     let file = create_module_file(&dir);
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = KEY_BYTES.iter().map(|byte| format!("{byte:02x}")).collect();
     let as_passphrase = Connection::open(file.path()).expect("open");
     as_passphrase
         .execute_batch(&format!("PRAGMA key = '{hex}';"))
@@ -222,7 +226,7 @@ fn the_setup_pragmas_are_refused_once_the_authorizer_is_on() {
     let connection = Connection::open(file.path()).expect("open");
     authorizer::install(&connection, Policy::Write).expect("install");
     for sql in [
-        super::raw_key_pragma(&KEY),
+        super::raw_key_pragma(&KEY_TEXT),
         "PRAGMA secure_delete = ON".to_owned(),
         "PRAGMA trusted_schema = OFF".to_owned(),
         format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}"),
@@ -299,6 +303,129 @@ fn write_epoch_updates_both_and_leaves_no_staging_file() {
             .any(|name| name.ends_with(".tmp") || name.ends_with(".next")),
         "{names:?}"
     );
+}
+
+/// Story 4.3, AC2: a re-key moves the file to the new key and the new epoch, written in the
+/// sidecar and in `_meta`; the rows stay, the old key no longer opens it, and no pending sidecar or
+/// WAL content is left.
+#[test]
+fn a_rekey_moves_the_file_to_its_new_key_and_epoch() {
+    let dir = scratch_dir("story43-rekey");
+    let file = create_module_file(&dir);
+    let next = KeyEpoch {
+        partition_root_version: 1,
+        generation: 1,
+    };
+    let mut handle = open::<Write>(&file, &KEY).expect("open");
+    handle
+        .execute("INSERT INTO items (label) VALUES ('second')", [])
+        .expect("write");
+    handle.rekey(&OTHER_KEY, next).expect("rekey");
+    assert_eq!(handle.epoch(), next);
+    handle.close().expect("close");
+    assert_eq!(read_epoch(&file).expect("sidecar"), next);
+    assert!(!file.pending_epoch_path().exists());
+    assert_eq!(wal_len(&file.wal_path()), 0);
+    assert!(matches!(open::<Read>(&file, &KEY), Err(Error::WrongKey)));
+    let reader = open::<Read>(&file, &OTHER_KEY).expect("open under the new key");
+    assert_eq!(reader.epoch(), next);
+    let labels: Vec<String> = reader
+        .prepare("SELECT label FROM items ORDER BY id")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("read");
+    assert_eq!(labels, ["first", "second"]);
+    reader.close().expect("close");
+    let in_meta: i64 = super::raw_connection_keyed(&file.path(), &OTHER_KEY_TEXT)
+        .query_row(
+            "SELECT value FROM _meta WHERE key = 'generation'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read _meta");
+    assert_eq!(in_meta, 1);
+}
+
+/// A key text lent once for the re-key and another for every later lend: the read-back of the
+/// re-key then opens the file with a key it is not under, as it would after a re-key whose commit
+/// failed while SQLCipher reported success.
+struct Switching {
+    first: [u8; KEY_TEXT_LEN],
+    then: [u8; KEY_TEXT_LEN],
+    lends: std::cell::Cell<usize>,
+}
+
+impl FileKeying for Switching {
+    fn lend_key_text(
+        &self,
+        key_with: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        self.lends.set(self.lends.get() + 1);
+        key_with(if self.lends.get() == 1 {
+            &self.first
+        } else {
+            &self.then
+        })
+    }
+}
+
+/// Story 4.3 review, L4: a re-key is read back under its new key before its pending sidecar is
+/// renamed; when the file does not open under that key, the re-key fails and leaves the pending
+/// sidecar, so no open guesses which epoch holds.
+#[test]
+fn a_rekey_that_does_not_read_back_leaves_its_epoch_pending() {
+    let dir = scratch_dir("l4-read-back");
+    let file = create_module_file(&dir);
+    let next = KeyEpoch {
+        partition_root_version: 1,
+        generation: 1,
+    };
+    let keying = Switching {
+        first: OTHER_KEY_TEXT,
+        then: key_text([0x33; 32]),
+        lends: std::cell::Cell::new(0),
+    };
+    let mut handle = open::<Write>(&file, &KEY).expect("open");
+    assert!(matches!(handle.rekey(&keying, next), Err(Error::WrongKey)));
+    assert_eq!(keying.lends.get(), 2, "the re-key and its read-back");
+    handle.close().expect("close");
+    assert!(file.pending_epoch_path().exists());
+    assert!(matches!(
+        open::<Read>(&file, &OTHER_KEY),
+        Err(Error::EpochTransitionPending { .. })
+    ));
+}
+
+/// A re-key whose key text is refused leaves the file under its key and epoch, with no pending
+/// sidecar, and one inside a transaction is refused before anything is written.
+#[test]
+fn a_refused_rekey_leaves_the_file_as_it_was() {
+    let dir = scratch_dir("story43-rekey-refused");
+    let file = create_module_file(&dir);
+    let next = KeyEpoch {
+        partition_root_version: 2,
+        generation: 0,
+    };
+    let mut handle = open::<Write>(&file, &KEY).expect("open");
+    let malformed = KEY_TEXT.to_ascii_uppercase();
+    let keying = Lent::new(&malformed);
+    assert!(matches!(
+        handle.rekey(&keying, next),
+        Err(Error::MalformedKeyText)
+    ));
+    assert_eq!(handle.epoch(), EPOCH);
+    assert!(!file.pending_epoch_path().exists());
+    handle.execute_batch("BEGIN").expect("begin");
+    assert!(matches!(
+        handle.rekey(&OTHER_KEY, next),
+        Err(Error::TransactionOpen)
+    ));
+    handle.execute_batch("ROLLBACK").expect("rollback");
+    handle.close().expect("close");
+    assert_eq!(read_epoch(&file).expect("sidecar"), EPOCH);
+    assert_eq!(open::<Read>(&file, &KEY).expect("open").epoch(), EPOCH);
 }
 
 /// Review item 4: a read handle relies on `query_only`, which the authorizer keeps anyone from
@@ -621,20 +748,115 @@ fn checkpoint_truncate_empties_the_wal_and_reports_a_busy_one() {
 
 // --- AC11 ---
 
-/// The hex form of the key is built in a buffer allocated once at its final size, so no
-/// reallocation leaves a copy behind, and it is a `Zeroizing` buffer, wiped on drop.
+/// A key text that is not `x'`, 64 lowercase hex digits, then `'` is refused before it keys the
+/// connection, since SQLCipher would take it for a passphrase and derive another key from it: the
+/// whole text in uppercase, one digit short or long, a quote missing, and at each digit position
+/// one byte outside the lowercase hex digits, an uppercase hex digit among them.
 #[test]
-fn the_key_text_is_one_buffer_of_its_final_size() {
-    let text: zeroize::Zeroizing<Vec<u8>> = raw_key_text(&KEY);
-    assert_eq!(text.len(), text.capacity());
-    assert_eq!(text.len(), 67);
-    assert!(text.starts_with(b"x'") && text.ends_with(b"'"));
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
-    assert_eq!(&text[2..66], hex.as_bytes());
+fn a_malformed_key_text_is_refused_before_it_keys() {
+    let dir = scratch_dir("ac11-malformed-text");
+    let file = create_module_file(&dir);
+    let mut malformed: Vec<Vec<u8>> = vec![
+        KEY_TEXT.to_ascii_uppercase(),
+        KEY_TEXT[..KEY_TEXT_LEN - 2]
+            .iter()
+            .chain(b"'")
+            .copied()
+            .collect(),
+        KEY_TEXT[..KEY_TEXT_LEN - 1]
+            .iter()
+            .chain(b"a'")
+            .copied()
+            .collect(),
+        KEY_TEXT[1..].to_vec(),
+        KEY_TEXT[..KEY_TEXT_LEN - 1].to_vec(),
+        Vec::new(),
+    ];
+    for position in 2..KEY_TEXT_LEN - 1 {
+        for outside in [b'/', b':', b'`', b'g', b'G', b'A', b'F', 0xff] {
+            let mut text = KEY_TEXT;
+            text[position] = outside;
+            malformed.push(text.to_vec());
+        }
+    }
+    for text in malformed {
+        let keying = Lent::new(&text);
+        let outcome = open::<Read>(&file, &keying).map(drop);
+        assert!(
+            matches!(outcome, Err(Error::MalformedKeyText)),
+            "{text:?}: {outcome:?}"
+        );
+    }
+    assert!(open::<Read>(&file, &KEY).is_ok());
 }
 
-/// No product source builds `PRAGMA key` SQL text, which SQLite would keep in its statement
-/// memory and `rusqlite` in its errors; keying goes through `sqlite3_key_v2` (AC11).
+/// A key text lent through [`FileKeying`], counting its lends and refusing them on request.
+struct Lent<'a> {
+    text: &'a [u8],
+    lends: std::cell::Cell<usize>,
+    refuse: bool,
+}
+
+impl<'a> Lent<'a> {
+    fn new(text: &'a [u8]) -> Self {
+        Self {
+            text,
+            lends: std::cell::Cell::new(0),
+            refuse: false,
+        }
+    }
+}
+
+impl FileKeying for Lent<'_> {
+    fn lend_key_text(
+        &self,
+        key_with: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        if self.refuse {
+            return Err(Error::KeyUnavailable);
+        }
+        self.lends.set(self.lends.get() + 1);
+        key_with(self.text)
+    }
+}
+
+/// The key text is lent once for each connection the storage layer keys, and never kept: `open`
+/// keys one connection, `create` its staging file's and then the handle's. A text that cannot be
+/// lent stops the open or the creation with [`Error::KeyUnavailable`], and nothing is created.
+#[test]
+fn the_key_text_is_lent_once_per_connection() {
+    let dir = scratch_dir("ac11-lent");
+    let file = module_file(&dir);
+    let keying = Lent::new(&KEY_TEXT);
+    create(&file, &keying, EPOCH)
+        .expect("create")
+        .close()
+        .expect("close");
+    assert_eq!(keying.lends.get(), 2);
+    open::<Read>(&file, &keying)
+        .expect("open")
+        .close()
+        .expect("close");
+    assert_eq!(keying.lends.get(), 3);
+    let refused = Lent {
+        refuse: true,
+        ..Lent::new(&KEY_TEXT)
+    };
+    assert!(matches!(
+        open::<Read>(&file, &refused),
+        Err(Error::KeyUnavailable)
+    ));
+    let other = module_file(&scratch_dir("ac11-lent-refused"));
+    assert!(matches!(
+        create(&other, &refused, EPOCH),
+        Err(Error::KeyUnavailable)
+    ));
+    assert!(!other.path().exists() && !other.epoch_path().exists());
+}
+
+/// No product source builds `PRAGMA key` or `PRAGMA rekey` SQL text, which SQLite would keep in its
+/// statement memory and `rusqlite` in its errors; keying goes through `sqlite3_key_v2` (AC11) and
+/// re-keying through `sqlite3_rekey_v2` (Story 4.3).
 #[test]
 fn no_product_source_keys_through_sql_text() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -652,7 +874,15 @@ fn no_product_source_keys_through_sql_text() {
 ",
                 )
                 .to_ascii_lowercase();
-            if code.contains("pragma key") || code.contains("\"key\"") || code.contains("rekey") {
+            // The SQL of `PRAGMA key` and `rekey`, and their pragma name in rusqlite's
+            // `pragma_update(None, "key", ..)`; a column named `key` is no keying.
+            let pragma = [
+                "pragma key",
+                "pragma rekey",
+                "none, \"key\"",
+                "none, \"rekey\"",
+            ];
+            if pragma.iter().any(|text| code.contains(text)) {
                 offenders.push(path);
             }
         }
@@ -665,7 +895,7 @@ fn no_product_source_keys_through_sql_text() {
 fn the_key_is_never_printed() {
     let dir = scratch_dir("ac11-print");
     let file = create_module_file(&dir);
-    let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = KEY_BYTES.iter().map(|byte| format!("{byte:02x}")).collect();
     let handle = open::<Write>(&file, &KEY).expect("open");
     let error = open::<Write>(&file, &OTHER_KEY).expect_err("wrong key");
     let shown = format!("{handle:?} {error} {error:?}");

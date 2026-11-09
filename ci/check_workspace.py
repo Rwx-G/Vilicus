@@ -12,6 +12,11 @@
   its table's nodes reach. The table's `exclusive_dependencies` (the fuzzing crates) are reached
   by its crates alone: any other workspace crate that depends on one, directly by any kind of
   dependency or through registry crates, fails.
+- Restricted dependencies (AD-4, AD-18, FR-13, Story 4.1): a package of `[restricted.*]` in
+  ci/crate_graph.toml is declared as a normal or build dependency only by the workspace crates
+  its `linked` table names, and as a dev-dependency only by those its `dev` table names, each
+  with a reason: `zeroize`, so no crate but vilicus-crypto defines a key type wiped on drop, and
+  the primitive sources, so no crate but vilicus-crypto runs a key operation.
 - Shipped sources (FR-109, D102): no crate in the normal or build closure of a shipped crate
   compiles a file outside its package directory, through a target's source path, a `#[path]`
   module, an `include!`, `include_str!` or `include_bytes!` (a computed path fails too) or a
@@ -29,9 +34,20 @@
   inherits its lints, except the crates ci/crate_graph.toml allows, which repeat those lints with
   unsafe code denied and undocumented unsafe blocks denied, and never allow unsafe code for a
   whole module; module, plugin and test double crates also carry the forbid attribute in each
-  crate root; no Cargo configuration file can change lint levels for the workspace.
+  crate root; no Cargo configuration file can change lint levels for the workspace. The `unsafe`
+  keyword, outside comments and literals, appears only in the module `[unsafe_code.modules]`
+  names for its crate, a crate of `allowed` (Story 4.2, AC3): in no other file of any workspace
+  crate, tests and examples included, doc tests (fenced code of `///` and `//!` comments)
+  included. An entry names one module under `src/`, never `src` or a crate root, and no
+  `#[path]` or `include!` literal brings a file into or out of it; a computed `include!` in such
+  a crate fails too.
 - Vendored sources (D28): ci/cargo-vendored.toml, the configuration CI passes to every workspace
   build with `--config`, exists and holds nothing but the replacement of crates.io by vendor/.
+- Oracles (D153, Story 4.4): a cross-test oracle of an `[oracle.*]` table of ci/crate_graph.toml
+  is a crate outside the workspace, with its own `[workspace]` table and Cargo.lock; no workspace
+  crate is it or depends on it, it takes nothing from git, and its path dependencies are workspace
+  crates of the nodes its table lists, or what they reach, none of which is or reaches a shipped
+  crate.
 
 Standard library only, Python 3.11 or later. Exits 1 and prints every violation when a check fails.
 """
@@ -97,6 +113,17 @@ LINE_COMMENT = re.compile(r"//[^\n]*")
 INNER_ATTRIBUTE = re.compile(r"#!\[(.*?)\]", re.DOTALL)
 FORBID_LINTS = re.compile(r"^\s*forbid\s*\(([^)]*)\)\s*$", re.DOTALL)
 ALLOW_OR_EXPECT_LINTS = re.compile(r"\b(?:allow|expect)\s*\(([^)]*)\)")
+# Comments, string literals (raw and byte strings included) and character literals, removed
+# before a source is searched for the `unsafe` keyword, in one pass, so that a quote inside a
+# comment or a comment marker inside a literal is never read as the start of the other.
+SOURCE_NOISE = re.compile(
+    r"""//[^\n]*|/\*.*?\*/|b?r(#*)".*?"\1|b?"(?:[^"\\]|\\.)*"|b?'(?:[^'\\\n]|\\.[^'\n]*)'""",
+    re.DOTALL,
+)
+UNSAFE_KEYWORD = re.compile(r"\bunsafe\b")
+# An entry of [unsafe_code.modules]: one module directly under src/, which a crate root is not.
+UNSAFE_MODULE_ENTRY = re.compile(r"src/[A-Za-z_][A-Za-z0-9_]*")
+CRATE_ROOT_MODULES = frozenset({"src/lib", "src/main"})
 # `path = "..."` inside an attribute (`cfg_attr` included), and the `include!` family with its
 # argument when that is a single string literal; group 2 is None for a computed path.
 STRING_LITERAL = r'"(?:[^"\\]|\\.)*"'
@@ -603,6 +630,118 @@ def check_unsafe(config: dict, root_manifest: dict, crates: list[Crate]) -> list
     return violations
 
 
+def _doc_code(text: str) -> str:
+    """The code of the fenced blocks of the doc comments of `text` (`///` and `//!` lines),
+    hidden lines included: rustdoc compiles those blocks as doc tests, so their `unsafe` counts."""
+    code = []
+    fenced = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith(("///", "//!")):
+            fenced = False
+            continue
+        content = stripped[3:]
+        content = content[1:] if content.startswith(" ") else content
+        if content.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            hidden = content.lstrip()
+            code.append(hidden[2:] if hidden.startswith("# ") else "" if hidden == "#" else content)
+    return "\n".join(code)
+
+
+def _uses_unsafe(path: Path) -> bool:
+    text = path.read_text(encoding="utf-8")
+    return any(UNSAFE_KEYWORD.search(SOURCE_NOISE.sub(" ", code)) for code in (text, _doc_code(text)))
+
+
+def _in_module(relative: str, module: str) -> bool:
+    return relative == f"{module}.rs" or relative.startswith(f"{module}/")
+
+
+def _module_entry_violation(name: str, module: object) -> str | None:
+    """An entry must name one module under `src/`, never `src` itself or a crate root, either of
+    which would let the whole crate hold unsafe code."""
+    if isinstance(module, str) and UNSAFE_MODULE_ENTRY.fullmatch(module) and module not in CRATE_ROOT_MODULES:
+        return None
+    return (
+        f"unsafe: [unsafe_code.modules] entry {module!r} of {name} must name one module under src/, "
+        f"src/<name>, not src itself, a crate root ({', '.join(sorted(CRATE_ROOT_MODULES))}) or a deeper path"
+    )
+
+
+def _crossings(path: Path, relative: str, crate_dir: Path, module: str) -> list[str]:
+    """The `#[path]` and `include!`-family literals of `path` that cross into or out of `module`,
+    and its computed `include!` calls, which cannot be resolved. A `#[path]` is resolved against
+    the file's directory and, for a module declared inside an inline module, against the
+    directory named after the file, both tried."""
+    code = LINE_COMMENT.sub("", BLOCK_COMMENT.sub(" ", path.read_text(encoding="utf-8", errors="replace")))
+    inside = _in_module(relative, module)
+    found = []
+    targets: list[tuple[str, str]] = [(match.group(1), "#[path]") for match in PATH_ATTRIBUTE.finditer(code)]
+    for match in INCLUDE_MACRO.finditer(code):
+        macro, literal = match.groups()
+        if literal is None:
+            found.append(f"calls {macro}! with a computed path, which cannot be held to its unsafe module")
+        else:
+            targets.append((literal, f"{macro}!"))
+    for literal, how in targets:
+        candidates = [path.parent / _literal_path(literal), path.parent / path.stem / _literal_path(literal)]
+        for candidate in candidates:
+            resolved = Path(os.path.normpath(candidate))
+            try:
+                target = resolved.relative_to(Path(os.path.normpath(crate_dir))).as_posix()
+            except ValueError:
+                target = resolved.as_posix()
+            if _in_module(target, module) != inside:
+                direction = "out of" if inside else "into"
+                found.append(f"takes {literal} by {how}, which crosses {direction} its unsafe module {module}")
+                break
+    return found
+
+
+def check_unsafe_modules(config: dict, crates: list[Crate]) -> list[str]:
+    """The `unsafe` keyword appears only in the module of a crate of `allowed` that
+    `[unsafe_code.modules]` names: `<module>.rs` and the files under `<module>/`, doc tests
+    included; no `#[path]` or `include!` brings a file into or out of that module."""
+    policy = config["unsafe_code"]
+    modules = policy.get("modules", {})
+    violations = [
+        f"unsafe: [unsafe_code.modules] names {name}, which is not a crate D140 allows unsafe code in"
+        for name in sorted(modules)
+        if name not in policy["allowed"]
+    ]
+    for name, module in sorted(modules.items()):
+        violation = _module_entry_violation(name, module)
+        if violation:
+            violations.append(violation)
+    for crate in crates:
+        crate_dir = crate.manifest_path.parent
+        module = modules.get(crate.name)
+        if module is not None and _module_entry_violation(crate.name, module):
+            module = None
+        for source in sorted(crate_dir.rglob("*.rs")):
+            relative = source.relative_to(crate_dir).as_posix()
+            if relative.split("/", 1)[0] in WALK_SKIPPED_DIRECTORIES:
+                continue
+            if module is not None:
+                violations.extend(
+                    f"unsafe: {source} of {crate.name} {crossing} (D140)"
+                    for crossing in _crossings(source, relative, crate_dir, module)
+                )
+                if _in_module(relative, module):
+                    continue
+            if _uses_unsafe(source):
+                where = (
+                    f"outside its unsafe module {module}"
+                    if module is not None
+                    else "and its crate has no unsafe module in [unsafe_code.modules] of ci/crate_graph.toml"
+                )
+                violations.append(f"unsafe: {source} of {crate.name} uses unsafe code {where} (D140)")
+    return violations
+
+
 def check_cargo_config(workspace_root: Path) -> list[str]:
     """Cargo configuration can pass rustflags such as `--cap-lints allow`, which would neutralise
     the lint levels the other checks rely on."""
@@ -702,6 +841,33 @@ def check_exclusive_dependencies(graph: Graph, metadata: dict) -> list[str]:
     return violations
 
 
+def check_restricted_dependencies(config: dict, metadata: dict) -> list[str]:
+    """Each package of `[restricted.*]` is declared only by the crates its `linked` table (normal
+    and build dependencies) or `dev` table (dev-dependencies) names, each with a reason."""
+    restricted = config.get("restricted", {})
+    violations = [
+        f"restricted: [restricted.{package}.{table}] entry {name} gives no reason"
+        for package, tables in sorted(restricted.items())
+        for table, crates in sorted(tables.items())
+        for name, reason in sorted(crates.items())
+        if not isinstance(reason, str) or not reason.strip()
+    ]
+    for package in _members(metadata):
+        for dep in package["dependencies"]:
+            if dep["name"] not in restricted:
+                continue
+            kind = dep["kind"] or "normal"
+            table = "linked" if kind in LINKED_KINDS else "dev"
+            allowed = restricted[dep["name"]].get(table, {})
+            if package["name"] not in allowed:
+                violations.append(
+                    f"restricted: {package['name']} -> {dep['name']} ({kind} dependency); only "
+                    f"{', '.join(sorted(allowed)) or 'no crate'} may take it as a {table} dependency "
+                    f"([restricted.{dep['name']}] of ci/crate_graph.toml)"
+                )
+    return violations
+
+
 def _packages_by_id(metadata: dict) -> dict[str, dict]:
     return {package["id"]: package for package in metadata["packages"]}
 
@@ -718,11 +884,92 @@ def run_checks(
         *check_reference_module(metadata),
         *check_shipped_sources(Graph.from_config(config), crates),
         *check_exclusive_dependencies(Graph.from_config(config), metadata),
+        *check_restricted_dependencies(config, metadata),
         *check_manifests(crates, workspace_root, toolchain_channel, files),
         *check_unsafe(config, root_manifest, crates),
+        *check_unsafe_modules(config, crates),
         *check_cargo_config(workspace_root),
         *check_vendored_config(workspace_root),
     ]
+
+
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _manifest_dependencies(manifest: dict) -> list[tuple[str, object]]:
+    """Every dependency a manifest declares, by name, in its own and its target-specific tables."""
+    tables = [manifest.get(table, {}) for table in DEPENDENCY_TABLES]
+    for target in manifest.get("target", {}).values():
+        tables.extend(target.get(table, {}) for table in DEPENDENCY_TABLES)
+    return [(name, spec) for table in tables for name, spec in table.items()]
+
+
+def check_oracles(config: dict, metadata: dict) -> list[str]:
+    """Cross-test oracles outside the workspace ([oracle.*] of ci/crate_graph.toml; D153, Story
+    4.4): each is its own workspace with its own lockfile, no workspace crate is it or depends on
+    it, and its path dependencies are workspace crates of the nodes it lists, none of which is or
+    reaches a shipped crate."""
+    violations: list[str] = []
+    workspace_root = Path(metadata["workspace_root"])
+    graph = Graph.from_config(config)
+    crates = load_workspace(metadata)
+    by_name = {crate.name: crate for crate in crates}
+    by_directory = {(workspace_root / crate.directory).resolve(): crate for crate in crates}
+    shipped = set()
+    for crate in crates:
+        node = graph.classify(crate.name, crate.directory)
+        if node is not None and node.shipped:
+            shipped.add(crate.name)
+    for oracle_id, table in sorted(config.get("oracle", {}).items()):
+        where = f"[oracle.{oracle_id}]"
+        if not str(table.get("record", "")).strip():
+            violations.append(f"oracle: {where} gives no record")
+        unknown = [node for node in table.get("depends_on", []) if node not in graph.nodes]
+        if unknown:
+            violations.append(f"oracle: {where} names unknown node(s) {', '.join(unknown)}")
+        directory = (workspace_root / table.get("path", "")).resolve()
+        manifest_path = directory / "Cargo.toml"
+        if not table.get("path") or not manifest_path.is_file():
+            violations.append(f"oracle: {where} names no crate directory with a Cargo.toml ({table.get('path')})")
+            continue
+        manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest.get("workspace"), dict):
+            violations.append(f"oracle: {where} has no [workspace] table of its own: it would join the Vilicus workspace")
+        if not (directory / "Cargo.lock").is_file():
+            violations.append(f"oracle: {where} has no Cargo.lock of its own")
+        for package in metadata["packages"]:
+            if package["id"] not in metadata["workspace_members"]:
+                continue
+            if Path(package["manifest_path"]).resolve().is_relative_to(directory):
+                violations.append(f"oracle: {package['name']} under {where} is a workspace member")
+            for dep in package["dependencies"]:
+                if dep.get("path") is not None and Path(dep["path"]).resolve().is_relative_to(directory):
+                    violations.append(f"oracle: {package['name']} depends on {dep['name']} of {where}; no crate may")
+        allowed = set(table.get("depends_on", []))
+        for node in table.get("depends_on", []):
+            if node in graph.nodes:
+                allowed |= graph.reachable(node)
+        for name, spec in _manifest_dependencies(manifest):
+            if not isinstance(spec, dict):
+                continue
+            if "git" in spec:
+                violations.append(f"oracle: {where} takes {name} from git")
+            if "path" not in spec:
+                continue
+            crate = by_directory.get((directory / spec["path"]).resolve())
+            if crate is None:
+                violations.append(f"oracle: {where} depends on {name} by a path that is not a workspace crate")
+                continue
+            node = graph.classify(crate.name, crate.directory)
+            if node is None or node.id not in allowed:
+                violations.append(
+                    f"oracle: {where} depends on {crate.name}, outside the nodes it lists "
+                    f"({', '.join(table.get('depends_on', [])) or 'none'})"
+                )
+            reached = {name for name, _ in linked_closure(crate, by_name)} | {crate.name}
+            for reached_name in sorted(reached & shipped):
+                violations.append(f"oracle: {where} reaches the shipped crate {reached_name} through {crate.name}")
+    return violations
 
 
 def repository_files(root: Path) -> list[Path]:
@@ -765,7 +1012,10 @@ def main(argv: list[str] | None = None) -> int:
     root_manifest = tomllib.loads((workspace_root / "Cargo.toml").read_text(encoding="utf-8"))
     toolchain_channel = tomllib.loads(TOOLCHAIN_FILE.read_text(encoding="utf-8"))["toolchain"]["channel"]
 
-    violations = run_checks(metadata, config, root_manifest, toolchain_channel, repository_files(workspace_root))
+    violations = [
+        *run_checks(metadata, config, root_manifest, toolchain_channel, repository_files(workspace_root)),
+        *check_oracles(config, metadata),
+    ]
     for violation in violations:
         print(violation)
     if violations:

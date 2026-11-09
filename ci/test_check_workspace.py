@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import fnmatch
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -504,6 +505,121 @@ class PathOnlyTest(WorkspaceTestCase):
                     self.assertEqual(self.workspace.check(), [])
 
 
+class OracleTest(WorkspaceTestCase):
+    """Story 4.4, D153: a cross-test oracle is a crate outside the workspace, with its own
+    workspace and lockfile, that no workspace crate is or depends on, and whose path dependencies
+    are crates of the nodes its table lists, none of them reaching a shipped crate."""
+
+    def table(self) -> tuple[str, dict]:
+        tables = CONFIG.get("oracle", {})
+        self.assertTrue(tables, "ci/crate_graph.toml names the Argon2id oracle")
+        return next(iter(sorted(tables.items())))
+
+    def oracle(self, dependencies: str, *, workspace: bool = True, lockfile: bool = True) -> Path:
+        """The table's oracle directory in the synthetic workspace, with `dependencies` as the body
+        of its [dependencies] table."""
+        _, table = self.table()
+        directory = self.workspace.root / table["path"]
+        directory.mkdir(parents=True, exist_ok=True)
+        manifest = '[package]\nname = "an-oracle"\n'
+        if workspace:
+            manifest += "\n[workspace]\n"
+        manifest += f"\n[dependencies]\n{dependencies}\n"
+        (directory / "Cargo.toml").write_text(manifest, encoding="utf-8")
+        if lockfile:
+            (directory / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+        return directory
+
+    def path_to(self, directory: Path, crate: str) -> str:
+        target = Path(self.workspace.packages[crate]["manifest_path"]).parent
+        return Path(os.path.relpath(target, directory)).as_posix()
+
+    def check(self) -> list[str]:
+        return cw.check_oracles(CONFIG, self.workspace.metadata())
+
+    def listed_crates(self, names: dict[str, str]) -> list[str]:
+        _, table = self.table()
+        return [names[node] for node in table["depends_on"]]
+
+    def test_an_oracle_of_its_listed_nodes_passes(self) -> None:
+        names = self.full_graph()
+        directory = self.oracle("")
+        lines = [
+            f'{crate} = {{ path = "{self.path_to(directory, crate)}", features = ["testing"] }}'
+            for crate in self.listed_crates(names)
+        ]
+        lines.append(f'vilicus-types = {{ path = "{self.path_to(directory, names["types"])}" }}')
+        lines.append('unicode-normalization = "=0.1.25"')
+        self.oracle("\n".join(lines))
+        self.assertEqual(self.check(), [])
+
+    def test_an_oracle_depending_on_the_shipped_crate_fails(self) -> None:
+        names = self.full_graph()
+        shipped = next(node.id for node in GRAPH.nodes.values() if node.shipped)
+        directory = self.oracle("")
+        self.oracle(f'vilicus = {{ path = "{self.path_to(directory, names[shipped])}" }}')
+        violations = self.check()
+        self.assertTrue(any("reaches the shipped crate" in v for v in violations), violations)
+        self.assertTrue(any("outside the nodes it lists" in v for v in violations), violations)
+
+    def test_an_oracle_depending_on_an_unlisted_node_fails(self) -> None:
+        names = self.full_graph()
+        _, table = self.table()
+        allowed = set(table["depends_on"]).union(*(GRAPH.reachable(node) for node in table["depends_on"]))
+        unlisted = next(node for node in GRAPH.nodes.values() if node.id not in allowed and not node.shipped)
+        directory = self.oracle("")
+        crate = names[unlisted.id]
+        self.oracle(f'{crate} = {{ path = "{self.path_to(directory, crate)}" }}')
+        self.assert_single(self.check(), f"depends on {crate}, outside the nodes it lists")
+
+    def test_an_oracle_path_outside_the_workspace_crates_or_from_git_fails(self) -> None:
+        self.full_graph()
+        self.oracle('elsewhere = { path = "../../elsewhere" }\nfrom-git = { git = "https://example.com/x" }')
+        violations = self.check()
+        self.assertEqual(len(violations), 2, violations)
+        self.assertTrue(any("by a path that is not a workspace crate" in v for v in violations))
+        self.assertTrue(any("takes from-git from git" in v for v in violations))
+
+    def test_an_oracle_without_its_own_workspace_or_lockfile_fails(self) -> None:
+        self.full_graph()
+        self.oracle("", workspace=False, lockfile=False)
+        violations = self.check()
+        self.assertEqual(len(violations), 2, violations)
+        self.assertTrue(any("no [workspace] table of its own" in v for v in violations))
+        self.assertTrue(any("no Cargo.lock of its own" in v for v in violations))
+
+    def test_an_oracle_that_is_a_member_or_a_dependency_fails(self) -> None:
+        names = self.full_graph()
+        _, table = self.table()
+        directory = self.oracle("")
+        self.workspace.add("an-oracle", table["path"])
+        self.workspace.depend(names["core"], "an-oracle", "dev")
+        violations = self.check()
+        self.assertTrue(any("an-oracle under [oracle." in v and "is a workspace member" in v for v in violations), violations)
+        self.assertTrue(any(f"{names['core']} depends on an-oracle" in v for v in violations), violations)
+        self.assertTrue(directory.is_dir())
+
+    def test_a_table_without_a_crate_or_a_record_fails(self) -> None:
+        self.full_graph()
+        config = copy.deepcopy(CONFIG)
+        config["oracle"] = {"stray": {"path": "nowhere", "depends_on": ["crypto", "unknown"]}}
+        violations = cw.check_oracles(config, self.workspace.metadata())
+        self.assertEqual(len(violations), 3, violations)
+        for fragment in ("gives no record", "unknown node(s) unknown", "names no crate directory"):
+            self.assertTrue(any(fragment in v for v in violations), (fragment, violations))
+
+    def test_the_repository_oracle_is_outside_the_workspace(self) -> None:
+        """The repository's own oracle, read from disk: its own workspace and lockfile, and path
+        dependencies on vilicus-crypto and what it reaches only."""
+        _, table = self.table()
+        directory = cw.REPO_ROOT / table["path"]
+        manifest = tomllib.loads((directory / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertIsInstance(manifest.get("workspace"), dict)
+        self.assertTrue((directory / "Cargo.lock").is_file())
+        paths = sorted(spec["path"] for _, spec in cw._manifest_dependencies(manifest) if isinstance(spec, dict) and "path" in spec)
+        self.assertEqual(paths, ["../../crates/vilicus-crypto", "../../crates/vilicus-types"])
+
+
 class IsolatedTest(WorkspaceTestCase):
     """Story 2.7, AC5: an isolated crate (the fuzz targets) is a dependency of no crate, and
     depends only on what the nodes of its table reach."""
@@ -969,6 +1085,137 @@ class UnsafeTest(WorkspaceTestCase):
                 self.workspace.add(name, directory, root_source=source)
                 self.assertEqual(self.workspace.check(), [])
 
+    UNSAFE_BLOCK = "fn read() {\n    // SAFETY: a sample.\n    unsafe { core::hint::unreachable_unchecked() }\n}\n"
+
+    def test_unsafe_code_outside_the_unsafe_module_fails(self) -> None:
+        modules = CONFIG["unsafe_code"]["modules"]
+        self.assertTrue(modules)
+        for name, directory in (sample_crate(node) for node in GRAPH.nodes.values()):
+            module = modules.get(name)
+            places = ["src/lib.rs", "src/other.rs", "tests/memory.rs", "examples/harness/main.rs"]
+            if module is not None:
+                places.append(f"{module}_more.rs")
+            for place in places:
+                with self.subTest(crate=name, place=place):
+                    self.setUp()
+                    self.full_graph()
+                    source = self.workspace.add(name, directory) / place
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    forbid = f"{cw.FORBID_ATTRIBUTE}\n" if needs_forbid_attribute(name) else ""
+                    source.write_text(f"//! Sample.\n{forbid}{self.UNSAFE_BLOCK}", encoding="utf-8")
+                    self.assert_single(self.workspace.check(), f"unsafe: {source} of {name} uses unsafe code")
+
+    def test_unsafe_code_inside_the_unsafe_module_passes(self) -> None:
+        for name, module in CONFIG["unsafe_code"]["modules"].items():
+            directory = next(d for n, d in (sample_crate(node) for node in GRAPH.nodes.values()) if n == name)
+            for place in (f"{module}.rs", f"{module}/tests.rs", f"{module}/deeper/calls.rs"):
+                with self.subTest(crate=name, place=place):
+                    self.setUp()
+                    self.full_graph()
+                    source = self.workspace.add(name, directory) / place
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(f"//! Sample.\n{self.UNSAFE_BLOCK}", encoding="utf-8")
+                    self.assertEqual(self.workspace.check(), [])
+
+    def test_the_word_unsafe_in_comments_literals_and_names_passes(self) -> None:
+        source = (
+            "//! Not unsafe.\n"
+            "/* unsafe { } */\n"
+            "#![deny(unsafe_code)]\n"
+            'const TEXT: &str = "unsafe { x }";\n'
+            'const RAW: &str = r#"unsafe "quoted" text"#;\n'
+            "const QUOTE: char = '\"';\n"
+            "fn borrowed<'a>(unsafe_name: &'a str) -> &'a str { unsafe_name }\n"
+        )
+        for name, directory in (sample_crate(node) for node in GRAPH.nodes.values()):
+            with self.subTest(crate=name):
+                self.setUp()
+                self.full_graph()
+                self.workspace.add(name, directory, root_source=source)
+                violations = [v for v in self.workspace.check() if "uses unsafe code" in v]
+                self.assertEqual(violations, [])
+
+    def test_an_unsafe_module_of_a_crate_outside_the_list_fails(self) -> None:
+        self.full_graph()
+        config = {**CONFIG, "unsafe_code": {**CONFIG["unsafe_code"], "modules": {"vilicus-types": "src/ffi"}}}
+        self.assert_single(self.workspace.check(config=config), "[unsafe_code.modules] names vilicus-types")
+
+    def allowed_crate_with_module(self) -> tuple[str, str, str]:
+        """A crate of `allowed` with an unsafe module, its directory and the module."""
+        modules = CONFIG["unsafe_code"]["modules"]
+        name, module = sorted(modules.items())[0]
+        directory = next(d for n, d in (sample_crate(node) for node in GRAPH.nodes.values()) if n == name)
+        return name, directory, module
+
+    def test_unsafe_in_a_doc_test_outside_the_unsafe_module_fails(self) -> None:
+        """Review finding 5: rustdoc compiles a doc comment's fenced code, hidden lines included."""
+        name, directory, _ = self.allowed_crate_with_module()
+        for label, doc in {
+            "visible": "/// ```\n/// unsafe { core::hint::unreachable_unchecked() }\n/// ```\n",
+            "hidden": "/// ```\n/// # unsafe { core::hint::unreachable_unchecked() }\n/// ```\n",
+            "inner doc": "//! ```rust\n//! unsafe fn sample() {}\n//! ```\n",
+        }.items():
+            with self.subTest(case=label):
+                self.setUp()
+                self.full_graph()
+                source = self.workspace.add(name, directory) / "src" / "other.rs"
+                source.write_text(f"//! Sample.\n{doc}fn x() {{}}\n", encoding="utf-8")
+                self.assert_single(self.workspace.check(), f"unsafe: {source} of {name} uses unsafe code")
+
+    def test_the_word_unsafe_in_doc_prose_passes(self) -> None:
+        name, directory, _ = self.allowed_crate_with_module()
+        self.full_graph()
+        source = self.workspace.add(name, directory) / "src" / "other.rs"
+        source.write_text("//! An unsafe word.\n/// Not unsafe { code } here.\n/// ```\n/// let safe = 1;\n/// ```\nfn x() {}\n", encoding="utf-8")
+        self.assertEqual(self.workspace.check(), [])
+
+    def test_a_module_entry_that_is_not_one_module_under_src_fails(self) -> None:
+        """Review finding 5: `src` or a crate root would let the whole crate hold unsafe code."""
+        name, _, _ = self.allowed_crate_with_module()
+        for entry in ("src", "", ".", "src/lib", "src/main", "src/a/b", "../src/x", "/src/x"):
+            with self.subTest(entry=entry):
+                self.setUp()
+                self.full_graph()
+                modules = {**CONFIG["unsafe_code"]["modules"], name: entry}
+                config = {**CONFIG, "unsafe_code": {**CONFIG["unsafe_code"], "modules": modules}}
+                self.assert_single(self.workspace.check(config=config), f"entry {entry!r} of {name} must name one module under src/")
+
+    def test_a_path_or_include_across_the_unsafe_module_fails(self) -> None:
+        """Review finding 5: `#[path]` and `include!` must not move a file into or out of it."""
+        name, directory, module = self.allowed_crate_with_module()
+        leaf = module.split("/", 1)[1]
+        cases = {
+            "path into": ("src/lib.rs", f'//! Sample.\n#[path = "{leaf}/inner.rs"]\nmod inner;\n', "into"),
+            "include into": ("src/other.rs", f'//! Sample.\ninclude!("{leaf}.rs");\n', "into"),
+            "include out of": (f"{module}/inner.rs", '//! Sample.\ninclude!("../other.rs");\n', "out of"),
+            "computed": ("src/other.rs", '//! Sample.\ninclude!(concat!("a", ".rs"));\n', "computed path"),
+        }
+        for label, (place, text, expected) in cases.items():
+            with self.subTest(case=label):
+                self.setUp()
+                self.full_graph()
+                source = self.workspace.add(name, directory) / place
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(text, encoding="utf-8")
+                # A computed include! also fails the shipped-sources check, which ShippedSourcesTest covers.
+                violations = [v for v in self.workspace.check() if v.startswith("unsafe:")]
+                self.assert_single(violations, f"unsafe: {source} of {name}", expected)
+
+    def test_a_path_or_include_within_one_side_passes(self) -> None:
+        name, directory, module = self.allowed_crate_with_module()
+        cases = {
+            "within the module": (f"{module}/a.rs", '//! Sample.\ninclude!("b.rs");\n'),
+            "outside the module": ("src/a.rs", '//! Sample.\nconst TEXT: &str = include_str!("../README.md");\n'),
+        }
+        for label, (place, text) in cases.items():
+            with self.subTest(case=label):
+                self.setUp()
+                self.full_graph()
+                source = self.workspace.add(name, directory) / place
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(text, encoding="utf-8")
+                self.assertEqual(self.workspace.check(), [])
+
     def test_module_or_plugin_crate_without_forbid_attribute_fails(self) -> None:
         sources = {
             "absent": "//! Crate.\n",
@@ -1153,6 +1400,72 @@ def spine_flowchart() -> tuple[dict[str, str], set[tuple[str, str, bool]]]:
         if label is not None:
             labels[source] = label.strip('"')
     return labels, edges
+
+
+class RestrictedDependencyTest(WorkspaceTestCase):
+    """Story 4.1, AC3 and its review (finding 5): key types are defined in vilicus-crypto and key
+    operations run there, so only the crates [restricted.*] names declare `zeroize` or a primitive
+    source, by the kind of dependency it allows them."""
+
+    REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
+    RESTRICTED = CONFIG["restricted"]
+
+    def depend_on_package(self, source: str, package: str, kind: str) -> None:
+        self.workspace.declare(
+            source, {"name": package, "kind": None if kind == "normal" else kind, "source": self.REGISTRY}
+        )
+        self.workspace.resolve_outside(source, package, f"{self.REGISTRY}#{package}@1.0.0")
+
+    def test_the_named_crates_may_depend_on_each_package_by_the_kind_they_are_named_for(self) -> None:
+        self.full_graph()
+        for package, tables in self.RESTRICTED.items():
+            for table, crates in tables.items():
+                for name in crates:
+                    self.depend_on_package(name, package, "normal" if table == "linked" else "dev")
+        self.assertEqual(self.workspace.check(), [])
+
+    def test_any_other_crate_or_kind_fails(self) -> None:
+        for package, tables in self.RESTRICTED.items():
+            for node in GRAPH.nodes.values():
+                for kind in ("normal", "build", "dev"):
+                    table = "dev" if kind == "dev" else "linked"
+                    with self.subTest(package=package, node=node.id, kind=kind):
+                        self.setUp()
+                        names = self.full_graph()
+                        if names[node.id] in tables.get(table, {}):
+                            continue
+                        self.depend_on_package(names[node.id], package, kind)
+                        self.assert_single(
+                            self.beside_the_reference_rule(self.workspace.check()),
+                            f"restricted: {names[node.id]} -> {package} ({kind} dependency)",
+                        )
+
+    def test_a_dev_user_may_not_link_it(self) -> None:
+        dev_users = [(package, name) for package, tables in self.RESTRICTED.items() for name in tables.get("dev", {})]
+        self.assertTrue(dev_users)
+        for package, name in dev_users:
+            if name in self.RESTRICTED[package].get("linked", {}):
+                continue
+            with self.subTest(package=package, crate=name):
+                self.setUp()
+                self.full_graph()
+                self.depend_on_package(name, package, "normal")
+                self.assert_single(self.workspace.check(), f"restricted: {name} -> {package} (normal dependency)")
+
+    def test_a_named_crate_without_a_reason_fails(self) -> None:
+        config = copy.deepcopy(CONFIG)
+        config["restricted"]["zeroize"]["linked"]["vilicus-crypto"] = " "
+        self.full_graph()
+        self.assert_single(self.workspace.check(config), "[restricted.zeroize.linked] entry vilicus-crypto gives no reason")
+
+    def test_the_repository_restricts_zeroize_and_the_primitive_sources(self) -> None:
+        # Written out on purpose: the rules of Story 4.1 and of finding 5 of its review; since Story
+        # 4.3, vilicus-storage keys a file from a text the Core lends it and wipes no buffer of its own.
+        linked = {package: set(tables.get("linked", {})) for package, tables in self.RESTRICTED.items()}
+        self.assertEqual(linked["zeroize"], {"vilicus-crypto"})
+        for package in ("aws-lc-rs", "hpke", "argon2", "opaque-ke", "zxcvbn"):
+            self.assertEqual(linked[package], {"vilicus-crypto"}, package)
+        self.assertEqual(set(self.RESTRICTED["aws-lc-rs"]["dev"]), {"vilicus-proto", "vilicus-core"})
 
 
 class DecisionAgreementTest(unittest.TestCase):

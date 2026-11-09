@@ -1,0 +1,56 @@
+# The sources of cryptographic primitives the Vilicus dependency tree may hold (D28: no
+# home-made cryptography; audited libraries, or a recorded exception to D28). Read by
+# ci/check_supply_chain.py, which prints this list with each entry's record and fails when:
+# - a package of the tree that its publisher classifies as cryptographic (crates.io category
+#   `cryptography`, or keyword `crypto` or `cryptography`) is neither a source here, nor a
+#   `[not_primitive]` entry, nor reached only through a present source that brings its own
+#   primitive crates (`brings_primitives`): every path from a workspace member to that package,
+#   by package id, goes through the source;
+# - a source is in the tree at another version than its `version`, or with a feature of its
+#   `forbidden_features`;
+# - a source other than aws-lc-rs and aws-lc-sys, the audited sources of D28 and spine AD-18,
+#   names no `exception`; an `exception` names a decision that is neither one of the exceptions
+#   D28's row of doc/decisions.md lists nor recorded in the table as amending one; or one of
+#   D28's exceptions has no source here.
+# A source or a `[not_primitive]` entry may be absent from the tree: the list also records what
+# is approved for code to come. The classification is the publishers'; a primitive crate that
+# declares neither is caught by review (the pull request checklist), not by this check.
+#
+# Every source has a `record`: what it is used for, and the decisions that allow it.
+
+[source.aws-lc-rs]
+record = "D28 and spine AD-18: AES-256-GCM, HKDF-SHA-256 and SHA-256 of vilicus-crypto"
+
+[source.aws-lc-sys]
+record = "D28 and spine AD-18: the AWS-LC library aws-lc-rs is built on, its only backend"
+
+[source.hpke]
+version = "0.13.0"
+exception = ["D61", "D120"]
+brings_primitives = true
+record = "HPKE of the household key wraps and sealed inbox rows, under the usage rules of spikes/hpke-review/REVIEW.md; inside HPKE, its own primitive crates"
+
+# D129 covers argon2 and the blake2 crate it depends on; the RustCrypto crates blake2 brings
+# (digest, block-buffer, crypto-common and their helpers) are covered only where argon2 alone
+# reaches them, the scope the D153 draft of Story 4.1 records as an amendment of D129.
+# The forbidden features are usage rule U1 of doc/qa/argon2-review.md: `parallel` would bring
+# rayon (F10), `alloc` compiles `hash_password_into`, which frees its blocks unwiped (F2), and
+# `password-hash`, `kdf`, `getrandom` and `rand_core` compile APIs and crates the Core does not
+# use; the build of U1 resolves `zeroize` alone.
+[source.argon2]
+version = "0.6.0"
+exception = ["D129"]
+brings_primitives = true
+forbidden_features = ["parallel", "alloc", "password-hash", "kdf", "getrandom", "rand_core"]
+record = "Argon2id of the passphrase, backup secret and admin recovery code KEKs, with its zeroize feature only (doc/qa/argon2-review.md, U1); inside Argon2id, BLAKE2b from blake2 and the crates it brings"
+
+[source.opaque-ke]
+version = "4.0.1"
+exception = ["D123"]
+record = "OPAQUE of pairing codes on the Core's side"
+
+[not_primitive.zeroize]
+reason = "wipes memory with volatile writes (spine AD-4); implements no cryptographic primitive"
+
+[not_primitive.base64ct]
+reason = "constant-time Base64, an encoding that argon2 uses for PHC strings; implements no cryptographic primitive"

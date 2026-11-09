@@ -18,6 +18,16 @@ publish = false
 [profile.release]
 panic = "unwind"
 
+# Story 4.4: Argon2id and the BLAKE2b under it are optimized in test builds too, so that the stack
+# depth of a test derivation, which the key-operation guard's scrub must cover (D154), and its run
+# time are near the release build's; the Core's own code stays unoptimized there. The release
+# harness of ci/key_memory.py measures the release build's depth.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
 # Every crate inherits these lints except the crates where D140 allows unsafe code, listed once
 # under [unsafe_code] in ci/crate_graph.toml; ci/check_workspace.py fails when any other crate
 # stops inheriting them.
@@ -53,7 +63,7 @@ unicode-normalization = { version = "=0.1.25", default-features = false }
 # tests, and since Story 3.7 a dependency of vilicus-crypto, through which the Core hashes at run
 # time (AD-3).
 serde_json = "=1.0.154"
-aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys"] }
+aws-lc-rs = { version = "=1.19.0", default-features = false, features = ["aws-lc-sys"] }
 # The libFuzzer runtime of the fuzz targets in fuzz/ (Story 2.7, owner approval), behind that crate's
 # optional `libfuzzer` feature, which only the nightly `fuzz` job enables: the stable builds never
 # compile it, and Cargo.lock, vendor/ and the supply-chain gates still cover it.
@@ -65,9 +75,14 @@ libfuzzer-sys = "=0.4.13"
 # `backup` the online backup API of the maintenance connection; no feature brings a crate. The
 # registry tests of vilicus-core use it as a dev-dependency, to build real FTS5 tables in a test
 # file outside the authorizer (Story 3.2 review).
-rusqlite = { version = "=0.40.2", default-features = false, features = ["sqlcipher", "modern_sqlite", "hooks", "backup"] }
+rusqlite = { version = "=0.41.1", default-features = false, features = ["sqlcipher", "modern_sqlite", "hooks", "backup"] }
 # Key buffers wiped on drop (spine AD-4, Stack).
 zeroize = "=1.9.1"
+# Argon2id of the passphrase KEK (Story 4.4, D128, D129), under usage rule U1 of
+# doc/qa/argon2-review.md: `zeroize` only, so neither `alloc` (whose `hash_password_into` frees
+# its blocks unwiped) nor `parallel` (rayon) is compiled; ci/primitive_sources.toml forbids the
+# other features. Any version change reopens that review.
+argon2 = { version = "=0.6.0", default-features = false, features = ["zeroize"] }
 # The statvfs call of vilicus-storage's maintenance path (Story 3.7, AD-23), at the version
 # Cargo.lock already holds, without its default `std` feature, which the call does not need.
 libc = { version = "=0.2.191", default-features = false }

@@ -12,9 +12,9 @@
 #   docker run --rm -v "$PWD:/w" -w /w <image> bash crates/vilicus-storage/sqlcipher/regenerate.sh
 set -euo pipefail
 
-TAG=v4.19.0
-TAG_OBJECT=58beb4a302f0e3c37341d2312cef521f858b1273
-COMMIT=c4b275a47932888216bade83aff2bbc73df0ff85
+TAG=v4.20.0
+TAG_OBJECT=52252487a5cada9b430e8d4b20025790c5a6ba20
+COMMIT=355d4db92d3404e71faa8088d071a71d767807f4
 REPOSITORY=https://github.com/sqlcipher/sqlcipher
 # Files taken from the tag as they are, then the generated amalgamation.
 COPIED=(LICENSE.md SQLITE_LICENSE.md)

@@ -28,7 +28,8 @@ use vilicus_storage::maintenance::{
     self, ColdCopy, FailedMigrationMark, MigrationCopy, SchemaVersions, VerifiedBackup,
 };
 use vilicus_storage::{
-    CORE_SCHEMA_VERSION, FrozenMigration, Migration, MigrationTrack, ModuleFile, Read, Write,
+    CORE_SCHEMA_VERSION, FileKeying, FrozenMigration, Migration, MigrationTrack, ModuleFile, Read,
+    Write,
 };
 use vilicus_types::ModuleName;
 
@@ -36,14 +37,14 @@ use super::{FileError, Registry, check_recorded_tracks, frozen_migrations};
 use crate::alert::InstanceAdminAlert;
 use crate::record::{RecordError, check_stored_rows};
 
-/// One file to migrate, with its raw key and the verified-backup marker the caller recorded for
+/// One file to migrate, with what keys it and the verified-backup marker the caller recorded for
 /// it (AD-31): the cold copies that marker covers are removed before the file's migration.
 #[derive(Clone, Copy)]
 pub struct FileToMigrate<'a> {
     /// The file.
     pub file: &'a ModuleFile,
-    /// Its raw 256-bit key.
-    pub key: &'a [u8; 32],
+    /// What keys its connections: the text of its raw key, lent for each connection.
+    pub key: &'a dyn FileKeying,
     /// The schema versions of the file in the last verified backup that holds it, if any.
     pub verified_backup: Option<VerifiedBackup>,
 }
@@ -384,7 +385,7 @@ impl Registry {
         &self,
         module: &'static ModuleDeclaration,
         copy: &MigrationCopy,
-        key: &[u8; 32],
+        key: &dyn FileKeying,
         migrations: &[FrozenMigration<'static>],
     ) -> Result<(), MigrationError> {
         let mut migration = vilicus_storage::open::<Migration>(copy.file(), key)?;

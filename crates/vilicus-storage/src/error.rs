@@ -46,6 +46,11 @@ pub enum Error {
     Refused(rusqlite::Error),
     /// The key does not open the file. Nothing of the file's content was read.
     WrongKey,
+    /// The key text lent to key a connection is not `x'`, 64 lowercase hex digits, then `'`.
+    MalformedKeyText,
+    /// The key text could not be lent: the Core's key memory refused it, a slot short or the pool
+    /// wiped as the process ends.
+    KeyUnavailable,
     /// A setting read back after the connection setup differs from the one set (D127).
     SetupMismatch {
         /// The pragma or connection option.
@@ -203,6 +208,20 @@ pub enum Error {
     },
     /// The mark of a failed migration beside a file is not in the form the storage layer writes.
     MalformedFailureMark(PathBuf),
+    /// The file at this path is not the SQLite database `wrappers.db` must be.
+    NotAWrapperFile(PathBuf),
+    /// `wrappers.db` states another schema version than this Core's, or none.
+    WrappersSchemaVersion {
+        /// The version its `_meta` states, if any.
+        found: Option<i64>,
+    },
+    /// The schema of `wrappers.db` is not exactly the one its version makes: a trigger, a view, a
+    /// rebuilt table or any other object was added or changed.
+    WrappersSchemaChanged,
+    /// A row of `wrappers.db` is outside the shape its schema and its types give it.
+    MalformedWrapperRow,
+    /// A write to `wrappers.db` removes a record that is not there.
+    WrapperRecordMissing,
     /// Any other SQLite failure.
     Sqlite(rusqlite::Error),
     /// A file system failure on the file, its sidecar or its directory.
@@ -237,6 +256,7 @@ impl Error {
             | Self::AlreadyExists(_)
             | Self::TransactionOpen
             | Self::WrongKey
+            | Self::KeyUnavailable
             | Self::EpochTransitionPending { .. }
             | Self::EpochSidecarMissing(_)
             | Self::EpochSidecarWithoutFile(_) => true,
@@ -286,6 +306,8 @@ impl fmt::Display for Error {
                 Summary(error)
             ),
             Self::WrongKey => formatter.write_str("the key does not open the file"),
+            Self::MalformedKeyText => formatter.write_str("the key text is not a raw key's"),
+            Self::KeyUnavailable => formatter.write_str("the key text could not be lent"),
             Self::SetupMismatch {
                 setting,
                 expected,
@@ -412,6 +434,22 @@ impl fmt::Display for Error {
                     path.display()
                 )
             }
+            Self::NotAWrapperFile(path) => {
+                write!(formatter, "{} is not a wrapper file", path.display())
+            }
+            Self::WrappersSchemaVersion { found } => {
+                write!(
+                    formatter,
+                    "wrappers.db schema version {found:?} is not this Core's"
+                )
+            }
+            Self::WrappersSchemaChanged => {
+                formatter.write_str("the schema of wrappers.db is not the one its version makes")
+            }
+            Self::MalformedWrapperRow => formatter.write_str("a row of wrappers.db is malformed"),
+            Self::WrapperRecordMissing => {
+                formatter.write_str("the wrappers.db record to remove is not there")
+            }
             Self::Sqlite(error) => write!(formatter, "SQLite: {}", Summary(error)),
             Self::Io(error) => write!(formatter, "file system: {error}"),
         }
@@ -424,6 +462,8 @@ impl fmt::Debug for Error {
         let variant = match self {
             Self::Refused(_) => "Refused",
             Self::WrongKey => "WrongKey",
+            Self::MalformedKeyText => "MalformedKeyText",
+            Self::KeyUnavailable => "KeyUnavailable",
             Self::SetupMismatch { .. } => "SetupMismatch",
             Self::EpochMismatch { .. } => "EpochMismatch",
             Self::EpochSidecarMissing(_) => "EpochSidecarMissing",
@@ -457,6 +497,11 @@ impl fmt::Debug for Error {
             Self::CopyRaced(_) => "CopyRaced",
             Self::ColdCopiesFull { .. } => "ColdCopiesFull",
             Self::MalformedFailureMark(_) => "MalformedFailureMark",
+            Self::NotAWrapperFile(_) => "NotAWrapperFile",
+            Self::WrappersSchemaVersion { .. } => "WrappersSchemaVersion",
+            Self::WrappersSchemaChanged => "WrappersSchemaChanged",
+            Self::MalformedWrapperRow => "MalformedWrapperRow",
+            Self::WrapperRecordMissing => "WrapperRecordMissing",
             Self::Sqlite(_) => "Sqlite",
             Self::Io(_) => "Io",
         };
@@ -546,6 +591,7 @@ mod tests {
             Error::CopyRaced(PathBuf::from("f")),
             Error::ColdCopiesFull { kept: 3 },
             Error::WrongKey,
+            Error::KeyUnavailable,
             sqlite(rusqlite::ffi::SQLITE_FULL),
             sqlite(rusqlite::ffi::SQLITE_BUSY),
             sqlite(rusqlite::ffi::SQLITE_IOERR),
@@ -569,6 +615,7 @@ mod tests {
                 version: 1,
             },
             Error::MalformedFailureMark(PathBuf::from("f")),
+            Error::MalformedKeyText,
         ];
         for error in repeated {
             assert!(!error.is_environmental(), "{error:?}");

@@ -1887,3 +1887,47 @@ fn a_tool_call_and_an_undo_call_give_what_they_hold() {
     assert_eq!(undo.call_id(), call_id);
     assert_eq!(undo.effects(), &effects[..]);
 }
+
+/// Story 4.3, AC5 (AD-4): what a module's code is handed, the port of this crate, names no file,
+/// path or key: a module receives the record port of its call over a handle the Core opened in
+/// its partition, never a key, a key text or a path to one. The crate's sources outside its tests
+/// name none of the types or modules that would carry one.
+#[test]
+fn the_module_port_names_no_key_and_no_path() {
+    const CARRIERS: [&str; 9] = [
+        "std::path",
+        "std::fs",
+        "Path",
+        "PathBuf",
+        "OsStr",
+        "File",
+        "FileKey",
+        "FileKeying",
+        "SymmetricKey",
+    ];
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut read = 0;
+    for entry in std::fs::read_dir(&source).expect("source directory") {
+        let path = entry.expect("entry").path();
+        if path.file_name().is_some_and(|name| name == "tests.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("source file");
+        read += 1;
+        for line in text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+        {
+            for carrier in CARRIERS {
+                let named = line.match_indices(carrier).any(|(index, _)| {
+                    let before = line[..index].chars().next_back();
+                    let after = line[index + carrier.len()..].chars().next();
+                    !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                        && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                });
+                assert!(!named, "{} names {carrier}: {line}", path.display());
+            }
+        }
+    }
+    assert!(read > 1, "the check read the crate's sources");
+}

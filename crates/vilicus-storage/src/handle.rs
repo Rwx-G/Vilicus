@@ -2,9 +2,10 @@
 //!
 //! Every connection is set up in the order of D126, D127, D132 and D136, before its authorizer
 //! is installed, because SQLCipher pragmas go through the authorizer: the extension loading C
-//! API is turned off, the file is keyed with its raw key, the setup pragmas run,
-//! `SQLITE_DBCONFIG_DEFENSIVE` is enabled, every value is read back, and the key epoch of the
-//! sidecar is compared with the file's `_meta`; only then is the role's policy installed.
+//! API is turned off, the file is keyed with its raw key's text, lent for that call, the setup
+//! pragmas run, `SQLITE_DBCONFIG_DEFENSIVE` is enabled, every value is read back, and the key
+//! epoch of the sidecar is compared with the file's `_meta`; only then is the role's policy
+//! installed.
 //!
 //! A handle never gives out its `rusqlite::Connection`, whose `authorizer` and `set_db_config`
 //! methods would undo that setup.
@@ -24,7 +25,6 @@ use rusqlite::config::DbConfig;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Params, Row, Statement};
 use vilicus_types::{Id, UtcMillis, is_vocabulary_label};
-use zeroize::Zeroizing;
 
 use crate::authorizer::{self, Policy};
 use crate::core_schema::{CORE_MIGRATIONS, CORE_SCHEMA_VERSION};
@@ -265,11 +265,54 @@ impl Settings {
     }
 }
 
-/// Keys `connection` with the raw 256-bit `key`, in SQLCipher's `x'<64 hex digits>'` form, which
-/// skips SQLCipher's passphrase KDF (D2, AD-5), then reads the schema so a wrong key fails here.
-/// The hex form lives in one buffer allocated at its final size and wiped on drop (AD-4, AC11).
-pub(crate) fn key_connection(connection: &Connection, key: &[u8; 32]) -> Result<()> {
-    ffi::key(connection, &raw_key_text(key))?;
+/// Bytes of SQLCipher's raw key text of a 256-bit key: `x'`, its 64 lowercase hex digits, `'`.
+pub const KEY_TEXT_LEN: usize = 2 + 2 * 32 + 1;
+
+/// What keys a connection to a file: SQLCipher's raw key text of the file's 256-bit key, `x'`, its
+/// 64 lowercase hex digits, then `'` ([`KEY_TEXT_LEN`] bytes), which skips SQLCipher's passphrase
+/// KDF (D2, AD-5). The text is lent for the one call that keys a connection and never kept: the
+/// Core lends the text `vilicus_crypto` writes from a file key in its locked pool (spine AD-4,
+/// D154), so this crate holds no key text of its own. Test code implements it over a fixed text,
+/// with a type of its own; the product implements it for the Core's file keys only.
+pub trait FileKeying {
+    /// Lends the key text to `key_with`, which keys a connection with it, and returns what
+    /// `key_with` returned; [`Error::KeyUnavailable`] when the text cannot be lent.
+    fn lend_key_text(&self, key_with: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()>;
+}
+
+/// Refuses a key text that is not `x'`, 64 lowercase hex digits, then `'`, which SQLCipher would
+/// otherwise take for a passphrase and stretch into another key ([`Error::MalformedKeyText`]).
+/// The digits are checked without a branch on any of them, since they are the key.
+fn check_key_text(text: &[u8]) -> Result<()> {
+    let [b'x', b'\'', digits @ .., b'\''] = text else {
+        return Err(Error::MalformedKeyText);
+    };
+    if digits.len() != KEY_TEXT_LEN - 3 {
+        return Err(Error::MalformedKeyText);
+    }
+    let mut outside = 0_i16;
+    for byte in digits {
+        let digit = i16::from(*byte) - i16::from(b'0');
+        let letter = i16::from(*byte) - i16::from(b'a');
+        // Each term is -1 when the byte is outside its range and 0 inside it.
+        let not_digit = (digit | (9 - digit)) >> 15;
+        let not_letter = (letter | (5 - letter)) >> 15;
+        outside |= not_digit & not_letter;
+    }
+    if outside == 0 {
+        Ok(())
+    } else {
+        Err(Error::MalformedKeyText)
+    }
+}
+
+/// Keys `connection` with the key text `key` lends, through `sqlite3_key_v2` so that no SQL text
+/// holds it (AC11 of Story 3.1), then reads the schema so a wrong key fails here.
+pub(crate) fn key_connection(connection: &Connection, key: &dyn FileKeying) -> Result<()> {
+    key.lend_key_text(&mut |text| {
+        check_key_text(text)?;
+        Ok(ffi::key(connection, text)?)
+    })?;
     match connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
         row.get::<_, i64>(0)
     }) {
@@ -281,25 +324,11 @@ pub(crate) fn key_connection(connection: &Connection, key: &[u8; 32]) -> Result<
     }
 }
 
-/// The `x'<64 hex digits>'` form of `key`, built in place in a buffer of its final size, so no
-/// reallocation leaves an unwiped copy, and wiped when dropped.
-pub(crate) fn raw_key_text(key: &[u8; 32]) -> Zeroizing<Vec<u8>> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut text = Zeroizing::new(Vec::with_capacity(2 + 2 * key.len() + 1));
-    text.extend_from_slice(b"x'");
-    for byte in key {
-        text.push(HEX[usize::from(byte >> 4)]);
-        text.push(HEX[usize::from(byte & 0x0f)]);
-    }
-    text.push(b'\'');
-    text
-}
-
 /// Opens and sets up a connection to `file` in the order of the module documentation, without
 /// its authorizer.
 pub(crate) fn connect(
     file: &ModuleFile,
-    key: &[u8; 32],
+    key: &dyn FileKeying,
     setup: Setup,
     create: bool,
 ) -> Result<(Connection, Settings)> {
@@ -310,10 +339,19 @@ pub(crate) fn connect(
 /// of a backup. No `SQLITE_OPEN_URI`, so a path is never read as a URI.
 pub(crate) fn connect_path(
     path: &Path,
-    key: &[u8; 32],
+    key: &dyn FileKeying,
     setup: Setup,
     create: bool,
 ) -> Result<(Connection, Settings)> {
+    let connection = open_path(path, create)?;
+    key_connection(&connection, key)?;
+    let settings = set_up(&connection, setup)?;
+    Ok((connection, settings))
+}
+
+/// A new connection to `path`, read-write, created when `create`, with no URI, its busy timeout
+/// and the extension loading C API off: the first steps of every setup, before the key.
+pub(crate) fn open_path(path: &Path, create: bool) -> Result<Connection> {
     let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     if create {
         flags |= OpenFlags::SQLITE_OPEN_CREATE;
@@ -321,7 +359,12 @@ pub(crate) fn connect_path(
     let connection = Connection::open_with_flags(path, flags)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
     ffi::set_extension_loading_api(&connection, false)?;
-    key_connection(&connection, key)?;
+    Ok(connection)
+}
+
+/// The setup pragmas of `setup` and `SQLITE_DBCONFIG_DEFENSIVE` on a connection already keyed,
+/// every value read back: the steps after the key and before the authorizer.
+pub(crate) fn set_up(connection: &Connection, setup: Setup) -> Result<Settings> {
     connection.pragma_update(None, "trusted_schema", false)?;
     connection.pragma_update(None, "secure_delete", true)?;
     connection.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
@@ -331,8 +374,7 @@ pub(crate) fn connect_path(
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "query_only", !setup.writes())?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-    let settings = Settings::read(&connection)?.require(setup)?;
-    Ok((connection, settings))
+    Settings::read(connection)?.require(setup)
 }
 
 /// The key epoch the file's `_meta` table holds.
@@ -376,10 +418,6 @@ pub(crate) fn checked_epoch(file: &ModuleFile, connection: &Connection) -> Resul
     }
 }
 
-fn wal_is_empty(file: &ModuleFile) -> Result<bool> {
-    wal_of_is_empty(&file.wal_path())
-}
-
 pub(crate) fn wal_of_is_empty(wal: &Path) -> Result<bool> {
     match std::fs::metadata(wal) {
         Ok(metadata) => Ok(metadata.len() == 0),
@@ -400,13 +438,22 @@ pub(crate) fn checkpoint_until_empty(
     connection: &Connection,
     observer: Option<&CheckpointRetryObserver>,
 ) -> Result<u32> {
+    checkpoint_wal_until_empty(&file.wal_path(), connection, observer)
+}
+
+/// [`checkpoint_until_empty`] on the connection of any database whose WAL is `wal`.
+pub(crate) fn checkpoint_wal_until_empty(
+    wal: &Path,
+    connection: &Connection,
+    observer: Option<&CheckpointRetryObserver>,
+) -> Result<u32> {
     let mut last = None;
     for attempt in 0..CHECKPOINT_ATTEMPTS {
         if attempt > 0 {
             thread::sleep(CHECKPOINT_PAUSE);
         }
         let frames = ffi::checkpoint_truncate(connection)?;
-        if !frames.busy && wal_is_empty(file)? {
+        if !frames.busy && wal_of_is_empty(wal)? {
             return Ok(attempt + 1);
         }
         if let Some(observer) = observer {
@@ -496,18 +543,18 @@ impl<R: Role> core::fmt::Debug for Handle<R> {
     }
 }
 
-/// Opens `file` in role `R` with its raw 256-bit `key` (AD-5, D2): never a passphrase through
-/// SQLCipher's KDF. Fails with [`Error::WrongKey`] when the key does not open the file, with
+/// Opens `file` in role `R`, keyed by `key` (AD-5, D2): its raw key's text, never a passphrase
+/// through SQLCipher's KDF; [`Error::MalformedKeyText`] for a text of another shape. Fails with [`Error::WrongKey`] when the key does not open the file, with
 /// [`Error::SetupMismatch`] when a setting does not read back as set, and with
 /// [`Error::EpochMismatch`] when the sidecar and `_meta` disagree.
-pub fn open<R: Role>(file: &ModuleFile, key: &[u8; 32]) -> Result<Handle<R>> {
+pub fn open<R: Role>(file: &ModuleFile, key: &dyn FileKeying) -> Result<Handle<R>> {
     let setup = Setup::Role(R::KIND);
     let (connection, settings) = connect(file, key, setup, false)?;
     let epoch = checked_epoch(file, &connection)?;
     Handle::guarded(connection, file, epoch, settings)
 }
 
-/// Creates `file` with its raw `key` and key epoch, and returns its write handle.
+/// Creates `file`, keyed by `key` at the key epoch `epoch`, and returns its write handle.
 ///
 /// The file is built under [`ModuleFile::staging_path`] with `_meta` and the key epoch, then the
 /// Core track's migrations, each through the migration runner, so the file's Core tables are
@@ -517,7 +564,7 @@ pub fn open<R: Role>(file: &ModuleFile, key: &[u8; 32]) -> Result<Handle<R>> {
 /// interrupted `create`, which never held module data, and the next `create` discards it.
 /// A sidecar with neither a file nor a staging file is not explained by `create`, and fails with
 /// [`Error::EpochSidecarWithoutFile`].
-pub fn create(file: &ModuleFile, key: &[u8; 32], epoch: KeyEpoch) -> Result<Handle<Write>> {
+pub fn create(file: &ModuleFile, key: &dyn FileKeying, epoch: KeyEpoch) -> Result<Handle<Write>> {
     let path = file.path();
     if path.exists() {
         return Err(Error::AlreadyExists(path));
@@ -547,7 +594,7 @@ pub fn create(file: &ModuleFile, key: &[u8; 32], epoch: KeyEpoch) -> Result<Hand
 
 /// The staging file of `create`: keyed, set up like a writer, holding `_meta` and the Core
 /// tables, closed after a TRUNCATE checkpoint so the database file alone holds them.
-fn build_new_file(staging: &Path, key: &[u8; 32], epoch: KeyEpoch) -> Result<()> {
+fn build_new_file(staging: &Path, key: &dyn FileKeying, epoch: KeyEpoch) -> Result<()> {
     let (mut connection, _) = connect_path(staging, key, Setup::Role(RoleKind::Write), true)?;
     let built = write_new_meta(&connection, epoch).and_then(|()| {
         (1..=CORE_SCHEMA_VERSION).try_for_each(|version| {
@@ -796,6 +843,65 @@ impl Handle<Write> {
         file::sync_parent(&self.file.epoch_path())?;
         self.epoch = epoch;
         Ok(())
+    }
+
+    /// Re-keys the file under `key` at the key epoch `epoch` (AD-5, `doc/key-management.md` section
+    /// 8, "Database keys"), in durable steps: the WAL checkpointed empty, so no page under the old
+    /// key stays in it; the pending sidecar `<file>.epoch.next`; every page re-encrypted under the
+    /// new key with `sqlite3_rekey_v2`, in one transaction; `_meta` written under the Core policy;
+    /// the WAL checkpointed empty again, so the file alone holds the new pages; then the pending
+    /// sidecar renamed over `<file>.epoch`. The caller holds the file's only connection, this one,
+    /// as a re-key does (D151): another connection would still read the pages under the old key.
+    ///
+    /// Before the pending sidecar is renamed, the file is read back on a fresh connection keyed
+    /// with `key`, and its `_meta` must hold `epoch`: SQLCipher installs the new key whether or not
+    /// its re-key's commit succeeded, so the call's success alone proves nothing (story 4.3
+    /// review, L4).
+    ///
+    /// A failure before the pages are re-encrypted removes the pending sidecar, and the file stays
+    /// under its key and epoch; a failure after it, the read-back's included, or a crash anywhere,
+    /// leaves the pending sidecar, and every later open fails with
+    /// [`Error::EpochTransitionPending`] naming both epochs, which the Core resolves by the key
+    /// that opens the file, rewriting `_meta` to that key's epoch when the pages were re-encrypted
+    /// before `_meta` was.
+    pub fn rekey(&mut self, key: &dyn FileKeying, epoch: KeyEpoch) -> Result<()> {
+        self.require_no_transaction()?;
+        checkpoint_until_empty(&self.file, self.connection(), None)?;
+        let pending = self.file.pending_epoch_path();
+        file::write_sidecar(&pending, epoch)?;
+        let connection = self.connection();
+        let rekeyed = key.lend_key_text(&mut |text| {
+            check_key_text(text)?;
+            Ok(ffi::rekey(connection, text)?)
+        });
+        if let Err(error) = rekeyed {
+            return Err(remove_if_present(&pending).err().unwrap_or(error));
+        }
+        self.update_meta(epoch)?;
+        checkpoint_until_empty(&self.file, self.connection(), None)?;
+        self.read_back(key, epoch)?;
+        std::fs::rename(&pending, self.file.epoch_path())?;
+        file::sync_parent(&self.file.epoch_path())?;
+        self.epoch = epoch;
+        Ok(())
+    }
+
+    /// Opens the file again on a fresh connection keyed with `key` and checks that its `_meta`
+    /// holds `epoch`: [`Error::WrongKey`] when the key does not open it, [`Error::EpochMismatch`]
+    /// when `_meta` holds another epoch.
+    fn read_back(&self, key: &dyn FileKeying, epoch: KeyEpoch) -> Result<()> {
+        let (connection, _) = connect(&self.file, key, Setup::Maintenance, false)?;
+        let found = meta_epoch(&self.file, &connection);
+        checkpoint_and_close(connection)?;
+        let found = found?;
+        if found == epoch {
+            Ok(())
+        } else {
+            Err(Error::EpochMismatch {
+                sidecar: epoch,
+                file: found,
+            })
+        }
     }
 
     /// Records `label` as a confirmed label of the reviewed vocabulary `vocabulary` in this file,

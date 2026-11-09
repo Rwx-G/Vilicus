@@ -44,14 +44,14 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by num-traits. cargo vet suggests `cargo vet diff autocfg 1.5.0 1.5.1` (5 files changed, 50 insertions(+), 21 deletions(-))."
 
 [[exemptions.aws-lc-rs]]
-version = "1.18.2"
+version = "1.19.0"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. The cryptographic library of the spine's Stack, a normal dependency of vilicus-crypto since Story 3.7 (SHA-256 of migrations), so safe-to-deploy; also in the dev-dependency tree of vilicus-proto (vector generator and tests) and of vilicus-core (page decryption of the E17 file inspection tests, Story 3.6); required by vilicus-crypto, vilicus-proto and vilicus-core. cargo vet suggests `cargo vet inspect aws-lc-rs 1.18.2` (34023 lines)."
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. The cryptographic library of the spine's Stack, a normal dependency of vilicus-crypto since Story 3.7 (SHA-256 of migrations), so safe-to-deploy; also in the dev-dependency tree of vilicus-proto (vector generator and tests) and of vilicus-core (page decryption of the E17 file inspection tests, Story 3.6); required by vilicus-crypto, vilicus-proto and vilicus-core."
 
 [[exemptions.aws-lc-sys]]
-version = "0.46.0"
+version = "0.47.0"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. In the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; also in the dev-dependency tree of vilicus-proto and vilicus-core; required by aws-lc-rs. cargo vet suggests `cargo vet inspect aws-lc-sys 0.46.0` (2089732 lines)."
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. In the tree of aws-lc-rs 1.19.0 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; also in the dev-dependency tree of vilicus-proto and vilicus-core; required by aws-lc-rs."
 
 [[exemptions.base64ct]]
 version = "1.8.3"
@@ -74,9 +74,9 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 4.4), exempted at this exact version only. In the tree of argon2 0.6.0 (D129, usage rule U1 of doc/qa/argon2-review.md, which reviewed the code argon2 reaches in it); a normal dependency of vilicus-crypto since Story 4.4, so safe-to-deploy; required by digest. cargo vet suggests `cargo vet diff block-buffer 0.10.4 0.12.1` (9 files changed, 964 insertions(+), 281 deletions(-))."
 
 [[exemptions.cc]]
-version = "1.9.0"
+version = "1.11.1"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cmake, aws-lc-sys, and 1 other. cargo vet suggests `cargo vet diff cc 1.2.5 1.9.0` (42 files changed, 8939 insertions(+), 7782 deletions(-))."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cmake, aws-lc-sys, and 1 other., 7782 deletions(-))."
 
 [[exemptions.cfg-if]]
 version = "1.0.5"
@@ -91,7 +91,7 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 [[exemptions.cmake]]
 version = "0.1.58"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. A build dependency of aws-lc-sys, in the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; aws-lc-sys does not run cmake on Linux (ci/build_time_code.toml); required by aws-lc-sys. cargo vet suggests `cargo vet diff cmake 0.1.50 0.1.58` (7 files changed, 458 insertions(+), 144 deletions(-))."
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. A build dependency of aws-lc-sys, in the tree of aws-lc-rs 1.19.0 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; aws-lc-sys does not run cmake on Linux (ci/build_time_code.toml); required by aws-lc-sys. cargo vet suggests `cargo vet diff cmake 0.1.50 0.1.58` (7 files changed, 458 insertions(+), 144 deletions(-))."
 
 [[exemptions.cmov]]
 version = "0.5.4"
@@ -131,7 +131,7 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 [[exemptions.fs_extra]]
 version = "1.3.0"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. A build dependency of aws-lc-sys, in the tree of aws-lc-rs 1.18.2 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; required by aws-lc-sys. cargo vet suggests `cargo vet inspect fs_extra 1.3.0` (12715 lines)."
+notes = "Not reviewed in this project (Stories 2.5 and 3.7), exempted at this exact version only. A build dependency of aws-lc-sys, in the tree of aws-lc-rs 1.19.0 (spine Stack), a normal dependency of vilicus-crypto since Story 3.7, so safe-to-deploy; required by aws-lc-sys. cargo vet suggests `cargo vet inspect fs_extra 1.3.0` (12715 lines)."
 
 [[exemptions.futures-task]]
 version = "0.3.21"
@@ -164,9 +164,9 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono. cargo vet suggests `cargo vet diff iana-time-zone 0.1.64 0.1.65` (10 files changed, 147 insertions(+), 32 deletions(-))."
 
 [[exemptions.itoa]]
-version = "1.0.18"
+version = "1.0.19"
 criteria = "safe-to-run"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by serde_json. cargo vet suggests `cargo vet diff itoa 1.0.15 1.0.18` (9 files changed, 432 insertions(+), 291 deletions(-))."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by serde_json., 291 deletions(-))."
 
 [[exemptions.jobserver]]
 version = "0.1.35"
@@ -174,9 +174,9 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by cc. cargo vet suggests `cargo vet inspect jobserver 0.1.35` (2969 lines)."
 
 [[exemptions.js-sys]]
-version = "0.3.106"
+version = "0.3.107"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono and iana-time-zone. cargo vet suggests `cargo vet inspect js-sys 0.3.106` (19473 lines)."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono and iana-time-zone."
 
 [[exemptions.libc]]
 version = "0.2.191"
@@ -194,19 +194,14 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. The SQLite bindings of rusqlite 0.41.1 (spine Stack), used with its `sqlcipher` and `bundled_bindings` features: its build script probes pkg-config for sqlcipher, copies prebuilt bindings and asks for -lsqlcipher; the SQLite it ships is not compiled (vilicus-storage compiles the vendored SQLCipher 4.20.0, D143, D157); required by rusqlite. Moved from 0.38.2 for RUSTSEC-2026-0459 (D157). cargo vet suggests `cargo vet inspect libsqlite3-sys 0.39.1` (mostly the unused SQLite amalgamation)."
 
 [[exemptions.log]]
-version = "0.4.34"
+version = "0.4.35"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by iana-time-zone. cargo vet suggests `cargo vet diff log 0.4.29 0.4.34` (11 files changed, 368 insertions(+), 67 deletions(-))."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by iana-time-zone., 67 deletions(-))."
 
 [[exemptions.memchr]]
 version = "2.8.3"
 criteria = "safe-to-run"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. Dev-dependency tree of vilicus-proto (vector generator and tests), never in a release artefact; required by serde_json. cargo vet suggests `cargo vet diff memchr 2.7.5 2.8.3` (15 files changed, 157 insertions(+), 45 deletions(-))."
-
-[[exemptions.once_cell]]
-version = "1.12.0"
-criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at 1.12.0, not the locked 1.21.4: cargo vet chose it as the base of the imported delta audits that reach the locked version, so a later version fails `cargo vet --locked` until it is audited, exempted, or covered by a deliberately refreshed import. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen. cargo vet suggests `cargo vet inspect once_cell 1.12.0` (3974 lines)."
 
 [[exemptions.paste]]
 version = "1.0.10"
@@ -264,9 +259,9 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by futures-util. cargo vet suggests `cargo vet diff slab 0.4.8 0.4.12` (7 files changed, 256 insertions(+), 90 deletions(-))."
 
 [[exemptions.smallvec]]
-version = "1.16.3"
+version = "1.16.5"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.41.1 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff smallvec 1.15.2 1.16.3` (6 files changed, 618 insertions(+), 421 deletions(-))."
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.41.1 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite., 421 deletions(-))."
 
 [[exemptions.syn]]
 version = "2.0.119"
@@ -274,7 +269,7 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by zerocopy-derive and 2 others. cargo vet suggests `cargo vet diff syn 3.0.9 2.0.119` (54 files changed, 2595 insertions(+), 4224 deletions(-))."
 
 [[exemptions.syn]]
-version = "3.0.9"
+version = "3.0.10"
 criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of serde_derive; no audited base version in the imported sets, so a full review (cargo vet inspect) is outstanding."
 
@@ -304,24 +299,24 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.4), exempted at this exact version only. Compile-time dependency of proc-macro2 and syn; cargo vet suggests a delta audit from 1.0.18."
 
 [[exemptions.wasm-bindgen]]
-version = "0.2.129"
+version = "0.2.130"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono, js-sys, and iana-time-zone. cargo vet suggests `cargo vet inspect wasm-bindgen 0.2.129` (8893 lines)."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by chrono, js-sys, and iana-time-zone."
 
 [[exemptions.wasm-bindgen-macro]]
-version = "0.2.129"
+version = "0.2.130"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen. cargo vet suggests `cargo vet inspect wasm-bindgen-macro 0.2.129` (449 lines)."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen."
 
 [[exemptions.wasm-bindgen-macro-support]]
-version = "0.2.129"
+version = "0.2.130"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen-macro. cargo vet suggests `cargo vet diff wasm-bindgen-macro-support 0.2.92 0.2.129` (10 files changed, 11251 insertions(+), 458 deletions(-))."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen-macro., 458 deletions(-))."
 
 [[exemptions.wasm-bindgen-shared]]
-version = "0.2.129"
+version = "0.2.130"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen and wasm-bindgen-macro-support. cargo vet suggests `cargo vet diff wasm-bindgen-shared 0.2.92 0.2.129` (7 files changed, 506 insertions(+), 36 deletions(-))."
+notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by wasm-bindgen and wasm-bindgen-macro-support., 36 deletions(-))."
 
 [[exemptions.windows-core]]
 version = "0.62.2"

@@ -21,12 +21,18 @@ env:
   CARGO_TERM_COLOR: always
 
 # Each merge gate of doc/architecture-spine.md AD-33 is its own job, so a gate is added as a job
-# without touching the others. Every job installs the toolchain rust-toolchain.toml names. Cargo
-# tools come from .github/actions/cargo-tool at the versions of the spine's Stack table, which
-# ci/test_check_supply_chain.py compares with the `with:` blocks below.
+# without touching the others. No job waits for another: one run shows every failing gate, and
+# the fuzz job alone sets its length. Job names read `<group> - <what it proves>`; the decisions
+# behind a job are in the comment above it. Jobs that build on the runner install the toolchain
+# rust-toolchain.toml names; key-memory, argon2id and sqlcipher-regenerate run in a container of
+# the pinned image instead. Cargo tools come from .github/actions/cargo-tool at the versions of
+# the spine's Stack table, which ci/test_check_supply_chain.py compares with the `with:` blocks
+# below.
 jobs:
+  # AD-3, D29, D28, D143, FR-109: the crate graph, the manifests, where unsafe code may live, and
+  # what vendor/ and the SQLCipher directory hold, with the tests of those checks.
   workspace-policy:
-    name: Crate graph, manifests and unsafe code (AD-3, D29)
+    name: Policy - workspace, unsafe code and vendored sources
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -52,7 +58,7 @@ jobs:
 
   # Clippy enforces the `// SAFETY:` comment D140 requires on each unsafe block (Story 2.1 AC5).
   lint:
-    name: Format and lint
+    name: Build - format and lint
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -75,7 +81,7 @@ jobs:
   # --frozen is --locked without the network, and ci/cargo-vendored.toml replaces crates.io by
   # vendor/: third-party crates can only come from there.
   build-and-test:
-    name: Build and test
+    name: Build - compile and test
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -95,12 +101,12 @@ jobs:
       - name: Test
         run: cargo test --workspace --frozen --config ci/cargo-vendored.toml
 
-  # Story 4.2 (AC2, AC6, AC7, AC9, AC10; D131): the key memory regression harness of
+  # Story 4.2 (AC2, AC6, AC7, AC9, AC10; D131, E16): the key memory regression harness of
   # crates/vilicus-crypto/examples/key_memory on the release build, each group in a container of
   # the pinned image with only the capabilities and limits it needs (the docstring of the script
   # lists them). The memory scans need CAP_SYS_PTRACE, which build-and-test does not have.
   key-memory:
-    name: Key memory regression (D131, E16)
+    name: Crypto - key memory regression
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -116,7 +122,7 @@ jobs:
   # oracles/argon2id, outside the workspace (D153), which cross-tests the Core's Argon2id against
   # phc-winner-argon2 (Debian 13's libargon2-dev) and OpenSSL 3.5's EVP_KDF-ARGON2.
   argon2id:
-    name: Argon2id at real costs and its two oracles (D128, D129)
+    name: Crypto - Argon2id at real costs and its oracles
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -126,8 +132,9 @@ jobs:
       - name: Run the real-cost tests and the cross-tests in a container
         run: bash oracles/argon2id/run.sh
 
+  # D28: licences, duplicate versions, advisories and sources of every crate of the lockfile.
   deny:
-    name: Licences, duplicates, advisories and sources (cargo deny)
+    name: Supply chain - cargo deny
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -143,9 +150,10 @@ jobs:
       - name: cargo deny
         run: cargo deny --locked check
 
-  # --locked uses supply-chain/imports.lock and fetches no new audit.
+  # D28: every crate is audited or exempted at its exact version. --locked uses
+  # supply-chain/imports.lock and fetches no new audit.
   vet:
-    name: Audited dependencies (cargo vet)
+    name: Supply chain - cargo vet
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -162,7 +170,7 @@ jobs:
         run: cargo vet --locked
 
   audit:
-    name: Security advisories (cargo audit)
+    name: Supply chain - cargo audit
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -192,7 +200,7 @@ jobs:
   # dependency. A finding fails the job and is never retried: ci/fuzz.py prints each failing
   # input as hex, and the upload keeps the inputs for the commit that fixes them.
   fuzz:
-    name: Coverage-guided fuzzing of vilicus-proto (D130)
+    name: Fuzz - vilicus-proto decoders
     runs-on: ubuntu-24.04
     timeout-minutes: 200
     env:
@@ -225,11 +233,12 @@ jobs:
 
   # D61, D120: the RFC 9180 vector, the cross-test and the other checks of the HPKE spike, plus
   # an advisory gate on its lockfile (gate HPKE-3). The job always runs and ci/must_run.py filters
-  # paths inside it: a workflow-level `paths` filter would leave a required check pending on every
-  # other pull request. Without a change under the watched paths, the steps are skipped and the
-  # job passes; on schedule and workflow_dispatch they always run.
+  # paths inside it, so that it can be a required check: a workflow-level `paths` filter would
+  # leave such a check pending on every other pull request. Without a change under the watched
+  # paths, the steps are skipped and the job passes; on schedule and workflow_dispatch they always
+  # run.
   hpke-review:
-    name: HPKE spike vectors and cross-test (D61, D120)
+    name: Crypto - HPKE vectors and cross-test
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -270,11 +279,11 @@ jobs:
 
   # D143: regenerates the vendored SQLCipher amalgamation from its official release tag and
   # compares it byte for byte with the committed files, which ci/check_sqlcipher_source.py only
-  # checks against SHA256SUMS. Path-filtered inside the job like hpke-review, so it stays a
-  # required check; it always runs on the weekly schedule and on manual runs. The pinned build
+  # checks against SHA256SUMS. Path-filtered inside the job like hpke-review; it always runs on
+  # the weekly schedule and on manual runs. The pinned build
   # image clones the tag, the only network access, and the checkout is mounted read-only.
   sqlcipher-regenerate:
-    name: SQLCipher amalgamation regenerated from its tag (D143)
+    name: Supply chain - SQLCipher matches its tag
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -296,7 +305,23 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         run: docker run --rm -v "$PWD:/w:ro" -w /w rust:1.99-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a bash crates/vilicus-storage/sqlcipher/regenerate.sh
 
-  # Story 2.3 (AD-33): the Debian 13 VM harness of ci/vm/README.md, not yet a required check. It
+  # D157: cargo-audit and cargo-deny judge crates, so a fix in SQLCipher that no advisory ties to
+  # a crate reaches neither. Fails when the official repository has a release of the pinned major
+  # version newer than the tag regenerate.sh names. Weekly and on manual runs only, so that a
+  # release upstream never fails an unrelated pull request.
+  sqlcipher-upstream:
+    name: Supply chain - SQLCipher is the latest of its series
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare the pinned tag with the official releases
+        run: python3 ci/check_sqlcipher_upstream.py
+
+  # Story 2.3 (AD-33): the Debian 13 VM harness of ci/vm/README.md. It
   # boots the cloud image of e2e/vm/IMAGE.lock with QEMU and KVM, systemd as PID 1, and runs the
   # built binary, the smoke unit, a privileged systemd container and the release gates of Story
   # 2.6 in the guest. The first step
@@ -304,7 +329,7 @@ jobs:
   # in the e2e/vm container. The base image is cached by IMAGE.lock and verified against its
   # SHA512 on every boot, so a stale or altered cache entry fails the boot.
   vm-smoke:
-    name: Debian 13 VM smoke test (AD-33)
+    name: End to end - Debian 13 VM smoke test
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -328,14 +353,14 @@ jobs:
           key: debian-cloud-image-${{ hashFiles('e2e/vm/IMAGE.lock') }}
       - name: Install the pinned toolchain
         run: rustup toolchain install
-      # One build per artefact of ci/release_gates.py, the shipped vilicus first, then the testbed
-      # (vilicus-testbed and the test doubles), so that they never share a build.
       # D143: vilicus-storage compiles SQLCipher against the system OpenSSL headers and links its
       # libcrypto; the runner image provides them, and this step makes that dependency explicit.
       - name: Check the system OpenSSL that SQLCipher builds against (D143)
         run: |
           dpkg -s libssl-dev | grep -E '^(Status|Version):'
           pkg-config --modversion openssl
+      # One build per artefact of ci/release_gates.py, the shipped vilicus first, then the testbed
+      # (vilicus-testbed and the test doubles), so that they never share a build.
       - name: Build the package and testbed artefacts
         run: python3 ci/release_gates.py build
       - name: Boot the Debian 13 VM

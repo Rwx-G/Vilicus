@@ -20,6 +20,7 @@
 //! which the migration policy allows like any table of the module, and every connection runs with
 //! `SQLITE_DBCONFIG_DEFENSIVE`, under which module SQL cannot write a shadow table directly.
 
+use crate::ffi;
 use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
@@ -448,9 +449,10 @@ pub(crate) fn authorize(policy: Policy, context: &AuthContext<'_>) -> Authorizat
 /// Installs `policy` as the authorizer of `connection`. SQLite expires every statement prepared
 /// before the call, so a cached statement cannot bypass it.
 pub(crate) fn install(connection: &Connection, policy: Policy) -> rusqlite::Result<()> {
-    connection.authorizer(Some(move |context: AuthContext<'_>| {
-        authorize(policy, &context)
-    }))
+    ffi::set_authorizer(
+        connection,
+        Some(move |context: AuthContext<'_>| authorize(policy, &context)),
+    )
 }
 
 /// The decision of [`authorize`] for an action of top-level SQL; any action a trigger body or a
@@ -466,16 +468,17 @@ pub(crate) fn authorize_direct(policy: Policy, context: &AuthContext<'_>) -> Aut
 /// Installs `policy` as the authorizer of `connection`, denying every action a trigger or a view
 /// carries out ([`authorize_direct`]): the connection of `wrappers.db`, where none may run.
 pub(crate) fn install_direct(connection: &Connection, policy: Policy) -> rusqlite::Result<()> {
-    connection.authorizer(Some(move |context: AuthContext<'_>| {
-        authorize_direct(policy, &context)
-    }))
+    ffi::set_authorizer(
+        connection,
+        Some(move |context: AuthContext<'_>| authorize_direct(policy, &context)),
+    )
 }
 
 /// Removes the authorizer; only the migration runner does, around its own transaction control.
 /// The Core's own writes to `_meta` swap to [`Policy::Core`] instead, so even its statements stay
 /// confined.
 pub(crate) fn remove(connection: &Connection) -> rusqlite::Result<()> {
-    connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+    ffi::set_authorizer(connection, None::<fn(AuthContext<'_>) -> Authorization>)
 }
 
 #[cfg(test)]

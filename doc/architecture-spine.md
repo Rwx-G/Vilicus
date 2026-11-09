@@ -454,8 +454,8 @@ Events to a consumer that is not ready stay in the source outbox and do not coun
 | tokio | 1.53.2 |
 | axum / hyper | 0.8.9 / 1.12.0 |
 | rustls (aws-lc-rs provider) / tokio-rustls | 0.23.46 / 0.26.6 |
-| rusqlite with `sqlcipher` (links the SQLCipher of `vilicus-storage`, D143) | 0.40.2 |
-| SQLCipher (vendored amalgamation, built by `vilicus-storage`, D143) | 4.19.0 (tag v4.19.0) |
+| rusqlite with `sqlcipher` (links the SQLCipher of `vilicus-storage`, D143, D157) | 0.41.1 |
+| SQLCipher (vendored amalgamation, built by `vilicus-storage`, D143, D157) | 4.20.0 (tag v4.20.0) |
 | webauthn-rs | 0.5.5 (feature `danger-allow-state-serialisation`, for the step-up challenge only) |
 | argon2 | 0.6.0, pinned exactly, without the `parallel` feature |
 | aws-lc-rs (AES-256-GCM, HKDF) | as pulled by rustls 0.23.46 |

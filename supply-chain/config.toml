@@ -61,7 +61,7 @@ notes = "Not reviewed in this project (Story 4.4), exempted at this exact versio
 [[exemptions.bitflags]]
 version = "2.13.2"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.40.2 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff bitflags 2.11.1 2.13.2` (12 files changed, 641 insertions(+), 92 deletions(-))."
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.41.1 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff bitflags 2.11.1 2.13.2` (12 files changed, 641 insertions(+), 92 deletions(-))."
 
 [[exemptions.blake2]]
 version = "0.11.0"
@@ -189,9 +189,9 @@ criteria = "safe-to-run"
 notes = "Not reviewed in this project (Story 2.7), exempted at this exact version only. Fuzzing tree of vilicus-fuzz (owner approval), never in a release artefact; its build script compiles the bundled libFuzzer C++ sources with cc; required by vilicus-fuzz. cargo vet suggests `cargo vet diff libfuzzer-sys 0.4.7 0.4.13` (39 files changed, 728 insertions(+), 657 deletions(-))."
 
 [[exemptions.libsqlite3-sys]]
-version = "0.38.2"
+version = "0.39.1"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. The SQLite bindings of rusqlite 0.40.2 (spine Stack), used with its `sqlcipher` and `bundled_bindings` features: its build script probes pkg-config for sqlcipher, copies prebuilt bindings and asks for -lsqlcipher; the SQLCipher it ships is not compiled (vilicus-storage compiles the vendored 4.19.0, D143); required by rusqlite. cargo vet suggests `cargo vet inspect libsqlite3-sys 0.38.2` (598760 lines, mostly the unused SQLite and SQLCipher amalgamations)."
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. The SQLite bindings of rusqlite 0.41.1 (spine Stack), used with its `sqlcipher` and `bundled_bindings` features: its build script probes pkg-config for sqlcipher, copies prebuilt bindings and asks for -lsqlcipher; the SQLite it ships is not compiled (vilicus-storage compiles the vendored SQLCipher 4.20.0, D143, D157); required by rusqlite. Moved from 0.38.2 for RUSTSEC-2026-0459 (D157). cargo vet suggests `cargo vet inspect libsqlite3-sys 0.39.1` (mostly the unused SQLite amalgamation)."
 
 [[exemptions.log]]
 version = "0.4.34"
@@ -229,9 +229,9 @@ criteria = "safe-to-deploy"
 notes = "Not reviewed in this project (Story 2.5), exempted at this exact version only. In the tree of dcbor 0.25.2 (D130), or of the build of a crate in it; required by getrandom. cargo vet suggests `cargo vet inspect r-efi 6.0.0` (9953 lines)."
 
 [[exemptions.rusqlite]]
-version = "0.40.2"
+version = "0.41.1"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. The SQLite crate of the spine Stack, a normal dependency of vilicus-storage. cargo vet suggests `cargo vet inspect rusqlite 0.40.2` (23729 lines)."
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. The SQLite crate of the spine Stack, a normal dependency of vilicus-storage. Moved from 0.40.2 with libsqlite3-sys for RUSTSEC-2026-0459 (D157). cargo vet suggests `cargo vet inspect rusqlite 0.41.1`."
 
 [[exemptions.rustversion]]
 version = "1.0.23"
@@ -266,7 +266,7 @@ notes = "Not reviewed in this project (Story 2.5), exempted at this exact versio
 [[exemptions.smallvec]]
 version = "1.16.3"
 criteria = "safe-to-deploy"
-notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.40.2 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff smallvec 1.15.2 1.16.3` (6 files changed, 618 insertions(+), 421 deletions(-))."
+notes = "Not reviewed in this project (Story 3.1), exempted at this exact version only. In the tree of rusqlite 0.41.1 (spine Stack), a normal dependency of vilicus-storage; required by rusqlite. cargo vet suggests `cargo vet diff smallvec 1.15.2 1.16.3` (6 files changed, 618 insertions(+), 421 deletions(-))."
 
 [[exemptions.syn]]
 version = "2.0.119"

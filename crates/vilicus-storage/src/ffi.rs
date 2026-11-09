@@ -1,11 +1,13 @@
 //! The SQLite and SQLCipher C calls that `rusqlite` does not wrap safely (D140): the extension
-//! loading switch (D126), keying and re-keying from a key text the caller lends (AD-4) and the
-//! TRUNCATE checkpoint that the authorizer does not see (D132); and the one system call of the
+//! loading switch (D126), keying and re-keying from a key text the caller lends (AD-4), the
+//! TRUNCATE checkpoint that the authorizer does not see (D132) and the swap of the authorizer on
+//! a shared connection (D157); and the one system call of the
 //! maintenance path, the free space of a file system (`statvfs`, AD-23). Every `unsafe` block of
 //! the crate is here, each with the invariant it relies on; the functions are safe to call.
 
 use std::ffi::c_int;
 
+use rusqlite::hooks::{AuthContext, Authorization};
 use rusqlite::{Connection, ffi};
 
 fn check(code: c_int, what: &str) -> rusqlite::Result<()> {
@@ -107,6 +109,25 @@ pub(crate) fn rekey(connection: &Connection, key_text: &[u8]) -> rusqlite::Resul
         )
     };
     check(code, "re-key the database")
+}
+
+/// Installs `hook` as the authorizer of `connection`, or removes the authorizer with `None`.
+/// `sqlite3_set_authorizer` expires every statement prepared before the call. `rusqlite` 0.41
+/// takes `&mut Connection` for this, which neither a `Transaction` nor a handle's `&self` can
+/// give, and the policy of a connection changes under both (D157).
+#[allow(unsafe_code)] // Two calls; rusqlite has no authorizer setter on a shared connection (D157).
+pub(crate) fn set_authorizer<F>(connection: &Connection, hook: Option<F>) -> rusqlite::Result<()>
+where
+    F: for<'r> FnMut(AuthContext<'r>) -> Authorization + Send + 'static,
+{
+    // SAFETY: the handle is live for the call and used by one thread (`Connection` is not `Sync`).
+    // The alias does not own it: dropped, it leaves the handle open, and rusqlite stores the hook
+    // as client data of the handle, so the hook outlives the alias and is freed with the handle
+    // or by the next call. rusqlite asks for `&mut` so that a hook cannot be replaced from inside
+    // itself, which would free the closure it is running; every hook passed here only computes
+    // on its arguments and calls nothing in SQLite.
+    let mut alias = unsafe { Connection::from_handle(connection.handle()) }?;
+    alias.authorizer(hook)
 }
 
 /// The outcome of one `sqlite3_wal_checkpoint_v2` call in TRUNCATE mode.

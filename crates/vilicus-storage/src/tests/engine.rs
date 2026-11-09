@@ -11,7 +11,7 @@ use crate::{Migration, Read, Write, open};
 
 /// The version this build pins (D143); `sqlcipher/regenerate.sh` names the same release tag,
 /// which the test below compares.
-const PINNED_SQLCIPHER: &str = "4.19.0";
+const PINNED_SQLCIPHER: &str = "4.20.0";
 
 const REGENERATE_SCRIPT: &str = include_str!("../../sqlcipher/regenerate.sh");
 
